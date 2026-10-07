@@ -12,5 +12,12 @@ publish = false
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 service-orchestrator-domain.workspace = true
 thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+service-orchestrator-domain.workspace = true
+tokio = { version = "1.52", features = ["rt-multi-thread", "macros", "time"] }

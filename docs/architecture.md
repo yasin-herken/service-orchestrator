@@ -268,14 +268,52 @@ All meaningful operations are tasks. The task engine lives in the `execution`
 crate, one layer above the domain and below the application:
 
 - It owns task states (`queued`, `running`, `succeeded`, `failed`, `cancelled`,
-  `skipped`, `blocked`), dependency-aware scheduling, and bounded concurrency.
+  `skipped`, `blocked`), dependency-aware scheduling, bounded concurrency,
+  cancellation, retry, timeout, progress, events, and an in-memory task
+  registry.
 - The **application** layer submits tasks to the engine and supplies concrete
-  handlers; it does not implement scheduling itself.
-- Interfaces observe task status through application use cases; neither the TUI
-  nor MCP owns task execution.
+  executors; it does not implement scheduling itself.
+- Interfaces observe task status through application use cases or the engine's
+  query and event API; neither the TUI nor MCP owns task execution.
 
 Workflows are compositions of tasks and live in the same engine, so retry,
 timeout, cancellation, and failure propagation are defined once.
+
+### Engine shape
+
+```text
+TaskEngine ──> TaskStore (in-memory registry, dependency index)
+     │              ↑
+     └──> Scheduler ─┘        (event-driven, FIFO, bounded concurrency)
+              │
+       ExecutorRegistry       (TaskKind -> TaskExecutor)
+              │
+         TaskExecutor         (supplied by infrastructure)
+```
+
+- **Scheduler vs executor.** The scheduler answers *when* a task runs; an
+  executor answers *how*. The scheduler contains no per-operation branching:
+  concrete executors are registered against a `TaskKind` and looked up at run
+  time.
+- **State machine.** The engine defers to the domain `Task` state machine for
+  every transition; an illegal transition is rejected. Failure propagation
+  settles dependents to `queued` or `skipped` according to the task's
+  `DependencyPolicy` (`AllSucceeded` or `AnyCompleted`).
+- **Concurrency.** A single `tokio::sync::Semaphore` sized to
+  `max_parallel_tasks` guarantees `running_tasks <= max_parallel_tasks`;
+  `max_queued_tasks` provides optional backpressure.
+- **Cancellation** is cooperative through a per-task `Cancellation` token.
+- **Retry** is opt-in and happens within one `running` episode.
+- **Events** are published on an interface-neutral `broadcast` stream.
+- The engine captures a Tokio `Handle` but does not own a runtime, so the
+  composition root controls runtime creation and shutdown.
+- It depends only on `domain` (plus `tokio`/`async-trait`) and never on `tui`,
+  `mcp`, or concrete infrastructure.
+
+The full model, state machine, scheduler behaviour, cancellation and shutdown
+semantics, and test strategy are in `docs/task-engine.md`; the decisions behind
+them are in `docs/adr/005-task-engine.md`.
+
 
 ---
 
@@ -378,7 +416,11 @@ behavior lives in exactly one place.
   validated configuration.
 - `docs/adr/004-application-core.md` — the decision record for the shared
   application core.
+- `docs/adr/005-task-engine.md` — the decision record for the task engine and
+  scheduler.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
+- `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
+  dependencies, concurrency, cancellation, retry, timeout, events, shutdown.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

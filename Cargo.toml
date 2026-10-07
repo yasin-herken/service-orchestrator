@@ -26,10 +26,12 @@ unreachable_pub = "warn"
 # than per-crate) ensures every crate agrees on the same version and makes
 # dependency changes visible in a single place.
 [workspace.dependencies]
+async-trait = "0.1.89"
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.150"
 thiserror = "2.0.19"
 time = { version = "0.3.53", features = ["serde", "macros"] }
+tokio = { version = "1.52", features = ["rt", "sync", "time", "macros"] }
 toml = "0.8"
 
 # Internal crates. Path dependencies keep the workspace building offline and
