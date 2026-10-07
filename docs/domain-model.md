@@ -74,6 +74,7 @@ Workflow ──> WorkflowStep ──> TaskKind
 
 Task ──> TaskKind, TaskStatus, TaskProgress, TaskFailure
    ├── service? ──> ServiceId
+   ├── library? ──> LibraryId
    ├── workflow? ─> WorkflowId
    └── dependencies > TaskId
 
@@ -195,7 +196,7 @@ is the execution engine's responsibility.
 A `Task` is the domain representation of a unit of work:
 
 - `id: TaskId`, `kind: TaskKind`, `status: TaskStatus`;
-- optional `service` and `workflow` associations;
+- optional `service`, `library`, and `workflow` associations;
 - `created_at`, `started_at`, `finished_at` (`Timestamp`);
 - `progress: TaskProgress`, `error: Option<TaskFailure>`;
 - `dependencies: Vec<TaskId>`.
