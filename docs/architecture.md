@@ -314,10 +314,44 @@ The full model, state machine, scheduler behaviour, cancellation and shutdown
 semantics, and test strategy are in `docs/task-engine.md`; the decisions behind
 them are in `docs/adr/005-task-engine.md`.
 
+---
+
+## 11. Where the process manager belongs
+
+The process manager is the **only** component allowed to create, monitor, and
+terminate operating-system processes (`AGENTS.md` §15, §32). It lives in the
+`process` infrastructure crate and depends only on `domain` (plus `tokio`,
+`thiserror`, and, on Unix, `nix`).
+
+- It spawns, supervises, stops, and kills local processes from a structured
+  `ProcessSpec` (a program plus typed arguments — never a shell string), tracks
+  pids, captures `stdout` and `stderr` independently, enforces timeouts, and
+  applies a restart policy.
+- Each process is driven by one supervisor task that owns the Tokio `Child`, so
+  the rest of the system interacts only through a `ProcessHandle`. On Unix,
+  processes run in their own process group and are signalled as a group, so a
+  shell that spawned children never leaves orphans behind.
+- A requested stop is always graceful first (`SIGTERM` by default), escalates
+  to `SIGKILL` after a configurable grace period, and records an explicit
+  `ExitReason` (`Terminated`, `Cancelled`, `Killed`, `TimedOut`, ...).
+- It publishes interface-neutral lifecycle events and log lines over a bounded
+  broadcast channel, so the TUI, MCP, and logging subsystem each subscribe
+  independently. A live pid does not imply a healthy service; health is a
+  separate concern (`AGENTS.md` §16).
+- It integrates with the task engine's cooperative cancellation through
+  `spawn_with_cancellation(spec, future)` rather than depending on `execution`,
+  keeping the dependency edge in the caller and the manager usable on its own.
+- Git, build tooling, Liquibase, and health adapters must route process
+  execution through this manager instead of constructing `std::process::Command`
+  themselves.
+
+The full model, specification, lifecycle, registry, cancellation, logging, and
+test approach are in `docs/process-manager.md`; the decisions behind them are in
+`docs/adr/006-process-manager.md`.
 
 ---
 
-## 11. Enforcement and validation
+## 12. Enforcement and validation
 
 - Dependencies are declared exclusively through `[workspace.dependencies]` so
   boundaries are visible in one place.
@@ -336,7 +370,7 @@ them are in `docs/adr/005-task-engine.md`.
 
 ---
 
-## 12. Domain model
+## 13. Domain model
 
 The domain layer defines the vocabulary every other layer speaks. It lives in
 the `service-orchestrator-domain` crate and depends on no other workspace crate
@@ -374,7 +408,7 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 13. The application core
+## 14. The application core
 
 The `application` crate is the shared application core (`docs/application-core.md`).
 It is the one API the TUI, MCP, and any future interface call, so business
@@ -407,7 +441,7 @@ behavior lives in exactly one place.
   and `WorkflowDefinition` values to the `execution` engine; it never runs Git,
   Maven, npm, Liquibase, or processes itself.
 
-## 14. Related documents
+## 15. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -418,9 +452,13 @@ behavior lives in exactly one place.
   application core.
 - `docs/adr/005-task-engine.md` — the decision record for the task engine and
   scheduler.
+- `docs/adr/006-process-manager.md` — the decision record for the process
+  manager.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
   dependencies, concurrency, cancellation, retry, timeout, events, shutdown.
+- `docs/process-manager.md` — the process manager: specification, lifecycle,
+  supervision, registry, cancellation, logs, and events.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.
