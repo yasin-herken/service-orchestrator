@@ -13,3 +13,10 @@ workspace = true
 
 [dependencies]
 service-orchestrator-domain.workspace = true
+# Serialization is required for the raw TOML models. `serde` is compile-time
+# only and does not couple the crate to any runtime.
+serde.workspace = true
+# Structured configuration errors.
+thiserror.workspace = true
+# The TOML parser. TOML is contained to this crate; no other layer parses it.
+toml.workspace = true

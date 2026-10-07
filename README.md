@@ -18,9 +18,16 @@ remote backend.
 
 ## Status
 
-This repository currently contains the **architectural foundation only**:
-the Cargo workspace, crate boundaries, and design documentation. Business logic
-and interfaces are not implemented yet.
+This repository currently contains the **architectural foundation**: the Cargo
+workspace, crate boundaries, design documentation, the pure domain model, and
+the versioned configuration system. Execution, infrastructure, and interfaces
+are not implemented yet.
+
+Configuration is external and versioned. See
+[docs/configuration.md](docs/configuration.md) for the schema and
+[docs/adr/003-configuration-system.md](docs/adr/003-configuration-system.md)
+for the rationale. A complete example lives at
+[examples/config.toml](examples/config.toml).
 
 ## Architecture
 
