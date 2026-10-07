@@ -12,6 +12,9 @@ publish = false
 workspace = true
 
 [dependencies]
+serde.workspace = true
+service-orchestrator-config.workspace = true
 service-orchestrator-domain.workspace = true
 service-orchestrator-execution.workspace = true
 service-orchestrator-policy.workspace = true
+thiserror.workspace = true

@@ -53,9 +53,10 @@ From innermost to outermost:
 2. **Core services** — the task/workflow engine and the policy engine. They
    depend only on the domain.
 3. **Application** — use cases that coordinate the domain and the execution
-   engine, plus the port traits that infrastructure implements.
+   engine, plus the port traits that infrastructure implements. It consumes the
+   validated `Config` produced by the configuration system.
 4. **Infrastructure** — concrete adapters: Git, process management, build
-   tooling, Liquibase, health checks, logging.
+   tooling, Liquibase, health checks, logging, and configuration loading.
 5. **Interfaces** — TUI and MCP adapters.
 6. **Composition root** — the `service-orchestrator` binary. It wires concrete
    infrastructure into the application core and hands the core to an interface.
@@ -121,8 +122,8 @@ domain. Nothing inner knows about anything outer.
 | `domain` | Domain | Pure business concepts and rules. Depends on no workspace crate. |
 | `execution` | Core service | Task/workflow engine: state, dependency-aware scheduling, bounded concurrency, cancellation, retry, timeout, progress. |
 | `policy` | Core service | Permission model and policy engine (`READ`, `SAFE_WRITE`, `DESTRUCTIVE`). |
-| `config` | Infrastructure | Versioned configuration loading, parsing, validation, migration. Produces domain configuration values. |
-| `application` | Application | Use cases, orchestration, and infrastructure port traits. |
+| `config` | Infrastructure | Versioned configuration loading, parsing, validation, migration. Produces one validated `Config` for the application. |
+| `application` | Application | The shared application core: use cases (commands and queries), orchestration, policy application, and the ports infrastructure implements (`RuntimeStateStore`, `LogService`). Consumes `Config` and submits work to the `execution` engine. |
 | `git` | Infrastructure | Git adapter implementing the application Git port. |
 | `process` | Infrastructure | Local process lifecycle, state, ports, child processes, logs. |
 | `build` | Infrastructure | Build tooling (Maven, npm) via structured process execution. |
@@ -143,11 +144,9 @@ The intended direction, expressed as allowed Cargo dependencies:
 tui  ─────────┐
               │
 mcp  ─────────┼──> application ──> execution ──> domain
-              │            │    └──> policy  ──> domain
-future cli ───┘            │
+              │            │    ├──> policy  ──> domain
+future cli ───┘            │    └──> config  ──> domain
                            └──> domain
-
-config ─────────────────────> domain
 
 git, process, build, liquibase, health, logging
     ────────────────────────> application + domain   (implement ports)
@@ -159,7 +158,8 @@ service-orchestrator (root) ──> everything         (composition root)
 
 - `domain` depends on no workspace crate.
 - `execution` and `policy` depend only on `domain`.
-- `application` depends on `domain`, `execution`, and `policy`.
+- `application` depends on `domain`, `execution`, `policy`, and `config`. It
+  consumes the validated `Config`; it never parses configuration files itself.
 - Infrastructure crates depend on `application` (to implement its ports) and
   `domain`. They must not depend on each other or on interfaces.
 - `tui` and `mcp` depend only on `application`.
@@ -248,10 +248,13 @@ Service-specific behavior (how a Java service builds, how a Node service
 builds, how a library is installed) is isolated behind a `ServiceExecutor`
 abstraction.
 
-- The `ServiceExecutor` trait is defined by the **application** layer, because
-  it is part of the use-case vocabulary and must be replaceable by tests.
+- The `ServiceExecutor` trait will be defined by the **application** layer,
+  because it is part of the use-case vocabulary and must be replaceable by
+  tests. It is intentionally **not** introduced yet: the application currently
+  requests tasks and the execution engine reaches the adapters, so no executor
+  boundary is needed until concrete build/run behavior is implemented.
 - The concrete executors (Java, Node, Library, and future Python/Go/Docker/
-  Kubernetes) are **infrastructure** implementations wired in by the
+  Kubernetes) will be **infrastructure** implementations wired in by the
   composition root.
 
 Generic orchestration code must never branch on service technology. It asks an
@@ -333,10 +336,49 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 13. Related documents
+## 13. The application core
+
+The `application` crate is the shared application core (`docs/application-core.md`).
+It is the one API the TUI, MCP, and any future interface call, so business
+behavior lives in exactly one place.
+
+- **Container.** `Application` holds the validated `Config` plus its boundaries
+  (`TaskManager`, `RuntimeStateStore`, `LogService`, `PolicyEngine`) injected
+  through the constructor. It is cloneable, so the TUI and MCP each hold an
+  `Application` observing the same state and engine.
+- **Commands and queries.** Queries (`list_services`, `get_service_status`,
+  `get_workspace_status`, `get_task`, `get_logs`, ...) are side-effect free and
+  read configuration plus last observed runtime state. Commands
+  (`sync_service`, `build_service`, `build_library`, `run_liquibase`,
+  `start_service`, `stop_service`, `restart_service`, `health_check`,
+  `sync_workspace`, `build_workspace`, `prepare_environment`, `start_group`,
+  `start_profile`, ...) validate preconditions, apply policy, and submit a task
+  or workflow definition.
+- **Results are structured.** `OperationResult`, `ServiceStatus`,
+  `WorkspaceStatus`, and `PrepareEnvironmentRequest` are machine-readable
+  application values — never pre-formatted strings.
+- **Policy.** Every mutating command calls `authorize` before scheduling; a
+  destructive operation without confirmation becomes
+  `ApplicationError::PermissionDenied`. The check cannot be bypassed by an
+  interface.
+- **Runtime state is separate from configuration.** Transient process, health,
+  and Git state lives in the `RuntimeStateStore` port (`InMemoryRuntimeStateStore`
+  for the MVP); the application never parses configuration files and never
+  persists runtime state in a database.
+- **Work is described, not executed.** The application submits `TaskDefinition`
+  and `WorkflowDefinition` values to the `execution` engine; it never runs Git,
+  Maven, npm, Liquibase, or processes itself.
+
+## 14. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
 - `docs/adr/002-domain-model.md` — the decision record for the domain model.
+- `docs/adr/003-configuration-system.md` — the decision record for versioned,
+  validated configuration.
+- `docs/adr/004-application-core.md` — the decision record for the shared
+  application core.
+- `docs/application-core.md` — use cases, ports, request/response models, and
+  the runtime-state approach.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

@@ -13,7 +13,7 @@ use std::fmt;
 use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
-use crate::ids::{ServiceId, TaskId, WorkflowId};
+use crate::ids::{LibraryId, ServiceId, TaskId, WorkflowId};
 use crate::timestamp::Timestamp;
 
 /// The kind of work a task performs.
@@ -278,8 +278,13 @@ pub struct Task {
     /// The current lifecycle status.
     pub status: TaskStatus,
     /// The service the task acts on, if any.
+    #[serde(default)]
     pub service: Option<ServiceId>,
+    /// The library the task acts on, if any.
+    #[serde(default)]
+    pub library: Option<LibraryId>,
     /// The workflow the task belongs to, if any.
+    #[serde(default)]
     pub workflow: Option<WorkflowId>,
     /// When the task was created.
     pub created_at: Timestamp,
@@ -304,6 +309,7 @@ impl Task {
             kind,
             status: TaskStatus::Queued,
             service: None,
+            library: None,
             workflow: None,
             created_at: Timestamp::now(),
             started_at: None,
@@ -318,6 +324,13 @@ impl Task {
     #[must_use]
     pub fn with_service(mut self, service: ServiceId) -> Self {
         self.service = Some(service);
+        self
+    }
+
+    /// Associates the task with a library.
+    #[must_use]
+    pub fn with_library(mut self, library: LibraryId) -> Self {
+        self.library = Some(library);
         self
     }
 
@@ -400,6 +413,18 @@ mod tests {
         assert_eq!(task.status, TaskStatus::Queued);
         assert!(task.started_at.is_none());
         assert!(task.finished_at.is_none());
+        assert!(task.library.is_none());
+    }
+
+    #[test]
+    fn tasks_can_target_a_library() {
+        let task = Task::new(TaskId::new("task-2").unwrap(), TaskKind::BuildLibrary)
+            .with_library(LibraryId::new("common-core").unwrap());
+        assert_eq!(
+            task.library.as_ref().map(LibraryId::as_str),
+            Some("common-core")
+        );
+        assert!(task.service.is_none());
     }
 
     #[test]

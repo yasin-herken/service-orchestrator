@@ -13,3 +13,4 @@ workspace = true
 
 [dependencies]
 service-orchestrator-domain.workspace = true
+thiserror.workspace = true
