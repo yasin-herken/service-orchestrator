@@ -26,6 +26,8 @@ use service_orchestrator_domain::{
 };
 use thiserror::Error;
 
+use crate::retry::RetryPolicy;
+
 /// What a task definition acts on.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum TaskTarget {
@@ -37,6 +39,24 @@ pub enum TaskTarget {
     Library(LibraryId),
     /// The task belongs to a workflow.
     Workflow(WorkflowId),
+}
+
+/// How a task treats the outcome of its dependencies.
+///
+/// The policy is intentionally simple: it distinguishes "run only when every
+/// prerequisite succeeded" from "run as soon as every prerequisite has
+/// finished". A more expressive policy engine is not justified yet.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DependencyPolicy {
+    /// Run only if every dependency succeeded.
+    ///
+    /// This is the default and is equivalent to "do not run if any dependency
+    /// fails": a failed, cancelled, or skipped dependency causes the dependent
+    /// task to be skipped.
+    #[default]
+    AllSucceeded,
+    /// Run once every dependency has finished, regardless of outcome.
+    AnyCompleted,
 }
 
 /// A request to run a single unit of work.
@@ -57,6 +77,10 @@ pub struct TaskDefinition {
     pub timeout_seconds: Option<u64>,
     /// An optional human-readable description.
     pub description: Option<String>,
+    /// The retry policy for this task. Defaults to no retry.
+    pub retry: RetryPolicy,
+    /// How the task treats its dependencies' outcomes.
+    pub dependency_policy: DependencyPolicy,
 }
 
 impl TaskDefinition {
@@ -69,6 +93,8 @@ impl TaskDefinition {
             dependencies: Vec::new(),
             timeout_seconds: None,
             description: None,
+            retry: RetryPolicy::none(),
+            dependency_policy: DependencyPolicy::AllSucceeded,
         }
     }
 
@@ -111,6 +137,20 @@ impl TaskDefinition {
     #[must_use]
     pub fn with_description(mut self, description: impl Into<String>) -> Self {
         self.description = Some(description.into());
+        self
+    }
+
+    /// Sets the retry policy.
+    #[must_use]
+    pub fn with_retry(mut self, retry: RetryPolicy) -> Self {
+        self.retry = retry;
+        self
+    }
+
+    /// Sets the dependency policy.
+    #[must_use]
+    pub fn with_dependency_policy(mut self, policy: DependencyPolicy) -> Self {
+        self.dependency_policy = policy;
         self
     }
 }
