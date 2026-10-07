@@ -1,0 +1,68 @@
+# Service Orchestrator — Cargo workspace root.
+#
+# The root package is the composition root: it wires concrete infrastructure
+# implementations into the application core and hands that core to the TUI and
+# MCP interface adapters. Business logic must never live here.
+
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.80.0"
+license = "Apache-2.0"
+authors = ["Service Orchestrator contributors"]
+
+# Shared lint policy. Every crate opts in with `[lints] workspace = true`.
+[workspace.lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+unreachable_pub = "warn"
+
+# Internal crates. Path dependencies keep the workspace building offline and
+# make the intended dependency direction explicit and enforceable.
+[workspace.dependencies]
+service-orchestrator-domain = { path = "crates/domain", version = "0.1.0" }
+service-orchestrator-application = { path = "crates/application", version = "0.1.0" }
+service-orchestrator-config = { path = "crates/config", version = "0.1.0" }
+service-orchestrator-execution = { path = "crates/execution", version = "0.1.0" }
+service-orchestrator-git = { path = "crates/git", version = "0.1.0" }
+service-orchestrator-process = { path = "crates/process", version = "0.1.0" }
+service-orchestrator-build = { path = "crates/build", version = "0.1.0" }
+service-orchestrator-liquibase = { path = "crates/liquibase", version = "0.1.0" }
+service-orchestrator-health = { path = "crates/health", version = "0.1.0" }
+service-orchestrator-logging = { path = "crates/logging", version = "0.1.0" }
+service-orchestrator-policy = { path = "crates/policy", version = "0.1.0" }
+service-orchestrator-mcp = { path = "crates/mcp", version = "0.1.0" }
+service-orchestrator-tui = { path = "crates/tui", version = "0.1.0" }
+
+[package]
+name = "service-orchestrator"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "macOS-native developer environment orchestration platform"
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+service-orchestrator-application.workspace = true
+service-orchestrator-build.workspace = true
+service-orchestrator-config.workspace = true
+service-orchestrator-domain.workspace = true
+service-orchestrator-execution.workspace = true
+service-orchestrator-git.workspace = true
+service-orchestrator-health.workspace = true
+service-orchestrator-liquibase.workspace = true
+service-orchestrator-logging.workspace = true
+service-orchestrator-mcp.workspace = true
+service-orchestrator-policy.workspace = true
+service-orchestrator-process.workspace = true
+service-orchestrator-tui.workspace = true
