@@ -1,0 +1,150 @@
+# Example Service Orchestrator configuration.
+#
+# This file is deliberately generic: it demonstrates every supported section
+# without referencing any real company, repository, or credential. Copy it to
+# ~/.service-orchestrator/config.toml and adapt it.
+#
+# Run `service-orchestrator` against it once the application is wired up.
+# Validation rules are documented in docs/configuration.md.
+
+config_version = 1
+
+# ---------------------------------------------------------------------------
+# Workspaces
+# ---------------------------------------------------------------------------
+
+[[workspaces]]
+id = "acme"
+name = "Acme Platform"
+root = "~/Projects/acme"
+
+[workspaces.environment]
+LOGGING_LEVEL = "INFO"
+
+# ---------------------------------------------------------------------------
+# Libraries
+# ---------------------------------------------------------------------------
+
+[[libraries]]
+id = "common-core"
+name = "common-core"
+workspace = "acme"
+path = "libraries/common-core"
+type = "maven"
+
+[libraries.repository]
+url = "git@github.com:acme/common-core.git"
+default_branch = "main"
+
+[libraries.commands]
+build = "./mvnw clean install"
+
+[libraries.artifact]
+group_id = "com.acme"
+artifact_id = "common-core"
+version = "1.8.0-SNAPSHOT"
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+
+[[services]]
+id = "auth-service"
+name = "auth-service"
+type = "backend"
+workspace = "acme"
+path = "backend/auth-service"
+default_branch = "main"
+
+[services.repository]
+url = "git@github.com:acme/auth-service.git"
+
+[services.runtime]
+type = "java"
+version = "21"
+
+[services.commands]
+install = "./mvnw dependency:resolve"
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+
+[services.liquibase]
+enabled = true
+command = "./mvnw liquibase:update"
+timeout_seconds = 300
+
+[services.environment]
+SPRING_PROFILES_ACTIVE = "local"
+
+[services.dependencies]
+libraries = ["common-core"]
+
+[[services.ports]]
+port = 8081
+protocol = "tcp"
+
+[[services.health_checks]]
+type = "http"
+url = "http://localhost:8081/actuator/health"
+timeout_seconds = 10
+
+[[services]]
+id = "web-ui"
+name = "web-ui"
+type = "frontend"
+workspace = "acme"
+path = "frontend/web-ui"
+default_branch = "main"
+
+[services.repository]
+url = "git@github.com:acme/web-ui.git"
+
+[services.runtime]
+type = "node"
+version = "20.19.4"
+
+[services.commands]
+install = "npm install"
+build = "npm run build"
+start = "npm start"
+
+[services.environment]
+SERVER_PORT = "3000"
+
+[services.dependencies]
+services = ["auth-service"]
+
+[[services.ports]]
+port = 3000
+protocol = "tcp"
+
+[[services.health_checks]]
+type = "port"
+port = 3000
+
+# ---------------------------------------------------------------------------
+# Groups
+# ---------------------------------------------------------------------------
+
+[[groups]]
+id = "customer"
+name = "Customer Management"
+services = ["auth-service", "web-ui"]
+
+# ---------------------------------------------------------------------------
+# Profiles
+# ---------------------------------------------------------------------------
+
+[[profiles]]
+id = "full-stack"
+name = "Full Stack"
+services = ["auth-service"]
+groups = ["customer"]
+
+# ---------------------------------------------------------------------------
+# Execution settings
+# ---------------------------------------------------------------------------
+
+[execution]
+max_parallel_tasks = 4
+default_timeout_seconds = 1800
