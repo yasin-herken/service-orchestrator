@@ -10,3 +10,19 @@ publish = false
 
 [lints]
 workspace = true
+
+[dependencies]
+# Serialization is needed because domain values cross the configuration, TUI,
+# and MCP boundaries. serde is a compile-time-only concern and pulls in no
+# runtime, network, or OS dependency, so it does not violate domain isolation.
+serde.workspace = true
+# Typed, structured errors for the domain layer.
+thiserror.workspace = true
+# Consistent timestamp representation for the domain. `time` is a plain
+# date/time library and is not an infrastructure or async runtime dependency.
+time.workspace = true
+
+[dev-dependencies]
+# Used only in tests to prove that domain values round-trip across a real
+# serialization format (the same one the MCP adapter will use).
+serde_json.workspace = true

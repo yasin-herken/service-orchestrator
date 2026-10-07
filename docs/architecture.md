@@ -118,7 +118,7 @@ domain. Nothing inner knows about anything outer.
 
 | Crate | Layer | Responsibility |
 | --- | --- | --- |
-| `domain` | Domain | Pure business concepts and rules. Depends on nothing. |
+| `domain` | Domain | Pure business concepts and rules. Depends on no workspace crate. |
 | `execution` | Core service | Task/workflow engine: state, dependency-aware scheduling, bounded concurrency, cancellation, retry, timeout, progress. |
 | `policy` | Core service | Permission model and policy engine (`READ`, `SAFE_WRITE`, `DESTRUCTIVE`). |
 | `config` | Infrastructure | Versioned configuration loading, parsing, validation, migration. Produces domain configuration values. |
@@ -295,8 +295,48 @@ timeout, cancellation, and failure propagation are defined once.
 
 ---
 
-## 12. Related documents
+## 12. Domain model
+
+The domain layer defines the vocabulary every other layer speaks. It lives in
+the `service-orchestrator-domain` crate and depends on no other workspace crate
+(`AGENTS.md`, `docs/adr/001-core-architecture.md`). It declares *what things
+are*, never *how they are done*.
+
+The root aggregate is `Workspace`, which owns services, libraries, groups, and
+profiles. Key concepts:
+
+- **`Service`** — a buildable/runable unit with an optional repository, runtime
+  requirements, structured commands, dependencies, health checks, ports, and an
+  explicit capability set. Behaviour is derived from `ServiceType` and
+  `ServiceCapability`, never from a service's name.
+- **`Library`** — a shared buildable artifact; it may depend only on other
+  libraries.
+- **`Repository` / `Runtime` / `CommandSet`** — provider-independent
+  descriptions of source, toolchain requirements, and structured (non-shell)
+  commands.
+- **`Dependency`** — a typed reference (`Build`/`Runtime`) to another service or
+  library. The domain validates that dependencies resolve and are acyclic but
+  does not schedule them.
+- **`Task` / `Workflow`** — the task lifecycle (`queued`, `running`, `succeeded`,
+  `failed`, `cancelled`, `skipped`, `blocked`) and acyclic workflow graphs. The
+  `execution` engine schedules them; the domain owns the vocabulary and the
+  state machine.
+- **`Permission`** (`Read`, `SafeWrite`, `Destructive`) — the risk vocabulary
+  shared by the TUI and MCP; the `policy` engine applies it.
+- **State value objects** — `ProcessState`, `GitState`, and `HealthCheck`
+  describe observed state without leaking OS, Git, or HTTP details.
+
+Strongly typed identifiers, validated paths/ports/versions, and a small
+`DomainError` round out the model. `Workspace::validate` enforces uniqueness,
+reference resolution, and acyclicity across the aggregate.
+
+The full entity list, invariants, relationship diagram, and the list of things
+intentionally not yet modelled are in `docs/domain-model.md`.
+
+## 13. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
+- `docs/adr/002-domain-model.md` — the decision record for the domain model.
+- `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.
