@@ -345,6 +345,9 @@ pub(crate) struct RawHealthCheck {
     pub(crate) timeout_seconds: Option<u64>,
     /// The polling interval.
     pub(crate) interval_seconds: Option<u64>,
+    /// Whether the check is required for the service to be healthy. Defaults
+    /// to `true`.
+    pub(crate) required: Option<bool>,
 }
 
 /// A raw port.

@@ -21,9 +21,9 @@ use service_orchestrator_policy::{Authorization, PolicyEngine};
 
 use crate::error::ApplicationError;
 use crate::ports::{
-    ArtifactInspector, GitManager, LogService, NullArtifactInspector, NullGitManager,
-    NullServiceRuntimeIndex, ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore,
-    ServiceRuntimeIndex,
+    ArtifactInspector, GitManager, HealthIndex, LogService, NullArtifactInspector, NullGitManager,
+    NullHealthIndex, NullServiceRuntimeIndex, ResolvedRepository, ResolvedServiceTarget,
+    RuntimeStateStore, ServiceRuntimeIndex,
 };
 
 /// The shared application core.
@@ -36,6 +36,7 @@ pub struct Application {
     git: Arc<dyn GitManager>,
     artifacts: Arc<dyn ArtifactInspector>,
     service_runtime: Arc<dyn ServiceRuntimeIndex>,
+    health: Arc<dyn HealthIndex>,
     policy: PolicyEngine,
     authorization: Authorization,
 }
@@ -65,6 +66,7 @@ impl Application {
             git: Arc::new(NullGitManager),
             artifacts: Arc::new(NullArtifactInspector),
             service_runtime: Arc::new(NullServiceRuntimeIndex),
+            health: Arc::new(NullHealthIndex),
             policy: PolicyEngine::new(),
             authorization: Authorization::standard(),
         }
@@ -99,6 +101,18 @@ impl Application {
     #[must_use]
     pub fn with_service_runtime(mut self, service_runtime: Arc<dyn ServiceRuntimeIndex>) -> Self {
         self.service_runtime = service_runtime;
+        self
+    }
+
+    /// Replaces the health index.
+    ///
+    /// The index is provided by the health adapter; it exposes the last observed
+    /// health of each service so `get_service_health`, `list_service_health`,
+    /// and `get_service_diagnostics` can report it. Without it, those queries
+    /// report [`HealthState::Unknown`](crate::HealthState).
+    #[must_use]
+    pub fn with_health_index(mut self, health: Arc<dyn HealthIndex>) -> Self {
+        self.health = health;
         self
     }
 
@@ -175,6 +189,11 @@ impl Application {
     /// Returns the service runtime index.
     pub(crate) fn service_runtime(&self) -> &dyn ServiceRuntimeIndex {
         self.service_runtime.as_ref()
+    }
+
+    /// Returns the health index.
+    pub(crate) fn health(&self) -> &dyn HealthIndex {
+        self.health.as_ref()
     }
 
     /// Resolves an entity's workspace-relative directory into an absolute path.

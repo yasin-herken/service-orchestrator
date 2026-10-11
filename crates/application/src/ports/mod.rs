@@ -29,6 +29,7 @@
 pub(crate) mod artifact;
 pub(crate) mod build;
 pub(crate) mod git;
+pub(crate) mod health;
 pub(crate) mod logs;
 pub(crate) mod migration;
 pub(crate) mod runtime_state;
@@ -44,7 +45,14 @@ pub use build::{
 pub use git::{
     parameter, DiffOptions, GitError, GitManager, GitOptions, NullGitManager, ResolvedRepository,
 };
-pub use logs::{LogEntry, LogLevel, LogRequest, LogService, LogServiceError, NullLogService};
+pub use health::{
+    HealthCheckOutcome, HealthIndex, NullHealthIndex, ServiceHealth, CHECK_HTTP, CHECK_PROCESS,
+    CHECK_TCP,
+};
+pub use logs::{
+    LogEntry, LogLevel, LogPage, LogRequest, LogService, LogServiceError, LogSource, LogStream,
+    LogStreamError, LogSubscription, NullLogService,
+};
 pub use migration::{parameter as migration_parameter, MigrationError, ResolvedMigrationTarget};
 pub use runtime_state::{
     HealthState, InMemoryRuntimeStateStore, RuntimeStateStore, ServiceRuntimeState,

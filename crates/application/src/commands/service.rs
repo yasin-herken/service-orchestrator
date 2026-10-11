@@ -239,8 +239,12 @@ impl Application {
 
     /// Schedules a health check for a service.
     ///
-    /// This is a read-oriented operation: it does not mutate the workspace, but
-    /// it schedules a probe task so the last observed health can be refreshed.
+    /// This is the historical, "run every configured check" entry point. It is
+    /// the same operation as
+    /// [`check_service_health`](Application::check_service_health) with
+    /// [`HealthCheckScope::All`](crate::HealthCheckScope::All), retained under
+    /// its original name so callers and workflows written before the health
+    /// manager keep working (`tasks/012.md` §32).
     ///
     /// # Errors
     ///
@@ -251,17 +255,6 @@ impl Application {
         &self,
         service_id: &ServiceId,
     ) -> Result<OperationResult, ApplicationError> {
-        self.authorize(Permission::Read)?;
-        let (_workspace, service) = self.locate_service(service_id)?;
-        if service.health_checks.is_empty() {
-            return Err(ApplicationError::invalid_operation(format!(
-                "service '{service_id}' has no health checks configured"
-            )));
-        }
-        self.schedule(
-            TaskDefinition::new(TaskKind::HealthCheck)
-                .for_service(service_id.clone())
-                .with_timeout(self.default_timeout_seconds()),
-        )
+        self.check_service_health(service_id, crate::models::HealthCheckScope::All)
     }
 }

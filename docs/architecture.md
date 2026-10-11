@@ -129,8 +129,8 @@ domain. Nothing inner knows about anything outer.
 | `build` | Infrastructure | Build adapter. A build-system-agnostic manager selects a `BuildProvider` (Maven, npm) that emits a structured `BuildPlan`, which is run in the process manager. Also implements the application's `ArtifactInspector` port (effective Maven local repository and conservative consumer-version reading) and hosts the per-module artifact coordinator. |
 | `runtime` | Infrastructure | Service runtime adapter. A runtime-agnostic Service Manager selects a `ServiceRuntime` (Java, Node), builds a structured `StartPlan`, applies idempotency, version, port, and ownership rules, and drives the process manager to run, stop, and restart local services. Implements the read-only `ServiceRuntimeIndex` port. |
 | `liquibase` | Infrastructure | Migration adapter. A provider-based Migration Manager selects a `MigrationProvider` (Liquibase) that emits a structured `MigrationPlan`, which is run in the process manager. Applies the database-target environment safety policy and serializes migrations against the same configured database. |
-| `health` | Infrastructure | Configurable health checks (process, port, HTTP/actuator). |
-| `logging` | Infrastructure | Structured logging and bounded, filterable log retrieval. |
+| `health` | Infrastructure | Health adapter. A `HealthManager` selects a `HealthChecker` (process, TCP, HTTP/actuator) through a small registry, runs each configured probe under its own timeout, aggregates the outcomes deterministically, records bounded history and events, mirrors the aggregate into the runtime state store, and implements the read-only `HealthIndex` port. A `HealthMonitor` optionally polls watched services. |
+| `logging` | Infrastructure | Observability adapter. A `LogHub` unifies managed-process output, task-engine events, and application messages into one structured, bounded, filterable store, answers stable cursor queries, and streams realtime entries to multiple backpressure-tolerant subscribers. Thin ingestors correlate existing event sources; messages are redacted before storage. Implements the `LogService`/`LogSubscription` ports. |
 | `mcp` | Interface | MCP stdio adapter over the application core. |
 | `tui` | Interface | Ratatui adapter over the application core. |
 | `service-orchestrator` (root) | Composition root | Wires infrastructure into the core and dispatches to an interface. |
@@ -156,6 +156,8 @@ git   ──> execution (TaskExecutor) + process (run git)     (documented excep
 build ──> execution (TaskExecutor) + process (run builds)  (documented exception, ADR 008)
 runtime ──> execution (TaskExecutor) + process (run services) + config   (documented exception, ADR 010)
 liquibase ──> execution (TaskExecutor) + process (run migrations) + build (Maven/host seam)   (documented exception, ADR 011)
+health ──> execution (TaskExecutor) + config (resolve checks) + runtime index   (documented exception, ADR 012)
+logging ──> execution (task events) + process (captured output)   (documented exception, ADR 012)
 
 service-orchestrator (root) ──> everything         (composition root)
 ```
@@ -167,16 +169,19 @@ service-orchestrator (root) ──> everything         (composition root)
 - `application` depends on `domain`, `execution`, `policy`, and `config`. It
   consumes the validated `Config`; it never parses configuration files itself.
 - Infrastructure crates depend on `application` (to implement its ports) and
-  `domain`. They must not depend on each other or on interfaces, with four
+  `domain`. They must not depend on each other or on interfaces, with six
   documented exceptions (`docs/adr/007-git-manager.md`,
   `docs/adr/008-build-manager.md`, `docs/adr/010-service-runtime.md`,
-  `docs/adr/011-migration-manager.md`): the `git` adapter, the `build` adapter,
-  the `runtime` adapter, and the `liquibase` adapter each depend on `execution`
-  (they implement a `TaskExecutor` for mutating operations) and on `process`
-  (they run the tool through the single process owner); the `runtime` adapter and
-  the `liquibase` adapter additionally read the validated `config` / reuse the
-  build adapter's Maven-resolution and host seam. No other infrastructure crate
-  may take such an edge without an ADR.
+  `docs/adr/011-migration-manager.md`,
+  `docs/adr/012-health-observability.md`): the `git`, `build`, `runtime`,
+  `liquibase`, and `health` adapters each depend on `execution` (they implement a
+  `TaskExecutor`), and the `git`, `build`, `runtime`, `liquibase`, and `logging`
+  adapters depend on `process` (to run the tool, or to consume captured output
+  through the single process owner); the `runtime`/`liquibase` adapters
+  additionally read the validated `config` / reuse the build adapter's
+  Maven-resolution and host seam, and the `health` adapter reads the validated
+  `config` to resolve a service's checks. No other infrastructure crate may take
+  such an edge without an ADR.
 - `tui` and `mcp` depend only on `application`.
 - The root binary is the only crate allowed to depend on both infrastructure
   and interfaces; it is the composition root.
@@ -602,7 +607,79 @@ target safety, coordination, failure semantics, and limits are in
 
 ---
 
-## 17. Enforcement and validation
+## 17. Where the Health Manager and Observability layer belong
+
+The Health Manager and the Observability layer answer two questions the rest of
+the platform cannot: *is a service actually serving?* and *what evidence do we
+have?* They live in the `health` and `logging` infrastructure crates and reuse
+the process manager, the runtime adapter, the task engine, and validated
+configuration rather than duplicating any of them (`AGENTS.md` §16, §35).
+
+### Health
+
+- **Health is not process state.** `HealthState` (`unknown`, `checking`,
+  `healthy`, `unhealthy`, `degraded`, `unreachable`) is separate from
+  `ProcessState`, so "running but unhealthy" and "running but still starting" are
+  both representable. A live pid never implies a healthy service.
+- **Providers are small and pure.** `HealthChecker` is the only place probe
+  mechanics live; `ProcessHealthChecker`, `TcpHealthChecker`, and
+  `HttpHealthChecker` are resolved through a small `BTreeMap<CheckType, ...>`
+  registry, not a plugin framework. The process provider reads the runtime
+  adapter's managed-process index (never scanning the OS); the TCP provider
+  probes a configured loopback port; the HTTP provider sends one `GET` and treats
+  a Spring Boot Actuator `status` in the body as authoritative.
+- **A probe result is not an error.** An ordinary "not healthy" observation is a
+  `CheckResult` recorded as a state; a `HealthError` means the check could not be
+  attempted at all.
+- **Aggregation is deterministic and ordered.** Required failures dominate,
+  unreachable dominates undetermined, and a failing *optional* check only
+  degrades. Statuses are never averaged into a percentage.
+- **Readiness is explicit and bounded.** The required checks represent the
+  process/port/HTTP stages; `wait_until_ready` polls with cancellation until the
+  service is serving or the deadline passes, exposed as a `ReadinessCheck` task
+  with a 60-second default. Starting and waiting-for-readiness are distinct, and
+  a startup task is never left running indefinitely.
+- **Polling is opt-in.** `HealthMonitor` polls only explicitly watched services,
+  is idempotent (no duplicate loops), bounds concurrency with a semaphore, and
+  shuts down cleanly. It submits no tasks; the task engine remains the only
+  scheduler.
+- **One read-only port.** The application reads the last observed health through
+  the `HealthIndex` port (`service_health`, `services`); scheduling a probe is a
+  command, and a query never probes (`AGENTS.md` §14). `NullHealthIndex` keeps the
+  application constructible.
+
+### Observability
+
+- **Reuse, don't rewrite.** Thin ingestors translate the process manager's
+  captured output and the task engine's events into a common `LogEntry`; the
+  process manager and task engine stay the owners of their own behaviour.
+- **Correlation, not fabrication.** A process line resolves its service through
+  the process manager's registry; a task event inherits the service cached from
+  `TaskCreated`. Missing metadata is left absent.
+- **One bounded, queryable store.** `LogHub` assigns a monotonic `sequence`,
+  redacts and truncates messages, enforces per-service and global retention, and
+  answers filtered, newest-first queries plus stable, oldest-first cursor pages —
+  not a database and not a search engine.
+- **Streaming is independent and lossy.** Each service has a bounded broadcast
+  channel, so a slow subscriber drops only its own entries and observes
+  `Lagged { dropped }`; it never blocks a managed process's `stdout`/`stderr`
+  reader (`AGENTS.md` §35).
+- **Diagnostics report observed facts.** `get_service_diagnostics` composes the
+  runtime state, managed process, latest health result, recent error logs, and
+  declared ports, and never fabricates a root cause.
+
+Both adapters are the fifth and sixth documented infrastructure-to-infrastructure
+exceptions (health to `execution`/`config`, logging to `execution`/`process`),
+recorded in `docs/adr/012-health-observability.md`.
+
+The full model, providers, state and aggregation rules, readiness, polling,
+events, errors, and security considerations are in `docs/health-manager.md`; the
+log model, ingestion, filtering, pagination, retention, streaming, and redaction
+are in `docs/observability.md`.
+
+---
+
+## 18. Enforcement and validation
 
 - Dependencies are declared exclusively through `[workspace.dependencies]` so
   boundaries are visible in one place.
@@ -621,7 +698,7 @@ target safety, coordination, failure semantics, and limits are in
 
 ---
 
-## 18. Domain model
+## 19. Domain model
 
 The domain layer defines the vocabulary every other layer speaks. It lives in
 the `service-orchestrator-domain` crate and depends on no other workspace crate
@@ -660,7 +737,7 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 19. The application core
+## 20. The application core
 
 The `application` crate is the shared application core (`docs/application-core.md`).
 It is the one API the TUI, MCP, and any future interface call, so business
@@ -702,7 +779,7 @@ behavior lives in exactly one place.
   Bulk commands submit one independent workflow step per repository;
   `summarize_workflow` aggregates the per-repository outcomes.
 
-## 20. Related documents
+## 21. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -724,6 +801,8 @@ behavior lives in exactly one place.
   Runtime, its registry, and managed-process lifecycle.
 - `docs/adr/011-migration-manager.md` — the decision record for the provider-based
   Migration Manager, database-target safety, and coordination.
+- `docs/adr/012-health-observability.md` — the decision record for the Health
+  Manager, its providers and aggregation, and the observability layer.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
@@ -742,5 +821,11 @@ behavior lives in exactly one place.
 - `docs/migration-manager.md` — the Migration Manager: provider abstraction,
   Liquibase execution modes, database-target identification and safety,
   coordination, failure semantics, and limits.
+- `docs/health-manager.md` — the Health Manager: providers, state model,
+  aggregation, readiness, configuration, polling, events, history, and
+  diagnostics.
+- `docs/observability.md` — the Observability layer: the structured log model,
+  ingestion and correlation, filtering, cursor pagination, retention, streaming,
+  backpressure, and redaction.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

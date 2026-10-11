@@ -19,7 +19,7 @@ use service_orchestrator_domain::{
     Version, WorkflowId, WorkflowKind, WorkspaceId,
 };
 
-use crate::ports::HealthState;
+use crate::ports::{HealthCheckOutcome, HealthState};
 
 /// The result of submitting a command.
 ///
@@ -586,4 +586,101 @@ pub struct MigrationStatus {
     /// Always `None` from this query, for the same reason as
     /// [`pending`](Self::pending).
     pub locked: Option<bool>,
+}
+
+// -- health and diagnostics ---------------------------------------------------
+
+/// Which configured health checks a check operation should run.
+///
+/// The scope lets a caller probe only the level it cares about — for example a
+/// process liveness check while debugging, or a readiness HTTP check during
+/// startup — without running every configured probe (`tasks/012.md` §12, §33).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HealthCheckScope {
+    /// Run every configured health check.
+    #[default]
+    All,
+    /// Run only process checks (is the managed process alive?).
+    Process,
+    /// Run only TCP/port checks (is the port reachable?).
+    Tcp,
+    /// Run only HTTP/actuator checks (is the application ready?).
+    Http,
+}
+
+impl HealthCheckScope {
+    /// Returns a short, stable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::All => "all",
+            Self::Process => "process",
+            Self::Tcp => "tcp",
+            Self::Http => "http",
+        }
+    }
+}
+
+/// A structured diagnostic of a service's observed state.
+///
+/// The diagnostic combines configuration with *observed facts* only: the last
+/// runtime state, the managed process, the latest health result, its checks,
+/// declared ports, and recent error logs. It never mutates anything and never
+/// fabricates a root cause; a failure is reported as the structured code and
+/// message the observing subsystem produced (`tasks/012.md` §30, §31).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceDiagnostics {
+    /// The service identifier.
+    pub service_id: ServiceId,
+    /// The workspace that owns the service.
+    pub workspace_id: WorkspaceId,
+    /// The last observed process state.
+    pub process_state: ProcessState,
+    /// The last observed aggregated health state.
+    pub health_state: HealthState,
+    /// Whether the service is currently tracked as a managed process.
+    pub managed: bool,
+    /// The managed process identifier, when one exists.
+    #[serde(default)]
+    pub process_id: Option<String>,
+    /// The operating-system process id, while the process is alive.
+    #[serde(default)]
+    pub pid: Option<u32>,
+    /// The ports the service declares.
+    #[serde(default)]
+    pub ports: Vec<Port>,
+    /// When the service was last checked, if it ever has been.
+    #[serde(default)]
+    pub last_checked_at: Option<Timestamp>,
+    /// The latest outcome of each health check.
+    #[serde(default)]
+    pub health_checks: Vec<HealthCheckOutcome>,
+    /// The most recent structured failure, when one was observed.
+    #[serde(default)]
+    pub last_failure: Option<DiagnosticFailure>,
+    /// The most recent error-level log lines for the service, oldest first.
+    #[serde(default)]
+    pub recent_errors: Vec<String>,
+    /// Additional observed facts that do not fit the fields above.
+    #[serde(default)]
+    pub notes: Vec<String>,
+}
+
+/// A structured, observed failure recorded in a diagnostic.
+///
+/// A failure is never invented: it is derived from a health check outcome or an
+/// error-level log line, and it carries the source that produced it
+/// (`tasks/012.md` §30, §35).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DiagnosticFailure {
+    /// Where the failure was observed (`health`, `log`, or `runtime`).
+    pub source: String,
+    /// A stable, machine-readable code, for example `HTTP_CONNECTION_REFUSED`.
+    pub code: String,
+    /// A human-readable summary.
+    pub message: String,
+    /// When the failure was observed, if known.
+    #[serde(default)]
+    pub at: Option<Timestamp>,
 }

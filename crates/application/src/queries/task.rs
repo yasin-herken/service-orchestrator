@@ -39,7 +39,12 @@ impl Application {
     /// Returns [`ApplicationError::ServiceNotFound`] if the service does not
     /// exist, or [`ApplicationError::LogService`] if log retrieval fails.
     pub fn get_logs(&self, request: &LogRequest) -> Result<Vec<LogEntry>, ApplicationError> {
-        self.locate_service(&request.service_id)?;
+        // A request either selects a service (validated first, so an unknown
+        // service is reported as `ServiceNotFound`) or is scoped by another
+        // correlation identifier such as a task.
+        if let Some(service_id) = &request.service_id {
+            self.locate_service(service_id)?;
+        }
         self.logs()
             .query(request)
             .map_err(|error| ApplicationError::LogService {

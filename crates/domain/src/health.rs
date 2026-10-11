@@ -102,6 +102,12 @@ impl fmt::Display for HealthCheckKind {
 }
 
 /// A configured health check.
+///
+/// A check is **required** by default. When a service configures an optional
+/// check (`required = false`), only that check failing degrades the aggregate
+/// service health to `degraded`; a required check failing makes the service
+/// unhealthy. This is the only place a check's criticality is expressed, so
+/// aggregation stays deterministic (`tasks/012.md` §14).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HealthCheck {
     /// The probe performed.
@@ -110,16 +116,26 @@ pub struct HealthCheck {
     pub timeout: Option<Duration>,
     /// How long to wait between probes when polling.
     pub interval: Option<Duration>,
+    /// Whether the check is required for the service to be considered healthy.
+    #[serde(default = "default_required")]
+    pub required: bool,
+}
+
+/// The default criticality of a health check: required.
+fn default_required() -> bool {
+    true
 }
 
 impl HealthCheck {
-    /// Creates a health check with default (unspecified) timeout and interval.
+    /// Creates a required health check with default (unspecified) timeout and
+    /// interval.
     #[must_use]
     pub fn new(kind: HealthCheckKind) -> Self {
         Self {
             kind,
             timeout: None,
             interval: None,
+            required: true,
         }
     }
 
@@ -134,6 +150,23 @@ impl HealthCheck {
     #[must_use]
     pub fn with_interval(mut self, interval: Duration) -> Self {
         self.interval = Some(interval);
+        self
+    }
+
+    /// Marks the check as optional.
+    ///
+    /// A failing optional check degrades service health rather than making it
+    /// unhealthy.
+    #[must_use]
+    pub fn optional(mut self) -> Self {
+        self.required = false;
+        self
+    }
+
+    /// Sets whether the check is required.
+    #[must_use]
+    pub fn with_required(mut self, required: bool) -> Self {
+        self.required = required;
         self
     }
 }

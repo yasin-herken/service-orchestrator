@@ -12,5 +12,14 @@ publish = false
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
+serde_json.workspace = true
 service-orchestrator-application.workspace = true
+service-orchestrator-config.workspace = true
 service-orchestrator-domain.workspace = true
+service-orchestrator-execution.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+service-orchestrator-process.workspace = true
