@@ -201,6 +201,12 @@ pub const CHECK_SERVICE_READINESS: &str = "check_service_readiness";
 pub const SYNC_WORKSPACE: &str = "sync_workspace";
 /// Prepares a development environment.
 pub const PREPARE_ENVIRONMENT: &str = "prepare_environment";
+/// Plans a development environment preparation without changing anything.
+pub const PLAN_PREPARE_ENVIRONMENT: &str = "plan_prepare_environment";
+/// Returns an aggregated status for a workflow.
+pub const GET_WORKFLOW_STATUS: &str = "get_workflow_status";
+/// Requests cancellation of every active task in a workflow.
+pub const CANCEL_WORKFLOW: &str = "cancel_workflow";
 /// Starts every service in a group.
 pub const START_GROUP: &str = "start_group";
 /// Stops every service in a group.

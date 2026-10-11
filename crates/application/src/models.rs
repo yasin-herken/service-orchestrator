@@ -13,10 +13,10 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use service_orchestrator_domain::{
-    AbsolutePath, ArtifactCoordinate, Branch, DependencyKind, GitState, LibraryId,
+    AbsolutePath, ArtifactCoordinate, Branch, DependencyKind, GitState, GroupId, LibraryId,
     LiquibaseExecutionMode, MigrationProviderType, MigrationTargetEnvironment, Port, ProcessState,
-    ServiceCapability, ServiceId, ServiceType, Task, TaskId, TaskKind, TaskStatus, Timestamp,
-    Version, WorkflowId, WorkflowKind, WorkspaceId,
+    ProfileId, ServiceCapability, ServiceId, ServiceType, Task, TaskId, TaskKind, TaskStatus,
+    Timestamp, Version, WorkflowId, WorkflowKind, WorkflowState, WorkspaceId,
 };
 
 use crate::ports::{HealthCheckOutcome, HealthState};
@@ -80,35 +80,91 @@ impl OperationResult {
 /// A request to prepare a development environment.
 ///
 /// The request is explicit and structured so it maps cleanly onto an MCP tool
-/// schema later, and so a caller avoids a long positional argument list.
+/// schema, and so a caller avoids a long positional argument list. Every option
+/// has a documented, safe default: there is no implicit database mutation and no
+/// destructive Git operation.
+///
+/// # Selection
+///
+/// The services to include are determined in this order: an explicit
+/// [`services`](Self::services) list, otherwise a [`profile`](Self::profile),
+/// otherwise a [`group`](Self::group), otherwise every service in the workspace.
+/// Required dependencies are added automatically unless
+/// [`include_dependencies`](Self::include_dependencies) is disabled.
+///
+/// # Defaults
+///
+/// A request created with [`PrepareEnvironmentRequest::new`] synchronizes Git,
+/// builds nothing, applies no migrations, starts nothing, and waits for health
+/// only if services are started. The `with_*`/`build`/`start` builders opt in to
+/// the more expensive phases explicitly.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PrepareEnvironmentRequest {
     /// The workspace to prepare.
     pub workspace_id: WorkspaceId,
-    /// The services to include. When empty, every service in the workspace is
-    /// included.
+    /// The services to include. When empty, selection falls back to the
+    /// [`profile`](Self::profile), then the [`group`](Self::group), then the whole
+    /// workspace.
     pub services: Vec<ServiceId>,
+    /// An optional development profile whose services should be selected.
+    #[serde(default)]
+    pub profile: Option<ProfileId>,
+    /// An optional service group whose members should be selected.
+    #[serde(default)]
+    pub group: Option<GroupId>,
     /// An optional branch to check out before building.
+    #[serde(default)]
     pub branch: Option<Branch>,
-    /// Whether to run Liquibase migrations.
+    /// Whether to synchronize repositories (fetch, optional checkout,
+    /// fast-forward pull). Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub sync: bool,
+    /// Whether to include the transitive closure of required service and library
+    /// dependencies. Defaults to `true`.
+    #[serde(default = "default_true")]
+    pub include_dependencies: bool,
+    /// Whether to build the required libraries (`BuildLibrary`). Defaults to
+    /// `false`.
+    #[serde(default)]
+    pub build_libraries: bool,
+    /// Whether to run Liquibase migrations for migration-enabled services.
+    /// Defaults to `false`; enabling it is an explicit database mutation.
     pub run_liquibase: bool,
-    /// Whether to build libraries and services.
+    /// Whether to build the selected services. Defaults to `false`.
     pub build: bool,
-    /// Whether to start the selected services.
+    /// Whether to start the selected services. Defaults to `false`.
     pub start: bool,
+    /// Whether to run configured health checks after starting services. Defaults
+    /// to `true`; it has an effect only when [`start`](Self::start) is set.
+    #[serde(default = "default_true")]
+    pub wait_for_health: bool,
+}
+
+/// The `serde` default for boolean options that default to `true`.
+const fn default_true() -> bool {
+    true
 }
 
 impl PrepareEnvironmentRequest {
-    /// Creates a request that selects the given services and does nothing else.
+    /// Creates a request that selects services and only synchronizes Git.
+    ///
+    /// `sync` and `include_dependencies` default to `true`; library and service
+    /// builds, migrations, and startup default to `false`.
     #[must_use]
     pub fn new(workspace_id: WorkspaceId) -> Self {
         Self {
             workspace_id,
             services: Vec::new(),
+            profile: None,
+            group: None,
             branch: None,
+            sync: true,
+            include_dependencies: true,
+            build_libraries: false,
             run_liquibase: false,
             build: false,
             start: false,
+            wait_for_health: true,
         }
     }
 
@@ -122,6 +178,20 @@ impl PrepareEnvironmentRequest {
         self
     }
 
+    /// Selects services through a development profile.
+    #[must_use]
+    pub fn with_profile(mut self, profile: ProfileId) -> Self {
+        self.profile = Some(profile);
+        self
+    }
+
+    /// Selects services through a service group.
+    #[must_use]
+    pub fn with_group(mut self, group: GroupId) -> Self {
+        self.group = Some(group);
+        self
+    }
+
     /// Sets the branch to check out.
     #[must_use]
     pub fn with_branch(mut self, branch: Branch) -> Self {
@@ -129,26 +199,281 @@ impl PrepareEnvironmentRequest {
         self
     }
 
+    /// Enables or disables Git synchronization.
+    #[must_use]
+    pub const fn with_sync(mut self, sync: bool) -> Self {
+        self.sync = sync;
+        self
+    }
+
+    /// Enables or disables automatic dependency inclusion.
+    #[must_use]
+    pub const fn with_dependencies(mut self, include: bool) -> Self {
+        self.include_dependencies = include;
+        self
+    }
+
     /// Enables Liquibase migrations.
     #[must_use]
-    pub fn run_liquibase(mut self) -> Self {
+    pub const fn run_liquibase(mut self) -> Self {
         self.run_liquibase = true;
         self
     }
 
     /// Enables building libraries and services.
+    ///
+    /// This is the convenience switch used by callers that want both; use
+    /// [`build_libraries`](Self::build_libraries) to build libraries without
+    /// building services.
     #[must_use]
-    pub fn build(mut self) -> Self {
+    pub const fn build(mut self) -> Self {
         self.build = true;
+        self.build_libraries = true;
+        self
+    }
+
+    /// Enables building libraries.
+    #[must_use]
+    pub const fn build_libraries(mut self) -> Self {
+        self.build_libraries = true;
         self
     }
 
     /// Enables starting the selected services.
     #[must_use]
-    pub fn start(mut self) -> Self {
+    pub const fn start(mut self) -> Self {
         self.start = true;
         self
     }
+
+    /// Enables or disables waiting for health after startup.
+    #[must_use]
+    pub const fn with_wait_for_health(mut self, wait: bool) -> Self {
+        self.wait_for_health = wait;
+        self
+    }
+}
+
+/// A phase of environment preparation.
+///
+/// Phases give a workflow a stable, human-meaningful grouping independent of the
+/// individual task kinds: a `GitSync` phase contains fetch, checkout, and pull
+/// steps alike.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EnvironmentPhaseKind {
+    /// Workspace and precondition validation.
+    Validate,
+    /// Repository synchronization.
+    GitSync,
+    /// Required-library preparation.
+    LibraryPrepare,
+    /// Database migrations.
+    Migration,
+    /// Service builds.
+    ServiceBuild,
+    /// Service startup.
+    ServiceStart,
+    /// Health and readiness checks.
+    HealthCheck,
+}
+
+impl EnvironmentPhaseKind {
+    /// Returns a short, stable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Validate => "validate",
+            Self::GitSync => "git-sync",
+            Self::LibraryPrepare => "library-prepare",
+            Self::Migration => "migration",
+            Self::ServiceBuild => "service-build",
+            Self::ServiceStart => "service-start",
+            Self::HealthCheck => "health-check",
+        }
+    }
+
+    /// Maps a task kind onto the phase it belongs to.
+    #[must_use]
+    pub const fn from_task_kind(kind: &TaskKind) -> Option<Self> {
+        match kind {
+            TaskKind::Validate => Some(Self::Validate),
+            TaskKind::GitSync
+            | TaskKind::GitFetch
+            | TaskKind::GitPull
+            | TaskKind::GitCheckout
+            | TaskKind::GitClone => Some(Self::GitSync),
+            TaskKind::BuildLibrary | TaskKind::LibraryInstall | TaskKind::ArtifactVerification => {
+                Some(Self::LibraryPrepare)
+            }
+            TaskKind::Liquibase
+            | TaskKind::MigrationValidate
+            | TaskKind::MigrationStatus
+            | TaskKind::MigrationPending
+            | TaskKind::MigrationPreview
+            | TaskKind::MigrationApply => Some(Self::Migration),
+            TaskKind::BuildService | TaskKind::MavenBuild | TaskKind::NpmBuild => {
+                Some(Self::ServiceBuild)
+            }
+            TaskKind::StartService | TaskKind::RestartService | TaskKind::StopService => {
+                Some(Self::ServiceStart)
+            }
+            TaskKind::HealthCheck
+            | TaskKind::ProcessHealthCheck
+            | TaskKind::TcpHealthCheck
+            | TaskKind::HttpHealthCheck
+            | TaskKind::ReadinessCheck => Some(Self::HealthCheck),
+            _ => None,
+        }
+    }
+}
+
+impl std::fmt::Display for EnvironmentPhaseKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
+/// One planned step of an environment preparation.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentPlanStep {
+    /// The phase the step belongs to.
+    pub phase: EnvironmentPhaseKind,
+    /// The task the step performs.
+    pub task: TaskKind,
+    /// The service the step acts on, if any.
+    #[serde(default)]
+    pub service: Option<ServiceId>,
+    /// The library the step acts on, if any.
+    #[serde(default)]
+    pub library: Option<LibraryId>,
+    /// A human-readable description.
+    pub description: String,
+}
+
+/// A planned phase and the steps it contains.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentPlanPhase {
+    /// The phase.
+    pub kind: EnvironmentPhaseKind,
+    /// The steps in the phase, in planned order.
+    pub steps: Vec<EnvironmentPlanStep>,
+}
+
+/// A read-only plan for preparing a development environment.
+///
+/// Planning never mutates repositories, databases, or processes. It is the
+/// authoritative description of what [`Application::prepare_environment`] would
+/// schedule, computed from a single request so it cannot drift from execution.
+///
+/// [`Application::prepare_environment`]: crate::Application::prepare_environment
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct EnvironmentPlan {
+    /// The workspace the plan applies to.
+    pub workspace_id: WorkspaceId,
+    /// The branch that would be checked out, if any.
+    #[serde(default)]
+    pub target_branch: Option<Branch>,
+    /// The services the caller explicitly selected.
+    pub selected_services: Vec<ServiceId>,
+    /// Every service that would participate, including dependencies.
+    pub resolved_services: Vec<ServiceId>,
+    /// The services added automatically as required dependencies.
+    pub included_dependencies: Vec<ServiceId>,
+    /// The libraries that would be prepared, in dependency order.
+    pub required_libraries: Vec<LibraryId>,
+    /// The planned phases, in execution order.
+    pub phases: Vec<EnvironmentPlanPhase>,
+    /// The total number of steps across every phase.
+    pub step_count: u32,
+    /// Whether any step requires [`Permission::Destructive`].
+    ///
+    /// [`Permission::Destructive`]: service_orchestrator_domain::Permission::Destructive
+    pub requires_destructive_authorization: bool,
+    /// Non-fatal observations, for example explicitly skipped migrations.
+    #[serde(default)]
+    pub warnings: Vec<String>,
+}
+
+/// Per-phase progress within a workflow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowPhaseProgress {
+    /// The phase.
+    pub phase: EnvironmentPhaseKind,
+    /// The number of tasks in the phase.
+    pub total: u32,
+    /// Tasks that succeeded.
+    pub succeeded: u32,
+    /// Tasks that failed.
+    pub failed: u32,
+    /// Tasks that are still queued, blocked, or running.
+    pub pending: u32,
+}
+
+/// A structured failure within a workflow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowTaskFailure {
+    /// The failed task.
+    pub task_id: TaskId,
+    /// The task kind.
+    pub kind: TaskKind,
+    /// The service the task acted on, if any.
+    #[serde(default)]
+    pub service: Option<ServiceId>,
+    /// The library the task acted on, if any.
+    #[serde(default)]
+    pub library: Option<LibraryId>,
+    /// A stable, machine-readable error code.
+    pub code: String,
+    /// A human-readable summary.
+    pub message: String,
+}
+
+/// An aggregated, structured status for a workflow.
+///
+/// It carries counts, phase progress, and failures — never unbounded logs. A
+/// shared [`workflow_id`](Self::workflow_id) correlates every underlying task, so
+/// the TUI and MCP observe the same authoritative state through the daemon.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowStatus {
+    /// The workflow identifier.
+    pub workflow_id: WorkflowId,
+    /// The high-level purpose of the workflow.
+    pub kind: WorkflowKind,
+    /// The aggregate state.
+    pub state: WorkflowState,
+    /// The total number of tasks.
+    pub total: u32,
+    /// Tasks that succeeded.
+    pub succeeded: u32,
+    /// Tasks that failed.
+    pub failed: u32,
+    /// Tasks that were cancelled.
+    pub cancelled: u32,
+    /// Tasks that were deliberately skipped.
+    pub skipped: u32,
+    /// Tasks that are still queued, blocked, or running.
+    pub pending: u32,
+    /// When the workflow's first task started, if any.
+    #[serde(default)]
+    pub started_at: Option<Timestamp>,
+    /// When the workflow's last task finished, if it has.
+    #[serde(default)]
+    pub finished_at: Option<Timestamp>,
+    /// Progress per phase, in canonical phase order.
+    pub phases: Vec<WorkflowPhaseProgress>,
+    /// Every failed task, with its structured error.
+    #[serde(default)]
+    pub failures: Vec<WorkflowTaskFailure>,
+}
+
+/// The result of requesting cancellation of a workflow's tasks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkflowCancellation {
+    /// How many still-active tasks were asked to cancel.
+    pub cancelled_tasks: u32,
+    /// Whether every task was already terminal when cancellation was requested.
+    pub already_complete: bool,
 }
 
 /// A structured snapshot of a service's configuration and runtime state.

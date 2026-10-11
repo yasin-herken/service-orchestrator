@@ -347,6 +347,9 @@ fn mcp_stdio_end_to_end() {
         "get_task",
         "get_logs",
         "prepare_environment",
+        "plan_prepare_environment",
+        "get_workflow_status",
+        "cancel_workflow",
     ] {
         assert!(names.contains(&expected), "tool '{expected}' is advertised");
     }
@@ -410,6 +413,62 @@ fn mcp_stdio_end_to_end() {
     );
     assert_eq!(task["success"], json!(true));
     assert_eq!(task["data"]["id"], json!(task_id));
+
+    // -- 5b. environment workflow: plan, execute, track, cancel --------------
+    let plan = envelope(
+        &server.request(
+            "tools/call",
+            json!({
+                "name": "plan_prepare_environment",
+                "arguments": { "workspaceId": "demo", "serviceIds": ["admin-ui"], "build": true }
+            }),
+        )["result"],
+    );
+    assert_eq!(plan["success"], json!(true));
+    assert_eq!(plan["data"]["workspace_id"], json!("demo"));
+    // admin-ui depends on orders-api, so the daemon resolves it into the closure.
+    let resolved = plan["data"]["resolved_services"]
+        .as_array()
+        .expect("resolved services are listed");
+    assert!(
+        resolved.iter().any(|id| id.as_str() == Some("orders-api")),
+        "the dependency closure includes orders-api: {resolved:?}"
+    );
+
+    let prepared = envelope(
+        &server.request(
+            "tools/call",
+            json!({
+                "name": "prepare_environment",
+                "arguments": { "workspaceId": "demo", "serviceIds": ["orders-api"], "build": true }
+            }),
+        )["result"],
+    );
+    assert_eq!(prepared["success"], json!(true));
+    assert_eq!(prepared["data"]["outcome"], json!("workflow_scheduled"));
+    let workflow_id = prepared["data"]["workflowId"]
+        .as_str()
+        .expect("a workflow id is returned")
+        .to_owned();
+
+    // The workflow runs in the shared daemon and is observable by id.
+    let status = envelope(
+        &server.request(
+            "tools/call",
+            json!({ "name": "get_workflow_status", "arguments": { "workflowId": workflow_id } }),
+        )["result"],
+    );
+    assert_eq!(status["success"], json!(true));
+    assert_eq!(status["data"]["workflow_id"], json!(workflow_id));
+
+    let cancelled = envelope(
+        &server.request(
+            "tools/call",
+            json!({ "name": "cancel_workflow", "arguments": { "workflowId": workflow_id } }),
+        )["result"],
+    );
+    assert_eq!(cancelled["success"], json!(true));
+    assert!(cancelled["data"]["already_complete"].is_boolean());
 
     // -- 6. invalid input returns a structured error -------------------------
     let missing = server.request(

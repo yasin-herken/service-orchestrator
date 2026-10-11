@@ -57,10 +57,13 @@ mod queries;
 pub use app::Application;
 pub use error::ApplicationError;
 pub use models::{
-    AlignmentStatus, BulkOperationSummary, ConsumerAlignment, DiagnosticFailure, HealthCheckScope,
-    LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions, LibraryStatus,
-    MigrationStatus, OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
-    ServiceDiagnostics, ServiceRuntimeStatus, ServiceStatus, VersionAlignmentPlan, WorkspaceStatus,
+    AlignmentStatus, BulkOperationSummary, ConsumerAlignment, DiagnosticFailure,
+    EnvironmentPhaseKind, EnvironmentPlan, EnvironmentPlanPhase, EnvironmentPlanStep,
+    HealthCheckScope, LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions,
+    LibraryStatus, MigrationStatus, OperationResult, PrepareEnvironmentRequest,
+    PrepareSelectedLibrariesRequest, ServiceDiagnostics, ServiceRuntimeStatus, ServiceStatus,
+    VersionAlignmentPlan, WorkflowCancellation, WorkflowPhaseProgress, WorkflowStatus,
+    WorkflowTaskFailure, WorkspaceStatus,
 };
 // The policy vocabulary an interface needs to *decide* whether to prompt for
 // confirmation. The application already owns the engine; re-exporting the

@@ -369,6 +369,45 @@ impl TaskStore {
         Ok(())
     }
 
+    /// Cancels every queued task whose cancellation has been signalled.
+    ///
+    /// A cancellation request is honoured before a queued task ever starts: the
+    /// task transitions `queued -> cancelled` without occupying an execution
+    /// slot, and dependent tasks settle as skipped through
+    /// [`settle_dependents`](Self::settle_dependents). Returns the transitions
+    /// applied so the engine can publish events and settle dependents
+    /// (`tasks/016.md` §25).
+    pub(crate) fn cancel_queued_signalled(&self) -> Vec<StatusChange> {
+        let mut inner = self.inner.lock().expect("task store mutex poisoned");
+        let cancelled: Vec<TaskId> = inner
+            .order
+            .values()
+            .filter(|id| {
+                inner.tasks.get(id).is_some_and(|record| {
+                    record.task.status == TaskStatus::Queued && record.cancellation.is_cancelled()
+                })
+            })
+            .cloned()
+            .collect();
+
+        let mut changes = Vec::new();
+        for id in cancelled {
+            if let Some(record) = inner.tasks.get_mut(&id) {
+                if record.task.transition(TaskStatus::Cancelled).is_ok() {
+                    changes.push(StatusChange {
+                        id,
+                        to: TaskStatus::Cancelled,
+                        failure: None,
+                    });
+                }
+            }
+        }
+        if !changes.is_empty() {
+            bump_revision(&mut inner);
+        }
+        changes
+    }
+
     /// Returns the next task that is queued and whose dependencies are met.
     ///
     /// Selection is FIFO by insertion sequence, which keeps scheduling
@@ -392,52 +431,64 @@ impl TaskStore {
 
     /// Settles tasks that depend on `completed` now that it is terminal.
     ///
+    /// Propagation is transitive: when a dependent settles as skipped (or
+    /// failed) because a prerequisite did not succeed, its own dependents are
+    /// settled in turn, so a failure never leaves a downstream task blocked
+    /// forever (`tasks/016.md` §24). A dependent that becomes runnable (`Queued`)
+    /// is not terminal, so it stops propagation until it settles.
+    ///
     /// Returns the transitions applied, so the engine can emit events and wake
     /// the scheduler.
     pub(crate) fn settle_dependents(&self, completed: &TaskId) -> Vec<StatusChange> {
         let mut inner = self.inner.lock().expect("task store mutex poisoned");
-        let dependents = inner.dependents.get(completed).cloned().unwrap_or_default();
         let mut changes = Vec::new();
+        let mut queue = vec![completed.clone()];
 
-        for dependent in dependents {
-            let next = {
-                let record = match inner.tasks.get(&dependent) {
-                    Some(record) => record,
-                    None => continue,
+        while let Some(settled) = queue.pop() {
+            let dependents = inner.dependents.get(&settled).cloned().unwrap_or_default();
+            for dependent in dependents {
+                let next = {
+                    let record = match inner.tasks.get(&dependent) {
+                        Some(record) => record,
+                        None => continue,
+                    };
+                    if record.task.status != TaskStatus::Blocked {
+                        continue;
+                    }
+                    if !all_dependencies_terminal(record, &inner.tasks) {
+                        continue;
+                    }
+                    if dependencies_satisfied(record, &inner.tasks) {
+                        TaskStatus::Queued
+                    } else {
+                        TaskStatus::Skipped
+                    }
                 };
-                if record.task.status != TaskStatus::Blocked {
-                    continue;
-                }
-                if !all_dependencies_terminal(record, &inner.tasks) {
-                    continue;
-                }
-                if dependencies_satisfied(record, &inner.tasks) {
-                    TaskStatus::Queued
-                } else {
-                    TaskStatus::Skipped
-                }
-            };
 
-            if let Some(record) = inner.tasks.get_mut(&dependent) {
-                if let Err(error) = record.task.transition(next) {
-                    // A rejected transition here would indicate a logic error;
-                    // surface it as an internal failure rather than panicking.
-                    return vec![StatusChange {
-                        id: dependent,
-                        to: next,
-                        failure: Some(TaskFailure {
-                            code: "INVALID_TASK_TRANSITION".to_owned(),
-                            message: error.to_string(),
-                            detail: None,
-                        }),
-                    }];
+                if let Some(record) = inner.tasks.get_mut(&dependent) {
+                    if let Err(error) = record.task.transition(next) {
+                        // A rejected transition here would indicate a logic error;
+                        // surface it as an internal failure rather than panicking.
+                        return vec![StatusChange {
+                            id: dependent,
+                            to: next,
+                            failure: Some(TaskFailure {
+                                code: "INVALID_TASK_TRANSITION".to_owned(),
+                                message: error.to_string(),
+                                detail: None,
+                            }),
+                        }];
+                    }
+                }
+                changes.push(StatusChange {
+                    id: dependent.clone(),
+                    to: next,
+                    failure: None,
+                });
+                if next.is_terminal() {
+                    queue.push(dependent);
                 }
             }
-            changes.push(StatusChange {
-                id: dependent,
-                to: next,
-                failure: None,
-            });
         }
 
         if !changes.is_empty() {

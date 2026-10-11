@@ -30,11 +30,12 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use service_orchestrator_application::{
-    Application, ApplicationError, Authorization, BulkOperationSummary, HealthCheckScope,
-    LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions, LibraryStatus, LogEntry,
-    LogPage, LogRequest, LogSubscription, MigrationStatus, OperationResult,
-    PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest, ServiceDiagnostics, ServiceHealth,
-    ServiceRuntimeStatus, ServiceStatus, WorkspaceStatus,
+    Application, ApplicationError, Authorization, BulkOperationSummary, EnvironmentPlan,
+    HealthCheckScope, LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions,
+    LibraryStatus, LogEntry, LogPage, LogRequest, LogSubscription, MigrationStatus,
+    OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
+    ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus, ServiceStatus, WorkflowCancellation,
+    WorkflowStatus, WorkspaceStatus,
 };
 use service_orchestrator_application::{DiffOptions, HealthState};
 use service_orchestrator_domain::{
@@ -434,6 +435,21 @@ pub trait OrchestratorClient: Send + Sync {
         &self,
         request: PrepareEnvironmentRequest,
     ) -> Result<OperationResult, ApplicationError>;
+    /// Plans an environment preparation without changing anything.
+    fn plan_prepare_environment(
+        &self,
+        request: &PrepareEnvironmentRequest,
+    ) -> Result<EnvironmentPlan, ApplicationError>;
+    /// Returns an aggregated status for a workflow.
+    fn get_workflow_status(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<WorkflowStatus, ApplicationError>;
+    /// Requests cancellation of every active task in a workflow.
+    fn cancel_workflow(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<WorkflowCancellation, ApplicationError>;
     /// Starts every service in a group.
     fn start_group(
         &self,
@@ -900,6 +916,27 @@ impl OrchestratorClient for Application {
         request: PrepareEnvironmentRequest,
     ) -> Result<OperationResult, ApplicationError> {
         Application::prepare_environment(self, request)
+    }
+
+    fn plan_prepare_environment(
+        &self,
+        request: &PrepareEnvironmentRequest,
+    ) -> Result<EnvironmentPlan, ApplicationError> {
+        Application::plan_prepare_environment(self, request)
+    }
+
+    fn get_workflow_status(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<WorkflowStatus, ApplicationError> {
+        Application::get_workflow_status(self, workflow_id)
+    }
+
+    fn cancel_workflow(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<WorkflowCancellation, ApplicationError> {
+        Application::cancel_workflow(self, workflow_id)
     }
 
     fn start_group(

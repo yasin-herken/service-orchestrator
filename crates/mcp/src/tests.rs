@@ -165,6 +165,16 @@ fn read_only_tools_declare_read_only_and_destructive_tools_declare_destructive()
     let reset = find("git_reset_hard");
     assert_eq!(reset.read_only_hint, Some(false));
     assert_eq!(reset.destructive_hint, Some(true));
+
+    // Planning an environment preparation is read-only; cancelling a workflow
+    // is a plain (non-destructive) write.
+    let plan = find("plan_prepare_environment");
+    assert_eq!(plan.read_only_hint, Some(true));
+    assert_eq!(plan.destructive_hint, Some(false));
+
+    let cancel = find("cancel_workflow");
+    assert_eq!(cancel.read_only_hint, Some(false));
+    assert_eq!(cancel.destructive_hint, Some(false));
 }
 
 #[tokio::test]
@@ -371,6 +381,110 @@ async fn get_task_reports_task_not_found_for_an_unknown_task() {
         .call_app_error("get_task", json!({ "taskId": "task-does-not-exist" }))
         .await;
     assert_eq!(body.code, "TASK_NOT_FOUND");
+}
+
+// -- environment workflows ---------------------------------------------------
+
+#[tokio::test]
+async fn plan_prepare_environment_returns_a_structured_plan() {
+    let harness = Harness::new();
+    let data = harness
+        .call_ok(
+            "plan_prepare_environment",
+            json!({
+                "workspaceId": "demo",
+                "serviceIds": ["admin-ui"],
+                "build": true,
+                "start": true
+            }),
+        )
+        .await;
+
+    assert_eq!(
+        data.get("workspace_id").and_then(Value::as_str),
+        Some("demo")
+    );
+    let selected = data["selected_services"]
+        .as_array()
+        .expect("a list of selected services");
+    assert!(selected.iter().any(|id| id.as_str() == Some("admin-ui")));
+
+    // admin-ui depends on orders-api, so the dependency closure includes it.
+    let resolved: Vec<&str> = data["resolved_services"]
+        .as_array()
+        .expect("a list of resolved services")
+        .iter()
+        .filter_map(Value::as_str)
+        .collect();
+    assert!(resolved.contains(&"orders-api"));
+
+    assert!(data["phases"]
+        .as_array()
+        .is_some_and(|phases| !phases.is_empty()));
+    // The fixture's only migration target is local, so no confirmation is due.
+    assert_eq!(
+        data.get("requires_destructive_authorization")
+            .and_then(Value::as_bool),
+        Some(false)
+    );
+}
+
+#[tokio::test]
+async fn prepare_environment_schedules_a_queryable_workflow() {
+    let harness = Harness::new();
+    let data = harness
+        .call_ok(
+            "prepare_environment",
+            json!({
+                "workspaceId": "demo",
+                "serviceIds": ["orders-api"],
+                "build": true,
+                "start": true
+            }),
+        )
+        .await;
+    assert_eq!(
+        data.get("outcome").and_then(Value::as_str),
+        Some("workflow_scheduled")
+    );
+    let workflow_id = data
+        .get("workflowId")
+        .and_then(Value::as_str)
+        .expect("a workflow id");
+
+    // The workflow is immediately observable through the shared engine.
+    let status = harness
+        .call_ok("get_workflow_status", json!({ "workflowId": workflow_id }))
+        .await;
+    assert_eq!(
+        status.get("workflow_id").and_then(Value::as_str),
+        Some(workflow_id)
+    );
+    assert!(status.get("state").and_then(Value::as_str).is_some());
+    assert!(status.get("phases").and_then(Value::as_array).is_some());
+    assert!(status.get("total").and_then(Value::as_u64).is_some());
+
+    // Cancellation is a real engine operation and reports a structured result.
+    let cancelled = harness
+        .call_ok("cancel_workflow", json!({ "workflowId": workflow_id }))
+        .await;
+    assert!(cancelled
+        .get("already_complete")
+        .and_then(Value::as_bool)
+        .is_some());
+    assert!(cancelled
+        .get("cancelled_tasks")
+        .and_then(Value::as_u64)
+        .is_some());
+}
+
+#[tokio::test]
+async fn get_workflow_status_reports_workflow_not_found() {
+    let harness = Harness::new();
+    let body = harness
+        .call_app_error("get_workflow_status", json!({ "workflowId": "missing" }))
+        .await;
+    assert_eq!(body.code, "WORKFLOW_NOT_FOUND");
 }
 
 #[test]

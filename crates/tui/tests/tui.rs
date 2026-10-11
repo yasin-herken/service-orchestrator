@@ -303,6 +303,57 @@ fn destructive_actions_require_confirmation() {
 }
 
 #[test]
+fn prepare_environment_previews_the_plan_then_schedules_a_workflow() {
+    let mut harness = harness();
+    harness.app.apply(Action::SwitchScreen(Screen::Dashboard));
+
+    // P opens the depth chooser from the Dashboard.
+    harness
+        .app
+        .handle_event(AppEvent::Input(InputEvent::ch('P')));
+    assert!(matches!(
+        harness.app.state().dialog,
+        Some(Dialog::Select(_))
+    ));
+    assert!(
+        harness.tasks.task_ids().is_empty(),
+        "nothing is scheduled before the plan is reviewed"
+    );
+
+    // Choosing a depth prompts for an optional branch.
+    harness.app.apply(Action::ConfirmDialog);
+    assert!(matches!(harness.app.state().dialog, Some(Dialog::Input(_))));
+
+    // Submitting the branch computes the real plan and opens the review dialog.
+    harness.app.apply(Action::ConfirmDialog);
+    match harness.app.state().dialog.as_ref() {
+        Some(Dialog::Confirm(confirm)) => {
+            assert!(
+                confirm.title.contains("environment plan"),
+                "{}",
+                confirm.title
+            );
+        }
+        other => panic!("expected a plan review dialog, found {other:?}"),
+    }
+    assert!(
+        harness.tasks.task_ids().is_empty(),
+        "planning must not schedule anything"
+    );
+
+    // Confirming executes the workflow through the shared engine.
+    harness.app.apply(Action::ConfirmDialog);
+    assert!(
+        !harness.tasks.task_ids().is_empty(),
+        "the environment workflow was scheduled"
+    );
+    assert!(!matches!(
+        harness.app.state().dialog,
+        Some(Dialog::Confirm(_))
+    ));
+}
+
+#[test]
 fn application_errors_are_presented_actionably() {
     let mut harness = harness();
     harness

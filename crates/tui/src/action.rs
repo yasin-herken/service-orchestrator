@@ -5,7 +5,8 @@
 //! cursor or open a dialog; the rest are *dispatched* to the application core as
 //! a use case. No action executes infrastructure directly.
 
-use service_orchestrator_domain::{LibraryId, ServiceId, TaskId};
+use service_orchestrator_application::PrepareEnvironmentRequest;
+use service_orchestrator_domain::{LibraryId, ServiceId, TaskId, WorkflowId};
 
 use crate::state::Screen;
 
@@ -159,4 +160,17 @@ pub enum Action {
     SyncWorkspace,
     /// Build every library and buildable service in the workspace.
     BuildWorkspace,
+
+    /// Open the Prepare Environment options for the active workspace.
+    PrepareEnvironment,
+    /// Choose a branch for an environment preparation, then plan it.
+    PrepareEnvironmentBranch(Box<PrepareEnvironmentRequest>),
+    /// Plan (preview) an environment preparation without changing anything.
+    PlanPrepareEnvironment(Box<PrepareEnvironmentRequest>),
+    /// Execute a reviewed environment preparation plan.
+    ConfirmPrepareEnvironment(Box<PrepareEnvironmentRequest>),
+    /// Open a chooser for cancelling an active workflow.
+    RequestCancelWorkflow,
+    /// Cancel every active task in a workflow.
+    CancelWorkflow(WorkflowId),
 }

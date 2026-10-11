@@ -314,6 +314,19 @@ Clients never create an independent registry. Task listing
 (`list_tasks`/`list_running_tasks`/`list_recent_tasks`) and task events are served
 entirely by the daemon.
 
+The same is true of **workflows**. A prepared environment is one
+`WorkflowDefinition` submitted to the daemon's engine, so `get_workflow_status`
+and `cancel_workflow` observe the identical authoritative state from any client:
+
+```text
+TUI ── prepare-env (profile) ──▶ daemon ──▶ Workflow #7
+MCP ── get_workflow_status #7 ─▶ daemon ──▶ Workflow #7 RUNNING
+```
+
+The plan returned by `plan_prepare_environment` is computed by the daemon too, so
+the preview an interface shows is the daemon's own authoritative plan, not a
+locally re-derived one (`docs/environment-workflows.md`).
+
 ---
 
 ## 10. Event streaming
@@ -422,6 +435,8 @@ information is shown.
 - `docs/architecture.md` — the layered architecture and dependency rules.
 - `docs/tui.md` — the TUI adapter over the shared runtime.
 - `docs/mcp.md` — the MCP adapter over the shared runtime.
+- `docs/environment-workflows.md` — the shared environment workflow both
+  interfaces observe through the daemon.
 - `docs/application-core.md` — the use cases every client reaches.
 - `docs/task-engine.md` — the single task engine the daemon owns.
 - `docs/process-manager.md` — the single process owner.

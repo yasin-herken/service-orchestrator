@@ -376,6 +376,21 @@ pub(crate) fn tools() -> Vec<Tool> {
             "Prepare a development environment: sync, optionally migrate, build, and start. Returns a workflow id.",
             write(),
         ),
+        tool::<params::PrepareEnvironmentRequest>(
+            "plan_prepare_environment",
+            "Plan a development environment preparation without changing anything. Returns the resolved phases and steps.",
+            read(),
+        ),
+        tool::<params::WorkflowRef>(
+            "get_workflow_status",
+            "Return an aggregated status for a workflow: state, per-phase progress, and structured failures.",
+            read(),
+        ),
+        tool::<params::WorkflowRef>(
+            "cancel_workflow",
+            "Request cancellation of every still-active task in a workflow.",
+            write(),
+        ),
         tool::<params::GroupAction>(
             "start_group",
             "Start every service in a group. Returns a workflow id.",

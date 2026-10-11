@@ -19,14 +19,15 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use service_orchestrator_application::{
-    parameter, Application, ApplicationError, HealthState, InMemoryRuntimeStateStore, LogRequest,
-    NullLogService, OperationResult, PrepareEnvironmentRequest, RuntimeStateStore,
-    ServiceProcessInfo, ServiceRuntimeIndex, ServiceRuntimeState,
+    parameter, Application, ApplicationError, EnvironmentPhaseKind, HealthState,
+    InMemoryRuntimeStateStore, LogRequest, NullLogService, OperationResult,
+    PrepareEnvironmentRequest, RuntimeStateStore, ServiceProcessInfo, ServiceRuntimeIndex,
+    ServiceRuntimeState,
 };
 use service_orchestrator_config::{load_from_str, Config};
 use service_orchestrator_domain::{
     Branch, GroupId, LibraryId, Permission, ProcessState, ProfileId, ServiceId, Task, TaskId,
-    TaskKind, WorkflowId, WorkflowKind, WorkspaceId,
+    TaskKind, TaskStatus, WorkflowId, WorkflowKind, WorkflowState, WorkspaceId,
 };
 use service_orchestrator_execution::{
     RetryPolicy, TaskDefinition, TaskManager, TaskManagerError, TaskTarget, WorkflowDefinition,
@@ -154,7 +155,9 @@ default_timeout_seconds = 1800
 struct FakeTaskManager {
     submitted: Mutex<Vec<TaskDefinition>>,
     workflows: Mutex<Vec<WorkflowDefinition>>,
-    workflow_tasks: Mutex<std::collections::BTreeMap<WorkflowId, Vec<Task>>>,
+    workflow_kinds: Mutex<std::collections::BTreeMap<WorkflowId, WorkflowKind>>,
+    tasks: Mutex<std::collections::BTreeMap<TaskId, Task>>,
+    cancelled: Mutex<Vec<TaskId>>,
     counter: AtomicUsize,
     reject_next: AtomicBool,
 }
@@ -174,6 +177,36 @@ impl FakeTaskManager {
 
     fn reject_next(&self) {
         self.reject_next.store(true, Ordering::SeqCst);
+    }
+
+    /// Returns the tasks recorded for a workflow, in submission order.
+    fn task_ids(&self, workflow: &WorkflowId) -> Vec<TaskId> {
+        let mut tasks: Vec<Task> = self
+            .tasks
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|task| task.workflow.as_ref() == Some(workflow))
+            .cloned()
+            .collect();
+        tasks.sort_by_key(|task| task.id.to_string());
+        tasks.into_iter().map(|task| task.id).collect()
+    }
+
+    /// Sets a recorded task's status, for status-aggregation tests.
+    fn set_status(&self, id: &TaskId, status: TaskStatus) {
+        if let Some(task) = self.tasks.lock().unwrap().get_mut(id) {
+            task.status = status;
+            if status.is_terminal() {
+                task.finished_at = Some(service_orchestrator_domain::Timestamp::now());
+            } else if status.is_active() {
+                task.started_at = Some(service_orchestrator_domain::Timestamp::now());
+            }
+        }
+    }
+
+    fn cancelled(&self) -> Vec<TaskId> {
+        self.cancelled.lock().unwrap().clone()
     }
 }
 
@@ -195,42 +228,41 @@ impl TaskManager for FakeTaskManager {
     ) -> Result<WorkflowId, TaskManagerError> {
         let index = self.counter.fetch_add(1, Ordering::SeqCst);
         let workflow_id = WorkflowId::new(format!("workflow-{index}")).unwrap();
-        let tasks = definition
-            .steps
-            .iter()
-            .enumerate()
-            .map(|(position, step)| {
+        {
+            let mut tasks = self.tasks.lock().unwrap();
+            for (position, step) in definition.steps.iter().enumerate() {
                 let task_id = TaskId::new(format!("task-{index}-{position}")).unwrap();
-                Task::new(task_id, step.task.clone())
-            })
-            .collect();
-        self.workflow_tasks
+                let mut task = Task::new(task_id.clone(), step.task.clone());
+                task.workflow = Some(workflow_id.clone());
+                tasks.insert(task_id, task);
+            }
+        }
+        self.workflow_kinds
             .lock()
             .unwrap()
-            .insert(workflow_id.clone(), tasks);
+            .insert(workflow_id.clone(), definition.kind.clone());
         self.workflows.lock().unwrap().push(definition);
         Ok(workflow_id)
     }
 
     fn task(&self, id: &TaskId) -> Result<service_orchestrator_domain::Task, TaskManagerError> {
-        Err(TaskManagerError::NotFound {
-            entity: "task",
-            id: id.to_string(),
-        })
+        self.tasks
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| TaskManagerError::NotFound {
+                entity: "task",
+                id: id.to_string(),
+            })
     }
 
     fn workflow(
         &self,
         id: &WorkflowId,
     ) -> Result<service_orchestrator_domain::Workflow, TaskManagerError> {
-        Err(TaskManagerError::NotFound {
-            entity: "workflow",
-            id: id.to_string(),
-        })
-    }
-
-    fn workflow_tasks(&self, id: &WorkflowId) -> Result<Vec<Task>, TaskManagerError> {
-        self.workflow_tasks
+        let kind = self
+            .workflow_kinds
             .lock()
             .unwrap()
             .get(id)
@@ -238,10 +270,31 @@ impl TaskManager for FakeTaskManager {
             .ok_or_else(|| TaskManagerError::NotFound {
                 entity: "workflow",
                 id: id.to_string(),
-            })
+            })?;
+        Ok(service_orchestrator_domain::Workflow::new(id.clone(), kind))
     }
 
-    fn cancel(&self, _id: &TaskId) -> Result<(), TaskManagerError> {
+    fn workflow_tasks(&self, id: &WorkflowId) -> Result<Vec<Task>, TaskManagerError> {
+        let mut tasks: Vec<Task> = self
+            .tasks
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|task| task.workflow.as_ref() == Some(id))
+            .cloned()
+            .collect();
+        tasks.sort_by_key(|task| task.id.to_string());
+        if tasks.is_empty() && !self.workflow_kinds.lock().unwrap().contains_key(id) {
+            return Err(TaskManagerError::NotFound {
+                entity: "workflow",
+                id: id.to_string(),
+            });
+        }
+        Ok(tasks)
+    }
+
+    fn cancel(&self, id: &TaskId) -> Result<(), TaskManagerError> {
+        self.cancelled.lock().unwrap().push(id.clone());
         Ok(())
     }
 }
@@ -963,6 +1016,250 @@ fn prepare_environment_rejects_unknown_workspace_and_services() {
         h.app.prepare_environment(unknown_service).unwrap_err(),
         ApplicationError::ServiceNotFound(_)
     ));
+}
+
+#[test]
+fn plan_prepare_environment_is_read_only_and_matches_execution() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("auth-service")])
+        .with_branch(Branch::new("feature/x").unwrap())
+        .build()
+        .run_liquibase()
+        .start();
+
+    let plan = h.app.plan_prepare_environment(&request).unwrap();
+
+    // Planning mutated nothing: no workflow was submitted.
+    assert!(h.tasks.workflows().is_empty());
+    assert!(h.tasks.submitted().is_empty());
+
+    assert_eq!(plan.workspace_id, workspace());
+    assert_eq!(plan.target_branch, Some(Branch::new("feature/x").unwrap()));
+    assert_eq!(plan.selected_services, vec![service("auth-service")]);
+    assert_eq!(
+        plan.required_libraries,
+        vec![LibraryId::new("common-core").unwrap()]
+    );
+    assert!(!plan.requires_destructive_authorization);
+
+    let phases: BTreeSet<EnvironmentPhaseKind> = plan.phases.iter().map(|p| p.kind).collect();
+    for expected in [
+        EnvironmentPhaseKind::GitSync,
+        EnvironmentPhaseKind::LibraryPrepare,
+        EnvironmentPhaseKind::Migration,
+        EnvironmentPhaseKind::ServiceBuild,
+        EnvironmentPhaseKind::ServiceStart,
+        EnvironmentPhaseKind::HealthCheck,
+    ] {
+        assert!(phases.contains(&expected), "missing phase {expected}");
+    }
+
+    // Executing the identical request schedules the same number of steps.
+    let result = h.app.prepare_environment(request).unwrap();
+    assert!(result.workflow_id().is_some());
+    let workflows = h.tasks.workflows();
+    assert_eq!(
+        u32::try_from(workflows[0].steps.len()).unwrap(),
+        plan.step_count
+    );
+}
+
+#[test]
+fn plan_prepare_environment_includes_required_dependencies() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace()).with_services([service("web-ui")]);
+    let plan = h.app.plan_prepare_environment(&request).unwrap();
+
+    assert_eq!(plan.selected_services, vec![service("web-ui")]);
+    assert!(plan.resolved_services.contains(&service("auth-service")));
+    assert_eq!(plan.included_dependencies, vec![service("auth-service")]);
+    assert_eq!(
+        plan.required_libraries,
+        vec![LibraryId::new("common-core").unwrap()]
+    );
+}
+
+#[test]
+fn plan_prepare_environment_can_exclude_dependencies() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("web-ui")])
+        .with_dependencies(false);
+    let plan = h.app.plan_prepare_environment(&request).unwrap();
+
+    assert_eq!(plan.resolved_services, vec![service("web-ui")]);
+    assert!(plan.included_dependencies.is_empty());
+    assert!(plan.required_libraries.is_empty());
+}
+
+#[test]
+fn plan_prepare_environment_selects_services_by_profile_and_group() {
+    let h = harness();
+
+    let profile = PrepareEnvironmentRequest::new(workspace())
+        .with_profile(ProfileId::new("full-stack").unwrap());
+    let plan = h.app.plan_prepare_environment(&profile).unwrap();
+    assert_eq!(plan.selected_services.len(), 2);
+    assert!(plan.selected_services.contains(&service("auth-service")));
+    assert!(plan.selected_services.contains(&service("web-ui")));
+
+    let group =
+        PrepareEnvironmentRequest::new(workspace()).with_group(GroupId::new("customer").unwrap());
+    let plan = h.app.plan_prepare_environment(&group).unwrap();
+    assert_eq!(plan.selected_services.len(), 2);
+}
+
+#[test]
+fn plan_prepare_environment_reports_disabled_migrations_explicitly() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("web-ui")])
+        .with_dependencies(false)
+        .run_liquibase();
+    let plan = h.app.plan_prepare_environment(&request).unwrap();
+
+    assert!(
+        plan.warnings
+            .iter()
+            .any(|warning| warning.contains("web-ui")),
+        "expected an explicit migration warning, got {:?}",
+        plan.warnings
+    );
+    assert!(!plan
+        .phases
+        .iter()
+        .any(|phase| phase.kind == EnvironmentPhaseKind::Migration));
+}
+
+#[test]
+fn plan_prepare_environment_flags_destructive_migrations_without_enforcing_auth() {
+    let config = CONFIG.replace("environment = \"local\"", "environment = \"staging\"");
+    let h = harness_with(&config);
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("auth-service")])
+        .run_liquibase();
+
+    // Planning only needs Read: it reports the risk rather than refusing.
+    let plan = h.app.plan_prepare_environment(&request).unwrap();
+    assert!(plan.requires_destructive_authorization);
+
+    // Execution without destructive authorization is refused.
+    assert!(matches!(
+        h.app.prepare_environment(request).unwrap_err(),
+        ApplicationError::PermissionDenied { .. }
+    ));
+}
+
+#[test]
+fn plan_prepare_environment_keeps_dependency_order_for_builds_and_starts() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("web-ui")])
+        .build()
+        .start();
+    let plan = h.app.plan_prepare_environment(&request).unwrap();
+
+    // auth-service is pulled in implicitly and resolved before its dependent.
+    assert_eq!(plan.selected_services, vec![service("web-ui")]);
+    assert!(plan.resolved_services.contains(&service("auth-service")));
+    assert!(!plan.included_dependencies.is_empty());
+}
+
+#[test]
+fn workflow_status_aggregates_task_states_and_reports_failures() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("auth-service")])
+        .build()
+        .run_liquibase()
+        .start();
+    let result = h.app.prepare_environment(request).unwrap();
+    let workflow_id = result.workflow_id().unwrap().clone();
+
+    let ids = h.tasks.task_ids(&workflow_id);
+    assert!(ids.len() >= 3);
+    h.tasks.set_status(&ids[0], TaskStatus::Succeeded);
+    h.tasks.set_status(&ids[1], TaskStatus::Running);
+    for id in &ids[2..] {
+        h.tasks.set_status(id, TaskStatus::Queued);
+    }
+
+    let status = h.app.get_workflow_status(&workflow_id).unwrap();
+    assert_eq!(status.workflow_id, workflow_id);
+    assert_eq!(status.state, WorkflowState::Running);
+    assert_eq!(status.total, u32::try_from(ids.len()).unwrap());
+    assert_eq!(status.succeeded, 1);
+    assert_eq!(status.pending, u32::try_from(ids.len()).unwrap() - 1);
+    assert_eq!(
+        status.phases.iter().map(|phase| phase.total).sum::<u32>(),
+        u32::try_from(ids.len()).unwrap()
+    );
+
+    // Drive every task to a terminal state with a single failure: the workflow
+    // is partially succeeded and the failure is reported structurally.
+    for (index, id) in ids.iter().enumerate() {
+        if index == 2 {
+            h.tasks.set_status(id, TaskStatus::Failed);
+        } else {
+            h.tasks.set_status(id, TaskStatus::Succeeded);
+        }
+    }
+    let status = h.app.get_workflow_status(&workflow_id).unwrap();
+    assert_eq!(status.state, WorkflowState::PartiallySucceeded);
+    assert_eq!(status.failed, 1);
+    assert_eq!(status.succeeded, u32::try_from(ids.len()).unwrap() - 1);
+    assert_eq!(status.failures.len(), 1);
+    assert_eq!(status.failures[0].task_id, ids[2]);
+}
+
+#[test]
+fn workflow_status_and_cancellation_reject_unknown_workflows() {
+    let h = harness();
+    let missing = WorkflowId::new("missing").unwrap();
+    assert!(matches!(
+        h.app.get_workflow_status(&missing).unwrap_err(),
+        ApplicationError::WorkflowNotFound(_)
+    ));
+    assert!(matches!(
+        h.app.cancel_workflow(&missing).unwrap_err(),
+        ApplicationError::WorkflowNotFound(_)
+    ));
+}
+
+#[test]
+fn cancel_workflow_cancels_only_active_tasks() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("auth-service")])
+        .build()
+        .run_liquibase()
+        .start();
+    let result = h.app.prepare_environment(request).unwrap();
+    let workflow_id = result.workflow_id().unwrap().clone();
+
+    let ids = h.tasks.task_ids(&workflow_id);
+    assert!(ids.len() >= 2);
+    h.tasks.set_status(&ids[0], TaskStatus::Succeeded);
+
+    let cancellation = h.app.cancel_workflow(&workflow_id).unwrap();
+    assert!(!cancellation.already_complete);
+    assert_eq!(
+        cancellation.cancelled_tasks,
+        u32::try_from(ids.len()).unwrap() - 1
+    );
+
+    let cancelled = h.tasks.cancelled();
+    assert_eq!(cancelled.len(), ids.len() - 1);
+    assert!(!cancelled.contains(&ids[0]));
+
+    // Cancelling an all-terminal workflow is a no-op.
+    for id in &ids {
+        h.tasks.set_status(id, TaskStatus::Succeeded);
+    }
+    let cancellation = h.app.cancel_workflow(&workflow_id).unwrap();
+    assert!(cancellation.already_complete);
+    assert_eq!(cancellation.cancelled_tasks, 0);
 }
 
 #[test]

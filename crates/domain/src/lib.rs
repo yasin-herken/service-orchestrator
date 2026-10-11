@@ -95,5 +95,5 @@ pub use runtime::{Runtime, RuntimeKind, Version};
 pub use service::{Service, ServiceCapability, ServiceType};
 pub use task::{Task, TaskFailure, TaskKind, TaskProgress, TaskStatus};
 pub use timestamp::Timestamp;
-pub use workflow::{Workflow, WorkflowKind, WorkflowStep};
+pub use workflow::{Workflow, WorkflowKind, WorkflowState, WorkflowStep};
 pub use workspace::Workspace;

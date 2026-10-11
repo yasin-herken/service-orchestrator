@@ -861,6 +861,17 @@ behavior lives in exactly one place.
 - **Work is described, not executed.** The application submits `TaskDefinition`
   and `WorkflowDefinition` values to the `execution` engine; it never runs Git,
   Maven, npm, Liquibase, or processes itself.
+- **Environment workflows.** `prepare_environment` composes the end-to-end
+  preparation graph — Git sync, library builds, migrations, service builds,
+  startup, health — into one `WorkflowDefinition`, and
+  `plan_prepare_environment` returns the matching read-only `EnvironmentPlan`
+  from the *same* composer, so a plan cannot drift from what runs.
+  `get_workflow_status` aggregates state, per-phase progress, and structured
+  failures by workflow id, and `cancel_workflow` cancels the still-active steps.
+  Planning and execution are separate policy modes: planning needs only `Read`
+  and reports `requires_destructive_authorization`; execution re-enforces
+  `SafeWrite`/`Destructive` on every revalidated precondition
+  (`docs/environment-workflows.md`).
 - **Git.** Git use cases express every mutating operation (`sync`, `fetch`,
   `pull`, `checkout`, `clone`, and the destructive `reset`/`clean`/`discard`) as
   a task, and read-only operations (`get_git_status`, `list_branches`,
@@ -1002,6 +1013,14 @@ SDK `rmcp` 3.5.1.
   local runtime: why a local daemon, why Unix domain sockets, the preserved
   single-binary model, shared state, process ownership, authorization, and the
   trade-offs.
+- `docs/adr/016-environment-workflows.md` — the decision record for end-to-end
+  environment workflows: why orchestration belongs in the application core, why
+  the task engine is reused, dependency closure, planning versus execution,
+  precondition revalidation, and the trade-offs.
+- `docs/environment-workflows.md` — environment preparation: the request and its
+  defaults, selection precedence, dependency closure, planning, the execution
+  phases, cancellation and failure handling, aggregated results, and TUI and MCP
+  usage.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/local-daemon.md` — the shared local runtime: architecture, IPC protocol,

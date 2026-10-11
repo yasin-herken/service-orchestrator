@@ -202,6 +202,32 @@ impl Application {
         service_id: &ServiceId,
         operation: MigrationOperation,
     ) -> Result<(ResolvedMigrationTarget, u64), ApplicationError> {
+        self.resolve_migration_impl(service_id, operation, true)
+    }
+
+    /// Resolves a migration target *without* applying the permission policy.
+    ///
+    /// Planning uses this to describe a database-mutating step and to report that
+    /// it requires authorization; execution always uses
+    /// [`Application::resolve_migration`], which enforces the policy. The
+    /// returned target records `non_local_authorized = false`, so it is
+    /// ineligible to run if it ever reached the migration adapter
+    /// (`tasks/016.md` §35).
+    pub(crate) fn resolve_migration_target(
+        &self,
+        service_id: &ServiceId,
+        operation: MigrationOperation,
+    ) -> Result<(ResolvedMigrationTarget, u64), ApplicationError> {
+        self.resolve_migration_impl(service_id, operation, false)
+    }
+
+    /// Resolves a migration target, optionally enforcing the shared policy.
+    fn resolve_migration_impl(
+        &self,
+        service_id: &ServiceId,
+        operation: MigrationOperation,
+        authorize: bool,
+    ) -> Result<(ResolvedMigrationTarget, u64), ApplicationError> {
         let (workspace, service) = self.locate_service(service_id)?;
         let config = self
             .liquibase_config(workspace, service_id)
@@ -222,7 +248,11 @@ impl Application {
         })?;
         let path = self.absolute_entity_path(workspace, relative)?;
 
-        let non_local_authorized = self.authorize_migration(operation, config)?;
+        let non_local_authorized = if authorize {
+            self.authorize_migration(operation, config)?
+        } else {
+            false
+        };
 
         let target = ResolvedMigrationTarget {
             workspace_id: workspace.workspace.id.clone(),

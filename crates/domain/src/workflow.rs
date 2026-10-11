@@ -63,6 +63,86 @@ impl fmt::Display for WorkflowKind {
     }
 }
 
+/// The aggregate lifecycle state of a workflow.
+///
+/// A workflow is not a task: it has no single state machine of its own. Its
+/// state is *derived* from the states of its tasks. The domain still models the
+/// vocabulary so every interface agrees on the six outcomes, but it never
+/// invents progress the underlying tasks do not support.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkflowState {
+    /// No task has started yet.
+    #[default]
+    Queued,
+    /// At least one task is still pending.
+    Running,
+    /// Every task succeeded.
+    Succeeded,
+    /// Some tasks succeeded and at least one failed or was cancelled.
+    PartiallySucceeded,
+    /// No task succeeded and at least one failed.
+    Failed,
+    /// Cancellation was requested before every task succeeded or failed.
+    Cancelled,
+}
+
+impl WorkflowState {
+    /// Returns a short, stable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Queued => "queued",
+            Self::Running => "running",
+            Self::Succeeded => "succeeded",
+            Self::PartiallySucceeded => "partially_succeeded",
+            Self::Failed => "failed",
+            Self::Cancelled => "cancelled",
+        }
+    }
+
+    /// Returns `true` if the workflow has reached a state it cannot leave.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        !matches!(self, Self::Queued | Self::Running)
+    }
+
+    /// Classifies a workflow from the aggregate status of its tasks.
+    ///
+    /// The inputs are counts, not task objects, so the domain stays free of the
+    /// execution engine. `started` is `true` when at least one task has begun.
+    #[must_use]
+    pub const fn classify(
+        pending: u32,
+        started: bool,
+        succeeded: u32,
+        failed: u32,
+        cancelled: u32,
+    ) -> Self {
+        if pending > 0 {
+            if started {
+                Self::Running
+            } else {
+                Self::Queued
+            }
+        } else if failed == 0 && cancelled == 0 {
+            Self::Succeeded
+        } else if succeeded > 0 {
+            Self::PartiallySucceeded
+        } else if cancelled > 0 && failed == 0 {
+            Self::Cancelled
+        } else {
+            Self::Failed
+        }
+    }
+}
+
+impl fmt::Display for WorkflowState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.label())
+    }
+}
+
 /// A single step in a workflow.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkflowStep {
@@ -295,5 +375,35 @@ mod tests {
         let workflow = workflow().with_step(step("sync"));
         assert!(workflow.step(&StepId::new("sync").unwrap()).is_some());
         assert!(workflow.step(&StepId::new("missing").unwrap()).is_none());
+    }
+
+    #[test]
+    fn workflow_state_classifies_aggregate_outcomes() {
+        assert_eq!(
+            WorkflowState::classify(2, false, 0, 0, 0),
+            WorkflowState::Queued
+        );
+        assert_eq!(
+            WorkflowState::classify(1, true, 0, 0, 0),
+            WorkflowState::Running
+        );
+        assert_eq!(
+            WorkflowState::classify(0, true, 3, 0, 0),
+            WorkflowState::Succeeded
+        );
+        assert_eq!(
+            WorkflowState::classify(0, true, 2, 1, 0),
+            WorkflowState::PartiallySucceeded
+        );
+        assert_eq!(
+            WorkflowState::classify(0, true, 0, 2, 0),
+            WorkflowState::Failed
+        );
+        assert_eq!(
+            WorkflowState::classify(0, true, 0, 0, 2),
+            WorkflowState::Cancelled
+        );
+        assert!(WorkflowState::Failed.is_terminal());
+        assert!(!WorkflowState::Running.is_terminal());
     }
 }
