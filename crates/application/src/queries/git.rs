@@ -104,7 +104,7 @@ impl Application {
     }
 
     /// The timeout applied to read-only Git queries.
-    fn git_read_timeout(&self) -> std::time::Duration {
+    pub(crate) fn git_read_timeout(&self) -> std::time::Duration {
         std::time::Duration::from_secs(self.default_timeout_seconds())
     }
 }

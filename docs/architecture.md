@@ -126,7 +126,7 @@ domain. Nothing inner knows about anything outer.
 | `application` | Application | The shared application core: use cases (commands and queries), orchestration, policy application, and the ports infrastructure implements (`RuntimeStateStore`, `LogService`). Consumes `Config` and submits work to the `execution` engine. |
 | `git` | Infrastructure | Git adapter implementing the application Git port. |
 | `process` | Infrastructure | Local process lifecycle, state, ports, child processes, logs. |
-| `build` | Infrastructure | Build adapter. A build-system-agnostic manager selects a `BuildProvider` (Maven, npm) that emits a structured `BuildPlan`, which is run in the process manager. |
+| `build` | Infrastructure | Build adapter. A build-system-agnostic manager selects a `BuildProvider` (Maven, npm) that emits a structured `BuildPlan`, which is run in the process manager. Also implements the application's `ArtifactInspector` port (effective Maven local repository and conservative consumer-version reading) and hosts the per-module artifact coordinator. |
 | `liquibase` | Infrastructure | Liquibase migration adapter. |
 | `health` | Infrastructure | Configurable health checks (process, port, HTTP/actuator). |
 | `logging` | Infrastructure | Structured logging and bounded, filterable log retrieval. |
@@ -440,7 +440,48 @@ test approach are in `docs/build-manager.md`; the decisions behind them are in
 
 ---
 
-## 14. Enforcement and validation
+## 14. Where the Library Manager belongs
+
+The Library Manager manages shared libraries and their consumers. It is
+**application-layer orchestration**, not a new crate: it validates library
+configuration, resolves an artifact against the effective build system, composes
+the existing Git and build tasks into dependency-ordered workflows, and submits
+them to the task engine. It never runs a build tool or a Git command itself.
+
+- A library is a first-class domain entity (`docs/domain-model.md`), identified
+  by artifact **coordinate** (`group:artifact:version`), never by repository
+  name. A reactor project may produce several coordinates.
+- **Build Manager integration.** Builds and installs are build-system-neutral
+  operations (`Build`, `PublishLocalArtifact`) submitted as `BuildLibrary` and
+  `LibraryInstall` tasks. Maven performs the install with its `install` phase; the
+  manager never copies a JAR and never shells out. A library whose build system
+  cannot publish a local artifact fails with `BUILD_PROVIDER_UNSUPPORTED`.
+- **Git integration.** Synchronization and checkout reuse the Git task kinds and
+  are optional, so the current local branch (with uncommitted changes) can be
+  built. The configured default branch is never forced.
+- **A new port.** Verification and version alignment are the only Maven-specific
+  needs, so the application declares an `ArtifactInspector` port (read-only
+  `locate`/`dependency_version`) that the `build` crate implements. The effective
+  local repository is discovered through Maven, never assumed; there is no custom
+  dependency resolver.
+- **Ordering and coordination.** Selected libraries are ordered dependency-first
+  as workflow-step dependencies — the engine stays the only scheduler. Concurrent
+  writers over one module are serialized by a keyed `ArtifactCoordinator` scoped
+  to the module directory; there is no global lock.
+- **Version alignment is read-only.** Consumers are mapped to `Aligned`,
+  `Mismatch`, `Unknown`, or `Unresolved`; a version that cannot be resolved
+  reliably is never guessed and no POM is rewritten. Automatic modification is
+  deliberately deferred.
+- It adds no crate and no dependency edge: it lives in `application` and reaches
+  Git, build, and inspection through the existing task kinds and the new port.
+
+The operations, artifact model, workflows, safety rules, and limitations are in
+`docs/library-manager.md`; the decisions behind them are in
+`docs/adr/009-library-manager.md`.
+
+---
+
+## 15. Enforcement and validation
 
 - Dependencies are declared exclusively through `[workspace.dependencies]` so
   boundaries are visible in one place.
@@ -459,7 +500,7 @@ test approach are in `docs/build-manager.md`; the decisions behind them are in
 
 ---
 
-## 15. Domain model
+## 16. Domain model
 
 The domain layer defines the vocabulary every other layer speaks. It lives in
 the `service-orchestrator-domain` crate and depends on no other workspace crate
@@ -473,8 +514,9 @@ profiles. Key concepts:
   requirements, structured commands, dependencies, health checks, ports, and an
   explicit capability set. Behaviour is derived from `ServiceType` and
   `ServiceCapability`, never from a service's name.
-- **`Library`** — a shared buildable artifact; it may depend only on other
-  libraries.
+- **`Library`** — a shared buildable artifact identified by artifact coordinate
+  (`group:artifact:version`); it produces a primary coordinate plus any
+  additional reactor artifacts, and may depend only on other libraries.
 - **`Repository` / `Runtime` / `CommandSet`** — provider-independent
   descriptions of source, toolchain requirements, and structured (non-shell)
   commands.
@@ -497,7 +539,7 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 16. The application core
+## 17. The application core
 
 The `application` crate is the shared application core (`docs/application-core.md`).
 It is the one API the TUI, MCP, and any future interface call, so business
@@ -538,7 +580,7 @@ behavior lives in exactly one place.
   Bulk commands submit one independent workflow step per repository;
   `summarize_workflow` aggregates the per-repository outcomes.
 
-## 17. Related documents
+## 18. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -554,6 +596,8 @@ behavior lives in exactly one place.
 - `docs/adr/007-git-manager.md` — the decision record for the Git manager.
 - `docs/adr/008-build-manager.md` — the decision record for the Build Manager
   and its provider abstraction.
+- `docs/adr/009-library-manager.md` — the decision record for library
+  management, artifact inspection, and version alignment.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
@@ -564,5 +608,8 @@ behavior lives in exactly one place.
   task-engine integration, and authentication.
 - `docs/build-manager.md` — the Build Manager: provider abstraction, build
   plans, operations and capabilities, provider selection, and errors.
+- `docs/library-manager.md` — the Library Manager: library model, artifact
+  coordinates, Git and build integration, local installation, multi-module
+  projects, version alignment, and safety.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

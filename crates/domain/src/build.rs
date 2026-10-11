@@ -120,8 +120,9 @@ impl BuildOperation {
     /// Returns the operation implied by a task kind, if any.
     ///
     /// `BuildService`, `BuildLibrary`, and the primitive `MavenBuild`/`NpmBuild`
-    /// kinds all mean "build"; `NpmInstall` means "install dependencies". Other
-    /// kinds are not build operations.
+    /// kinds all mean "build"; `NpmInstall` means "install dependencies";
+    /// `LibraryInstall` means "publish the module's artifact to the local
+    /// repository". Other kinds are not build operations.
     #[must_use]
     pub fn from_task_kind(kind: &TaskKind) -> Option<Self> {
         match kind {
@@ -129,6 +130,7 @@ impl BuildOperation {
             | TaskKind::BuildLibrary
             | TaskKind::MavenBuild
             | TaskKind::NpmBuild => Some(Self::Build),
+            TaskKind::LibraryInstall => Some(Self::PublishLocalArtifact),
             TaskKind::NpmInstall => Some(Self::InstallDependencies),
             _ => None,
         }
@@ -189,6 +191,10 @@ mod tests {
         assert_eq!(
             BuildOperation::from_task_kind(&TaskKind::NpmInstall),
             Some(BuildOperation::InstallDependencies)
+        );
+        assert_eq!(
+            BuildOperation::from_task_kind(&TaskKind::LibraryInstall),
+            Some(BuildOperation::PublishLocalArtifact)
         );
         assert_eq!(BuildOperation::from_task_kind(&TaskKind::GitSync), None);
     }

@@ -57,7 +57,10 @@
 
 #![deny(missing_docs)]
 
+mod artifact;
+mod coordinator;
 mod executor;
+mod library_executor;
 mod manager;
 mod maven;
 mod npm;
@@ -66,7 +69,13 @@ mod provider;
 mod registry;
 mod runner;
 
+pub use artifact::{
+    FixedLocalRepository, LocalRepositoryProvider, MavenArtifactInspector,
+    MavenLocalRepositoryProvider,
+};
+pub use coordinator::ArtifactCoordinator;
 pub use executor::{register_build_executors, BuildTaskExecutor};
+pub use library_executor::{register_library_executors, ArtifactVerificationExecutor};
 pub use manager::{BuildManager, BuildOutcome};
 pub use maven::MavenBuildProvider;
 pub use npm::NpmBuildProvider;

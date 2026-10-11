@@ -539,6 +539,13 @@ fn build_library(
             library = library.with_artifact(artifact);
         }
     }
+    for (j, artifact) in raw.artifacts.iter().enumerate() {
+        if let Some(artifact) =
+            parse_artifact(&format!("{location}.artifacts[{j}]"), artifact, errors)
+        {
+            library = library.with_additional_artifact(artifact);
+        }
+    }
 
     if let Some(runtime) = &raw.runtime {
         if let Some(runtime) = parse_runtime(&format!("{location}.runtime"), runtime, errors) {

@@ -154,8 +154,13 @@ artifact: repository, path, runtimes, commands, and dependencies.
 duplicate or self dependency; **libraries may only depend on libraries** (a
 library that needs a running service is a modelling error).
 
-`ArtifactCoordinate` (`com.company:common-core:1.8.0-SNAPSHOT`) records the
-published artifact when known.
+`ArtifactCoordinate` (`com.company:common-core:1.8.0-SNAPSHOT`) is the artifact's
+identity, with optional `packaging` and `classifier` attributes that affect its
+file name but not its identity. A library records a **primary** coordinate in
+`Library.artifact` and any additional reactor artifacts in `Library.artifacts`;
+`Library::produced_artifacts()` returns them primary-first, de-duplicated. The
+coordinate is pure domain vocabulary: it computes the standard Maven repository
+layout from an identity and performs no repository access.
 
 ---
 

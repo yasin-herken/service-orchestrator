@@ -49,8 +49,9 @@ impl TaskExecutor for BuildTaskExecutor {
             )));
         }
 
+        let kind = context.kind().clone();
         let target = ResolvedBuildTarget::from_parameters(context.parameters())
-            .map_err(to_executor_error)?;
+            .map_err(|error| to_executor_error(&kind, error))?;
         let _ = context.progress().message(format!(
             "{} {} for '{}'",
             target.build_system, target.operation, target.name
@@ -64,7 +65,7 @@ impl TaskExecutor for BuildTaskExecutor {
             )
             .await
             .map(outcome)
-            .map_err(to_executor_error)
+            .map_err(|error| to_executor_error(&kind, error))
     }
 }
 
@@ -85,6 +86,7 @@ pub fn register_build_executors(registry: &mut ExecutorRegistry, manager: Arc<Bu
     for kind in [
         TaskKind::BuildService,
         TaskKind::BuildLibrary,
+        TaskKind::LibraryInstall,
         TaskKind::MavenBuild,
         TaskKind::NpmBuild,
         TaskKind::NpmInstall,
@@ -109,18 +111,35 @@ fn outcome(result: BuildOutcome) -> TaskOutcome {
 }
 
 /// Maps a structured build failure onto the engine's error vocabulary.
-fn to_executor_error(error: BuildError) -> TaskExecutorError {
-    let code = error.code();
+///
+/// Library operations carry their own stable failure codes — a library install
+/// that fails is `ARTIFACT_INSTALLATION_FAILED` and a library build that fails is
+/// `LIBRARY_BUILD_FAILED` — so an interface can distinguish them from a generic
+/// service build without parsing text (`tasks/009.md` §24).
+fn to_executor_error(kind: &TaskKind, error: BuildError) -> TaskExecutorError {
+    let default_code = error.code();
     match error {
         BuildError::Cancelled { .. } => TaskExecutorError::Cancelled,
         BuildError::Internal { message } => TaskExecutorError::internal(message),
         BuildError::CommandFailed {
             message, detail, ..
-        } => match detail {
-            Some(detail) => TaskExecutorError::failed_with_detail(code, message, detail),
-            None => TaskExecutorError::failed(code, message),
-        },
-        other => TaskExecutorError::failed(other.code(), other.to_string()),
+        } => {
+            let code = operation_code(kind, default_code);
+            match detail {
+                Some(detail) => TaskExecutorError::failed_with_detail(code, message, detail),
+                None => TaskExecutorError::failed(code, message),
+            }
+        }
+        other => TaskExecutorError::failed(operation_code(kind, other.code()), other.to_string()),
+    }
+}
+
+/// The stable failure code for a failed build operation, by task kind.
+fn operation_code(kind: &TaskKind, default: &str) -> String {
+    match kind {
+        TaskKind::LibraryInstall => "ARTIFACT_INSTALLATION_FAILED".to_owned(),
+        TaskKind::BuildLibrary => "LIBRARY_BUILD_FAILED".to_owned(),
+        _ => default.to_owned(),
     }
 }
 
@@ -129,6 +148,17 @@ mod tests {
     use super::*;
     use service_orchestrator_domain::BuildSystem;
 
+    fn error() -> BuildError {
+        BuildError::CommandFailed {
+            name: "auth-service".to_owned(),
+            system: BuildSystem::Maven,
+            operation: BuildOperation::Build,
+            exit_code: Some(1),
+            message: "BUILD FAILURE".to_owned(),
+            detail: Some("compilation error".to_owned()),
+        }
+    }
+
     #[test]
     fn cancellation_maps_to_a_cancelled_attempt() {
         let error = BuildError::Cancelled {
@@ -136,20 +166,15 @@ mod tests {
             system: BuildSystem::Maven,
             operation: BuildOperation::Build,
         };
-        assert_eq!(to_executor_error(error), TaskExecutorError::Cancelled);
+        assert_eq!(
+            to_executor_error(&TaskKind::BuildService, error),
+            TaskExecutorError::Cancelled
+        );
     }
 
     #[test]
     fn structured_failures_preserve_their_code_and_detail() {
-        let error = BuildError::CommandFailed {
-            name: "auth-service".to_owned(),
-            system: BuildSystem::Maven,
-            operation: BuildOperation::Build,
-            exit_code: Some(1),
-            message: "BUILD FAILURE".to_owned(),
-            detail: Some("compilation error".to_owned()),
-        };
-        match to_executor_error(error) {
+        match to_executor_error(&TaskKind::BuildService, error()) {
             TaskExecutorError::Failed { code, detail, .. } => {
                 assert_eq!(code, "BUILD_COMMAND_FAILED");
                 assert_eq!(detail.as_deref(), Some("compilation error"));
@@ -159,8 +184,22 @@ mod tests {
     }
 
     #[test]
+    fn library_operations_carry_their_own_failure_codes() {
+        match to_executor_error(&TaskKind::LibraryInstall, error()) {
+            TaskExecutorError::Failed { code, .. } => {
+                assert_eq!(code, "ARTIFACT_INSTALLATION_FAILED");
+            }
+            other => panic!("expected a structured failure, got {other:?}"),
+        }
+        match to_executor_error(&TaskKind::BuildLibrary, error()) {
+            TaskExecutorError::Failed { code, .. } => assert_eq!(code, "LIBRARY_BUILD_FAILED"),
+            other => panic!("expected a structured failure, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn internal_failures_remain_internal() {
-        let mapped = to_executor_error(BuildError::internal("boom"));
+        let mapped = to_executor_error(&TaskKind::BuildService, BuildError::internal("boom"));
         assert!(matches!(mapped, TaskExecutorError::Internal { .. }));
     }
 
@@ -170,7 +209,7 @@ mod tests {
             system: BuildSystem::Npm,
             operation: BuildOperation::PublishLocalArtifact,
         };
-        match to_executor_error(error) {
+        match to_executor_error(&TaskKind::BuildService, error) {
             TaskExecutorError::Failed { code, .. } => {
                 assert_eq!(code, "BUILD_UNSUPPORTED_OPERATION");
             }

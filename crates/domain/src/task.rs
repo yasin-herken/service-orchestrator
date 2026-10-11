@@ -44,6 +44,10 @@ pub enum TaskKind {
     GitDiscardChanges,
     /// Build a library.
     BuildLibrary,
+    /// Install a library's artifact into the local repository.
+    LibraryInstall,
+    /// Verify that a library's artifact is present in the local repository.
+    ArtifactVerification,
     /// Run a Maven build.
     MavenBuild,
     /// Install Node dependencies.
@@ -81,6 +85,8 @@ impl TaskKind {
             Self::GitClean => "git_clean",
             Self::GitDiscardChanges => "git_discard_changes",
             Self::BuildLibrary => "build_library",
+            Self::LibraryInstall => "library_install",
+            Self::ArtifactVerification => "artifact_verification",
             Self::MavenBuild => "maven_build",
             Self::NpmInstall => "npm_install",
             Self::NpmBuild => "npm_build",

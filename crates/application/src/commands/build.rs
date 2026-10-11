@@ -131,8 +131,11 @@ struct BuildTargetContext<'a> {
 /// declares one.
 ///
 /// Only the build-system-neutral operations that map onto a declared command
-/// kind are considered. `Clean` and `PublishLocalArtifact` have no dedicated
-/// command kind, so they always use the provider's default plan.
+/// kind are considered. [`CommandKind::Install`] covers both installing
+/// dependencies and publishing a local artifact (`install` means "install
+/// dependencies or artifacts"; for Maven its `install` phase publishes to the
+/// local repository), so both map onto it. `Clean` has no dedicated command kind
+/// and always uses the provider's default plan.
 fn configured_command(
     commands: &CommandSet,
     operation: BuildOperation,
@@ -140,8 +143,10 @@ fn configured_command(
     let kind = match operation {
         BuildOperation::Build => CommandKind::Build,
         BuildOperation::Test => CommandKind::Test,
-        BuildOperation::InstallDependencies => CommandKind::Install,
-        BuildOperation::Clean | BuildOperation::PublishLocalArtifact => return None,
+        BuildOperation::InstallDependencies | BuildOperation::PublishLocalArtifact => {
+            CommandKind::Install
+        }
+        BuildOperation::Clean => return None,
     };
     commands.get(&kind).map(|spec| ResolvedBuildCommand {
         program: spec.program.clone(),
@@ -184,6 +189,10 @@ mod tests {
         );
 
         assert!(configured_command(&commands, BuildOperation::InstallDependencies).is_some());
+        // Publishing a local artifact uses the same `install` command; a
+        // library may declare a dedicated install command, and when it does not
+        // the provider's default plan is used instead.
+        assert!(configured_command(&commands, BuildOperation::PublishLocalArtifact).is_some());
         assert!(configured_command(&commands, BuildOperation::Test).is_some());
     }
 }
