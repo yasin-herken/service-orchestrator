@@ -243,11 +243,17 @@ impl Application {
         if request.start {
             let mut start_steps: BTreeMap<ServiceId, StepId> = BTreeMap::new();
             for id in &selected {
+                let service = workspace
+                    .workspace
+                    .service(id)
+                    .expect("selected services are validated to exist");
+                let target = self.service_runtime_target(workspace, service)?;
                 let prerequisites = Self::start_prerequisites(id, &build_steps, &migrate_steps);
-                let step = builder.add(
+                let step = builder.add_with_parameters(
                     TaskKind::StartService,
                     prerequisites,
                     Some(format!("start {id}")),
+                    target.to_parameters(),
                 );
                 start_steps.insert(id.clone(), step);
             }
@@ -372,6 +378,122 @@ impl Application {
         self.stop_services_workflow(workspace, &services, WorkflowKind::StopProfile)
     }
 
+    /// Starts explicitly selected services as one workflow.
+    ///
+    /// This is the bulk form of [`Application::start_service`]. It reuses the
+    /// task engine for concurrency, preserves runtime-dependency ordering where
+    /// relationships are explicitly modelled, and returns a single workflow id
+    /// whose per-step results are independent (`tasks/010.md` §30).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::WorkspaceNotFound`] if the workspace does not
+    /// exist, [`ApplicationError::ServiceNotFound`] for an unknown member, or
+    /// [`ApplicationError::InvalidOperation`] if a member cannot be started.
+    pub fn start_services(
+        &self,
+        workspace_id: &WorkspaceId,
+        service_ids: &[ServiceId],
+    ) -> Result<OperationResult, ApplicationError> {
+        self.authorize(Permission::SafeWrite)?;
+        let workspace = self.require_workspace(workspace_id)?;
+        let kind = WorkflowKind::Custom("start_services".to_owned());
+        self.start_services_workflow(workspace, service_ids, kind)
+    }
+
+    /// Stops explicitly selected services as one workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::WorkspaceNotFound`] or
+    /// [`ApplicationError::ServiceNotFound`].
+    pub fn stop_services(
+        &self,
+        workspace_id: &WorkspaceId,
+        service_ids: &[ServiceId],
+    ) -> Result<OperationResult, ApplicationError> {
+        self.authorize(Permission::SafeWrite)?;
+        let workspace = self.require_workspace(workspace_id)?;
+        let kind = WorkflowKind::Custom("stop_services".to_owned());
+        self.stop_services_workflow(workspace, service_ids, kind)
+    }
+
+    /// Restarts explicitly selected services as one workflow.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::WorkspaceNotFound`] or
+    /// [`ApplicationError::ServiceNotFound`].
+    pub fn restart_services(
+        &self,
+        workspace_id: &WorkspaceId,
+        service_ids: &[ServiceId],
+    ) -> Result<OperationResult, ApplicationError> {
+        self.authorize(Permission::SafeWrite)?;
+        let workspace = self.require_workspace(workspace_id)?;
+        let kind = WorkflowKind::Custom("restart_services".to_owned());
+        self.restart_services_workflow(workspace, service_ids, kind)
+    }
+
+    /// Builds and submits a restart workflow for the given services.
+    ///
+    /// Restart steps are independent: each step stops its service and confirms
+    /// the exit before starting the replacement, and the task engine bounds
+    /// concurrency. A restart must not be reordered against its own start.
+    fn restart_services_workflow(
+        &self,
+        workspace: &ConfiguredWorkspace,
+        service_ids: &[ServiceId],
+        kind: WorkflowKind,
+    ) -> Result<OperationResult, ApplicationError> {
+        let mut to_restart: Vec<ServiceId> = Vec::new();
+        for id in service_ids {
+            let service = workspace
+                .workspace
+                .service(id)
+                .ok_or_else(|| ApplicationError::ServiceNotFound(id.clone()))?;
+            self.check_dependencies(workspace, service)?;
+            if !(service.supports(ServiceCapability::Run) && service.has_start_command()) {
+                return Err(ApplicationError::invalid_operation(format!(
+                    "service '{id}' cannot be restarted"
+                )));
+            }
+            to_restart.push(id.clone());
+        }
+
+        if to_restart.is_empty() {
+            return Ok(OperationResult::AlreadyInDesiredState {
+                kind: TaskKind::RestartService,
+            });
+        }
+
+        let mut builder = WorkflowBuilder::new(kind.clone());
+        for id in &to_restart {
+            let service = workspace
+                .workspace
+                .service(id)
+                .expect("services were validated above");
+            let target = self.service_runtime_target(workspace, service)?;
+            builder.add_with_parameters(
+                TaskKind::RestartService,
+                Vec::new(),
+                Some(format!("restart {id}")),
+                target.to_parameters(),
+            );
+        }
+
+        let workflow_id = self
+            .tasks()
+            .submit_workflow(builder.build())
+            .map_err(super::map_submit_error)?;
+        for id in &to_restart {
+            let current = self.runtime().service_state(id).unwrap_or_default();
+            self.runtime()
+                .set_service_state(id, current.with_process(ProcessState::Starting));
+        }
+        Ok(OperationResult::WorkflowScheduled { workflow_id, kind })
+    }
+
     /// Builds and submits a start workflow for the given services.
     fn start_services_workflow(
         &self,
@@ -413,12 +535,18 @@ impl Application {
         let mut builder = WorkflowBuilder::new(kind.clone());
         let mut steps: BTreeMap<ServiceId, StepId> = BTreeMap::new();
         for id in &to_start {
+            let service = workspace
+                .workspace
+                .service(id)
+                .expect("services were validated above");
+            let target = self.service_runtime_target(workspace, service)?;
             steps.insert(
                 id.clone(),
-                builder.add(
+                builder.add_with_parameters(
                     TaskKind::StartService,
                     Vec::new(),
                     Some(format!("start {id}")),
+                    target.to_parameters(),
                 ),
             );
         }
@@ -488,12 +616,18 @@ impl Application {
         let mut builder = WorkflowBuilder::new(kind.clone());
         let mut steps: BTreeMap<ServiceId, StepId> = BTreeMap::new();
         for id in &to_stop {
+            let service = workspace
+                .workspace
+                .service(id)
+                .expect("services were validated above");
+            let target = self.service_runtime_target(workspace, service)?;
             steps.insert(
                 id.clone(),
-                builder.add(
+                builder.add_with_parameters(
                     TaskKind::StopService,
                     Vec::new(),
                     Some(format!("stop {id}")),
+                    target.to_parameters(),
                 ),
             );
         }

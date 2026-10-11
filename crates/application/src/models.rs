@@ -15,7 +15,7 @@ use serde::{Deserialize, Serialize};
 use service_orchestrator_domain::{
     AbsolutePath, ArtifactCoordinate, Branch, DependencyKind, GitState, LibraryId, Port,
     ProcessState, ServiceCapability, ServiceId, ServiceType, Task, TaskId, TaskKind, TaskStatus,
-    Version, WorkflowId, WorkflowKind, WorkspaceId,
+    Timestamp, Version, WorkflowId, WorkflowKind, WorkspaceId,
 };
 
 use crate::ports::HealthState;
@@ -177,6 +177,41 @@ pub struct ServiceStatus {
     pub ports: Vec<Port>,
     /// The capabilities the service declares.
     pub capabilities: BTreeSet<ServiceCapability>,
+}
+
+/// A structured snapshot of a service's managed runtime.
+///
+/// Unlike [`ServiceStatus`], which summarizes broad configuration and observed
+/// state, this focuses on the managed process: its identity, the runtime that
+/// started it, the (redacted) startup command, and its exit information. It is
+/// the machine-readable answer to `get_service_runtime_status` and
+/// `list_running_services`.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ServiceRuntimeStatus {
+    /// The service identifier.
+    pub service_id: ServiceId,
+    /// The workspace that owns the service.
+    pub workspace_id: WorkspaceId,
+    /// The last observed logical process state.
+    pub process_state: ProcessState,
+    /// Whether the service is currently tracked as a managed process.
+    pub managed: bool,
+    /// The runtime label that started the process, when known.
+    pub runtime: Option<String>,
+    /// The managed process identifier, when one exists.
+    pub process_id: Option<String>,
+    /// The operating-system process id, while the process is alive.
+    pub pid: Option<u32>,
+    /// A redacted identity of the startup command.
+    pub command: Option<String>,
+    /// When the current execution started.
+    pub started_at: Option<Timestamp>,
+    /// The exit code of the last execution, once it has ended.
+    pub exit_code: Option<i32>,
+    /// How the last execution ended, once it has ended.
+    pub exit_reason: Option<String>,
+    /// A structured explanation of the last failure, when there was one.
+    pub last_error: Option<String>,
 }
 
 /// An aggregate of a multi-repository operation's per-repository outcomes.

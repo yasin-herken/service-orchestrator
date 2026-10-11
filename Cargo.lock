@@ -223,6 +223,7 @@ dependencies = [
  "service-orchestrator-mcp",
  "service-orchestrator-policy",
  "service-orchestrator-process",
+ "service-orchestrator-runtime",
  "service-orchestrator-tui",
 ]
 
@@ -342,6 +343,19 @@ dependencies = [
  "service-orchestrator-domain",
  "thiserror",
  "time",
+ "tokio",
+]
+
+[[package]]
+name = "service-orchestrator-runtime"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "service-orchestrator-application",
+ "service-orchestrator-config",
+ "service-orchestrator-domain",
+ "service-orchestrator-execution",
+ "service-orchestrator-process",
  "tokio",
 ]
 

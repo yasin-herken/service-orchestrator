@@ -1,0 +1,24 @@
+[package]
+name = "service-orchestrator-runtime"
+description = "Service runtime management adapter for Java, Node, and future runtimes"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+async-trait.workspace = true
+service-orchestrator-application.workspace = true
+service-orchestrator-config.workspace = true
+service-orchestrator-domain.workspace = true
+service-orchestrator-execution.workspace = true
+service-orchestrator-process.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt-multi-thread", "test-util"] }
