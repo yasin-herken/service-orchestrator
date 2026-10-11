@@ -779,7 +779,44 @@ behavior lives in exactly one place.
   Bulk commands submit one independent workflow step per repository;
   `summarize_workflow` aggregates the per-repository outcomes.
 
-## 21. Related documents
+## 21. The Ratatui TUI adapter
+
+The `tui` crate is the human-facing interface (`docs/tui.md`,
+`docs/adr/013-ratatui-tui.md`). It is launched as `service-orchestrator tui`
+(and by running the binary with no arguments).
+
+- **Adapter, not an implementation.** It reads application state, renders it,
+  and turns keyboard input into application use cases. It never runs Git, Maven,
+  npm, Liquibase, or an operating-system process, and it never duplicates
+  application logic. The crate depends on `application` (and the domain and the
+  execution event types) but not on any infrastructure crate, so the boundary is
+  enforced by the dependency graph rather than by convention.
+- **State machine.** `App` turns an `Action` into either a change of interface
+  state or an application-core call. It owns `UiState` (presentation: screen,
+  cursor, typed selection, dialogs, search, scroll) and a read-only `Snapshot`
+  (a wholesale-replaced cache of application state). The application core remains
+  authoritative.
+- **Single async event loop.** Terminal input, task-engine events, realtime log
+  entries, spawned-query results, and a tick are multiplexed onto one channel.
+  The loop draws, then awaits one event; no long-running operation blocks the
+  renderer. Asynchronous queries are described by `Effect` values that only the
+  event loop executes.
+- **Event-driven updates.** The interface subscribes to the task engine's event
+  stream and to per-service log subscriptions; a light periodic tick refreshes
+  the in-memory snapshot without polling repositories.
+- **Typed multi-selection.** Selections are sets of `ServiceId`/`LibraryId`, so
+  they stay stable under filtering and sorting; bulk operations reuse the
+  application's workflow use cases.
+- **Policy and confirmation.** Destructive operations are denied by the
+  application under standard authorization; the interface opens a confirmation
+  dialog and, on confirmation, re-runs the operation with destructive
+  authorization. The application performs the same check, so a UI confirmation is
+  never the authorization itself.
+- **Terminal lifecycle.** Raw mode and the alternate screen are restored on
+  normal exit, error, Ctrl+C, and panic; terminals below 60×14 render an
+  informative minimum-size notice instead of a broken layout.
+
+## 22. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -803,6 +840,8 @@ behavior lives in exactly one place.
   Migration Manager, database-target safety, and coordination.
 - `docs/adr/012-health-observability.md` — the decision record for the Health
   Manager, its providers and aggregation, and the observability layer.
+- `docs/adr/013-ratatui-tui.md` — the decision record for the Ratatui TUI, its
+  state machine, async event loop, and policy-driven confirmation flow.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
@@ -827,5 +866,7 @@ behavior lives in exactly one place.
 - `docs/observability.md` — the Observability layer: the structured log model,
   ingestion and correlation, filtering, cursor pagination, retention, streaming,
   backpressure, and redaction.
+- `docs/tui.md` — the Ratatui TUI: screens, keyboard model, multi-selection,
+  policy-driven confirmations, async event loop, and terminal lifecycle.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.
