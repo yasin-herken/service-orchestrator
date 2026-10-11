@@ -22,7 +22,8 @@ use service_orchestrator_policy::{Authorization, PolicyEngine};
 use crate::error::ApplicationError;
 use crate::ports::{
     ArtifactInspector, GitManager, LogService, NullArtifactInspector, NullGitManager,
-    ResolvedRepository, RuntimeStateStore,
+    NullServiceRuntimeIndex, ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore,
+    ServiceRuntimeIndex,
 };
 
 /// The shared application core.
@@ -34,6 +35,7 @@ pub struct Application {
     logs: Arc<dyn LogService>,
     git: Arc<dyn GitManager>,
     artifacts: Arc<dyn ArtifactInspector>,
+    service_runtime: Arc<dyn ServiceRuntimeIndex>,
     policy: PolicyEngine,
     authorization: Authorization,
 }
@@ -41,11 +43,13 @@ pub struct Application {
 impl Application {
     /// Creates an application core from validated configuration and its ports.
     ///
-    /// No Git manager or artifact inspector is wired; call
-    /// [`Application::with_git_manager`] and
-    /// [`Application::with_artifact_inspector`] to provide them. Until then, Git
-    /// operations report [`ApplicationError::Git`] and artifact inspection
-    /// reports [`ApplicationError::ArtifactInspection`].
+    /// No Git manager, artifact inspector, or service runtime index is wired;
+    /// call [`Application::with_git_manager`],
+    /// [`Application::with_artifact_inspector`], and
+    /// [`Application::with_service_runtime`] to provide them. Until then, Git
+    /// operations report [`ApplicationError::Git`], artifact inspection reports
+    /// [`ApplicationError::ArtifactInspection`], and runtime-status queries
+    /// report only the last observed state store value.
     #[must_use]
     pub fn new(
         config: Config,
@@ -60,6 +64,7 @@ impl Application {
             logs,
             git: Arc::new(NullGitManager),
             artifacts: Arc::new(NullArtifactInspector),
+            service_runtime: Arc::new(NullServiceRuntimeIndex),
             policy: PolicyEngine::new(),
             authorization: Authorization::standard(),
         }
@@ -81,6 +86,19 @@ impl Application {
     #[must_use]
     pub fn with_artifact_inspector(mut self, artifacts: Arc<dyn ArtifactInspector>) -> Self {
         self.artifacts = artifacts;
+        self
+    }
+
+    /// Replaces the service runtime index.
+    ///
+    /// The index is provided by the runtime adapter; it exposes live
+    /// managed-process state so `get_service_runtime_status` and
+    /// `list_running_services` can report process ids, exit information, and
+    /// startup commands. Without it, those queries report only the last observed
+    /// state store value.
+    #[must_use]
+    pub fn with_service_runtime(mut self, service_runtime: Arc<dyn ServiceRuntimeIndex>) -> Self {
+        self.service_runtime = service_runtime;
         self
     }
 
@@ -154,6 +172,11 @@ impl Application {
         self.artifacts.as_ref()
     }
 
+    /// Returns the service runtime index.
+    pub(crate) fn service_runtime(&self) -> &dyn ServiceRuntimeIndex {
+        self.service_runtime.as_ref()
+    }
+
     /// Resolves an entity's workspace-relative directory into an absolute path.
     ///
     /// The domain guarantees the relative path is valid; joining it with the
@@ -218,6 +241,46 @@ impl Application {
             ))
         })?;
         self.resolve_repository(workspace, id.as_str(), repository)
+    }
+
+    /// Resolves a service into a workspace-aware lifecycle target.
+    ///
+    /// The target carries only identity and the working directory; environment
+    /// *values* are deliberately excluded, exactly like a build target
+    /// (`AGENTS.md` §31). A service without a configured path yields a target
+    /// with no path — a start or restart then fails with
+    /// [`ServiceRuntimeError::WorkingDirectoryInvalid`](crate::ServiceRuntimeError)
+    /// while a stop remains valid.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::ServiceRuntime`] if the resolved path escapes
+    /// the workspace root or cannot be represented as an absolute path.
+    pub(crate) fn service_runtime_target(
+        &self,
+        workspace: &ConfiguredWorkspace,
+        service: &Service,
+    ) -> Result<ResolvedServiceTarget, ApplicationError> {
+        let path = match &service.path {
+            Some(relative) => Some(self.absolute_entity_path(workspace, relative)?),
+            None => None,
+        };
+        let target = ResolvedServiceTarget {
+            workspace_id: workspace.workspace.id.clone(),
+            service_id: service.id.clone(),
+            path,
+            workspace_root: workspace.workspace.root.clone(),
+        };
+        if !target.is_inside_workspace() {
+            return Err(ApplicationError::ServiceRuntime {
+                code: "RUNTIME_PATH_OUTSIDE_WORKSPACE".to_owned(),
+                message: format!(
+                    "service '{}' resolves to a working directory outside workspace root '{}'",
+                    service.id, target.workspace_root
+                ),
+            });
+        }
+        Ok(target)
     }
 
     /// Builds a [`ResolvedRepository`] from a workspace and a repository,

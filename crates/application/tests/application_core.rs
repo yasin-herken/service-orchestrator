@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use service_orchestrator_application::{
     parameter, Application, ApplicationError, HealthState, InMemoryRuntimeStateStore, LogRequest,
     NullLogService, OperationResult, PrepareEnvironmentRequest, RuntimeStateStore,
-    ServiceRuntimeState,
+    ServiceProcessInfo, ServiceRuntimeIndex, ServiceRuntimeState,
 };
 use service_orchestrator_config::{load_from_str, Config};
 use service_orchestrator_domain::{
@@ -995,4 +995,214 @@ async fn git_queries_report_an_unconfigured_manager() {
         ApplicationError::Git { code, .. } => assert_eq!(code, "GIT_UNAVAILABLE"),
         other => panic!("expected a Git error, got {other:?}"),
     }
+}
+
+// -- service runtime queries and bulk operations -----------------------------
+
+/// A [`ServiceRuntimeIndex`] that reports at most one managed process.
+struct FakeRuntimeIndex {
+    info: Option<ServiceProcessInfo>,
+}
+
+impl ServiceRuntimeIndex for FakeRuntimeIndex {
+    fn runtime_state(&self, service_id: &ServiceId) -> Option<ServiceProcessInfo> {
+        self.info
+            .as_ref()
+            .filter(|info| &info.service_id == service_id)
+            .cloned()
+    }
+
+    fn managed_services(&self) -> Vec<ServiceProcessInfo> {
+        self.info.iter().cloned().collect()
+    }
+}
+
+fn managed_info(service_id: &str) -> ServiceProcessInfo {
+    ServiceProcessInfo {
+        workspace_id: workspace(),
+        service_id: service(service_id),
+        process_id: Some("proc-1".to_owned()),
+        pid: Some(4242),
+        state: ProcessState::Running,
+        runtime: Some("java".to_owned()),
+        command: Some("./mvnw spring-boot:run".to_owned()),
+        started_at: None,
+        exit_code: None,
+        exit_reason: None,
+        last_error: None,
+    }
+}
+
+#[test]
+fn runtime_status_prefers_live_managed_process_state() {
+    let h = harness();
+    let app = h
+        .app
+        .clone()
+        .with_service_runtime(Arc::new(FakeRuntimeIndex {
+            info: Some(managed_info("auth-service")),
+        }));
+
+    let status = app
+        .get_service_runtime_status(&service("auth-service"))
+        .unwrap();
+    assert!(status.managed);
+    assert_eq!(status.service_id, service("auth-service"));
+    assert_eq!(status.workspace_id, workspace());
+    assert_eq!(status.process_id.as_deref(), Some("proc-1"));
+    assert_eq!(status.pid, Some(4242));
+    assert_eq!(status.runtime.as_deref(), Some("java"));
+    assert_eq!(status.process_state, ProcessState::Running);
+}
+
+#[test]
+fn runtime_status_falls_back_to_the_state_store_when_unmanaged() {
+    let h = harness();
+    h.runtime.set_service_state(
+        &service("auth-service"),
+        ServiceRuntimeState::new().with_process(ProcessState::Running),
+    );
+
+    let status = h
+        .app
+        .get_service_runtime_status(&service("auth-service"))
+        .unwrap();
+    assert!(!status.managed);
+    assert_eq!(status.process_state, ProcessState::Running);
+    // The configured start command is surfaced (redacted, never environment).
+    assert_eq!(status.command.as_deref(), Some("./mvnw spring-boot:run"));
+}
+
+#[test]
+fn runtime_status_rejects_an_unknown_service() {
+    let h = harness();
+    assert!(matches!(
+        h.app
+            .get_service_runtime_status(&service("nope"))
+            .unwrap_err(),
+        ApplicationError::ServiceNotFound(_)
+    ));
+}
+
+#[test]
+fn list_running_services_only_reports_active_services() {
+    let h = harness();
+    h.runtime.set_service_state(
+        &service("auth-service"),
+        ServiceRuntimeState::new().with_process(ProcessState::Running),
+    );
+    h.runtime.set_service_state(
+        &service("web-ui"),
+        ServiceRuntimeState::new().with_process(ProcessState::Stopped),
+    );
+
+    let running = h.app.list_running_services(&workspace()).unwrap();
+    let ids: Vec<&str> = running.iter().map(|s| s.service_id.as_str()).collect();
+    assert_eq!(ids, vec!["auth-service"]);
+}
+
+#[test]
+fn list_running_services_reports_managed_processes() {
+    let h = harness();
+    let app = h
+        .app
+        .clone()
+        .with_service_runtime(Arc::new(FakeRuntimeIndex {
+            info: Some(managed_info("web-ui")),
+        }));
+
+    let running = app.list_running_services(&workspace()).unwrap();
+    let ids: Vec<&str> = running.iter().map(|s| s.service_id.as_str()).collect();
+    assert_eq!(ids, vec!["web-ui"]);
+}
+
+#[test]
+fn list_running_services_rejects_an_unknown_workspace() {
+    let h = harness();
+    assert!(matches!(
+        h.app
+            .list_running_services(&WorkspaceId::new("missing").unwrap())
+            .unwrap_err(),
+        ApplicationError::WorkspaceNotFound(_)
+    ));
+}
+
+#[test]
+fn start_services_builds_one_step_per_service() {
+    let h = harness();
+    let result = h
+        .app
+        .start_services(&workspace(), &[service("auth-service"), service("web-ui")])
+        .unwrap();
+    assert!(matches!(
+        result,
+        OperationResult::WorkflowScheduled {
+            kind: WorkflowKind::Custom(ref name),
+            ..
+        } if name == "start_services"
+    ));
+
+    let workflows = h.tasks.workflows();
+    assert_eq!(workflows[0].steps.len(), 2);
+    assert!(workflows[0]
+        .steps
+        .iter()
+        .all(|step| step.task == TaskKind::StartService));
+}
+
+#[test]
+fn start_services_rejects_an_unstartable_service() {
+    let h = harness();
+    assert!(matches!(
+        h.app
+            .start_services(&workspace(), &[service("worker-svc")])
+            .unwrap_err(),
+        ApplicationError::InvalidOperation { .. }
+    ));
+}
+
+#[test]
+fn stop_services_builds_one_step_per_service() {
+    let h = harness();
+    for id in ["auth-service", "web-ui"] {
+        h.runtime.set_service_state(
+            &service(id),
+            ServiceRuntimeState::new().with_process(ProcessState::Running),
+        );
+    }
+    let result = h
+        .app
+        .stop_services(&workspace(), &[service("auth-service"), service("web-ui")])
+        .unwrap();
+    assert!(matches!(
+        result,
+        OperationResult::WorkflowScheduled {
+            kind: WorkflowKind::Custom(ref name),
+            ..
+        } if name == "stop_services"
+    ));
+    assert!(h.tasks.workflows()[0]
+        .steps
+        .iter()
+        .all(|step| step.task == TaskKind::StopService));
+}
+
+#[test]
+fn restart_services_builds_one_step_per_service() {
+    let h = harness();
+    let result = h
+        .app
+        .restart_services(&workspace(), &[service("auth-service")])
+        .unwrap();
+    assert!(matches!(
+        result,
+        OperationResult::WorkflowScheduled {
+            kind: WorkflowKind::Custom(ref name),
+            ..
+        } if name == "restart_services"
+    ));
+    assert_eq!(
+        h.tasks.workflows()[0].steps[0].task,
+        TaskKind::RestartService
+    );
 }

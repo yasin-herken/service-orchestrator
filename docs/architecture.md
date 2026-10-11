@@ -127,6 +127,7 @@ domain. Nothing inner knows about anything outer.
 | `git` | Infrastructure | Git adapter implementing the application Git port. |
 | `process` | Infrastructure | Local process lifecycle, state, ports, child processes, logs. |
 | `build` | Infrastructure | Build adapter. A build-system-agnostic manager selects a `BuildProvider` (Maven, npm) that emits a structured `BuildPlan`, which is run in the process manager. Also implements the application's `ArtifactInspector` port (effective Maven local repository and conservative consumer-version reading) and hosts the per-module artifact coordinator. |
+| `runtime` | Infrastructure | Service runtime adapter. A runtime-agnostic Service Manager selects a `ServiceRuntime` (Java, Node), builds a structured `StartPlan`, applies idempotency, version, port, and ownership rules, and drives the process manager to run, stop, and restart local services. Implements the read-only `ServiceRuntimeIndex` port. |
 | `liquibase` | Infrastructure | Liquibase migration adapter. |
 | `health` | Infrastructure | Configurable health checks (process, port, HTTP/actuator). |
 | `logging` | Infrastructure | Structured logging and bounded, filterable log retrieval. |
@@ -153,6 +154,7 @@ git, process, build, liquibase, health, logging
 
 git   ──> execution (TaskExecutor) + process (run git)     (documented exception, ADR 007)
 build ──> execution (TaskExecutor) + process (run builds)  (documented exception, ADR 008)
+runtime ──> execution (TaskExecutor) + process (run services) + config   (documented exception, ADR 010)
 
 service-orchestrator (root) ──> everything         (composition root)
 ```
@@ -164,12 +166,14 @@ service-orchestrator (root) ──> everything         (composition root)
 - `application` depends on `domain`, `execution`, `policy`, and `config`. It
   consumes the validated `Config`; it never parses configuration files itself.
 - Infrastructure crates depend on `application` (to implement its ports) and
-  `domain`. They must not depend on each other or on interfaces, with two
+  `domain`. They must not depend on each other or on interfaces, with three
   documented exceptions (`docs/adr/007-git-manager.md`,
-  `docs/adr/008-build-manager.md`): the `git` adapter and the `build` adapter
-  each depend on `execution` (they implement a `TaskExecutor` for mutating
-  operations) and on `process` (they run the tool through the single process
-  owner). No other infrastructure crate may take such an edge without an ADR.
+  `docs/adr/008-build-manager.md`, `docs/adr/010-service-runtime.md`): the `git`
+  adapter, the `build` adapter, and the `runtime` adapter each depend on
+  `execution` (they implement a `TaskExecutor` for mutating operations) and on
+  `process` (they run the tool through the single process owner); the `runtime`
+  adapter additionally reads the validated `config`. No other infrastructure
+  crate may take such an edge without an ADR.
 - `tui` and `mcp` depend only on `application`.
 - The root binary is the only crate allowed to depend on both infrastructure
   and interfaces; it is the composition root.
@@ -481,7 +485,58 @@ The operations, artifact model, workflows, safety rules, and limitations are in
 
 ---
 
-## 15. Enforcement and validation
+## 15. Where the Service Runtime belongs
+
+The Service Runtime turns a validated service into a structured start plan and
+drives the process manager to run, stop, and restart it. It lives in the
+`runtime` infrastructure crate and keeps three seams separate: the **runtime**
+decides *how* a service starts, the **process manager** owns OS processes, and
+the **task engine** owns scheduling (`AGENTS.md` §11, §15, §21).
+
+- A focused `ServiceRuntime` abstraction validates its preconditions and emits a
+  **`StartPlan`** (program, typed arguments, absolute working directory, full
+  environment, shutdown strategy). Runtimes are pure and synchronous; their only
+  output is a value. Collectively they contain no business rules.
+- **Runtimes never spawn processes or schedule tasks.** The `ServiceManager`
+  hands the plan to the process manager — the single process owner — and records
+  ownership of the resulting process synchronously, before the first `await`, so
+  the managed process outlives the startup task (`tasks/010.md` §19).
+- `RuntimeRegistry` is a small `RuntimeType -> runtime` map, not a plugin
+  framework. `JavaRuntime` and `NodeRuntime` are the initial set; a future
+  Python/Go/Docker/Kubernetes runtime is a new implementation and a registry
+  line, with no change to orchestration, the engine, the process manager, the
+  application, or the interfaces.
+- Environment observation is separated from execution: a `RuntimeHost` seam
+  resolves executables across `PATH`, `JAVA_HOME`, and version managers
+  (`nvm`, `fnm`, Volta, `asdf`, `sdkman`, `jenv`), and an asynchronous
+  `RuntimeInspector` seam probes the installed toolchain version through the
+  process manager. A `NullRuntimeInspector` default keeps most starts free of
+  probing.
+- Common lifecycle rules are applied once, uniformly: start/stop idempotency, a
+  per-service lock for concurrent starts, pinned-version checks, port-conflict
+  reporting that **never kills** the occupying process, and cooperative
+  cancellation that never orphans a spawned process (`tasks/010.md` §14, §16,
+  §17, §21, §26).
+- Every lifecycle operation is a task. A `ServiceRuntimeTaskExecutor` decodes a
+  workspace-aware `ResolvedServiceTarget` (identity and paths only — never
+  environment values) from the task parameters and delegates to the manager.
+- The application only needs a **read-only** port, `ServiceRuntimeIndex`, for
+  its status queries (`get_service_runtime_status`, `list_running_services`); a
+  `NullServiceRuntimeIndex` keeps it constructible. Mutating operations need no
+  port because they are tasks, exactly like builds and Git.
+- It depends on `application` and `domain`, and — like Git and Build — on
+  `execution` (the `TaskExecutor` boundary) and `process` (to run services), plus
+  the validated `config`. This is the third documented
+  infrastructure-to-infrastructure exception, recorded in
+  `docs/adr/010-service-runtime.md`.
+
+The full model, runtimes, registry, lifecycle, ownership, cancellation, events,
+errors, and macOS behavior are in `docs/service-runtime.md`; the decisions behind
+them are in `docs/adr/010-service-runtime.md`.
+
+---
+
+## 16. Enforcement and validation
 
 - Dependencies are declared exclusively through `[workspace.dependencies]` so
   boundaries are visible in one place.
@@ -500,7 +555,7 @@ The operations, artifact model, workflows, safety rules, and limitations are in
 
 ---
 
-## 16. Domain model
+## 17. Domain model
 
 The domain layer defines the vocabulary every other layer speaks. It lives in
 the `service-orchestrator-domain` crate and depends on no other workspace crate
@@ -539,7 +594,7 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 17. The application core
+## 18. The application core
 
 The `application` crate is the shared application core (`docs/application-core.md`).
 It is the one API the TUI, MCP, and any future interface call, so business
@@ -550,13 +605,14 @@ behavior lives in exactly one place.
   through the constructor. It is cloneable, so the TUI and MCP each hold an
   `Application` observing the same state and engine.
 - **Commands and queries.** Queries (`list_services`, `get_service_status`,
-  `get_workspace_status`, `get_task`, `get_logs`, ...) are side-effect free and
-  read configuration plus last observed runtime state. Commands
-  (`sync_service`, `build_service`, `build_library`, `run_liquibase`,
-  `start_service`, `stop_service`, `restart_service`, `health_check`,
-  `sync_workspace`, `build_workspace`, `prepare_environment`, `start_group`,
-  `start_profile`, ...) validate preconditions, apply policy, and submit a task
-  or workflow definition.
+  `get_workspace_status`, `get_service_runtime_status`, `list_running_services`,
+  `get_task`, `get_logs`, ...) are side-effect free and read configuration plus
+  last observed runtime state. Commands (`sync_service`, `build_service`,
+  `build_library`, `run_liquibase`, `start_service`, `stop_service`,
+  `restart_service`, `start_services`, `stop_services`, `restart_services`,
+  `health_check`, `sync_workspace`, `build_workspace`, `prepare_environment`,
+  `start_group`, `start_profile`, ...) validate preconditions, apply policy, and
+  submit a task or workflow definition.
 - **Results are structured.** `OperationResult`, `ServiceStatus`,
   `WorkspaceStatus`, and `PrepareEnvironmentRequest` are machine-readable
   application values — never pre-formatted strings.
@@ -580,7 +636,7 @@ behavior lives in exactly one place.
   Bulk commands submit one independent workflow step per repository;
   `summarize_workflow` aggregates the per-repository outcomes.
 
-## 18. Related documents
+## 19. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -598,6 +654,8 @@ behavior lives in exactly one place.
   and its provider abstraction.
 - `docs/adr/009-library-manager.md` — the decision record for library
   management, artifact inspection, and version alignment.
+- `docs/adr/010-service-runtime.md` — the decision record for the Service
+  Runtime, its registry, and managed-process lifecycle.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
@@ -611,5 +669,7 @@ behavior lives in exactly one place.
 - `docs/library-manager.md` — the Library Manager: library model, artifact
   coordinates, Git and build integration, local installation, multi-module
   projects, version alignment, and safety.
+- `docs/service-runtime.md` — the Service Runtime: runtimes, registry,
+  lifecycle, ownership, cancellation, events, and macOS behavior.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

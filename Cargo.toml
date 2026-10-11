@@ -44,6 +44,7 @@ service-orchestrator-execution = { path = "crates/execution", version = "0.1.0" 
 service-orchestrator-git = { path = "crates/git", version = "0.1.0" }
 service-orchestrator-process = { path = "crates/process", version = "0.1.0" }
 service-orchestrator-build = { path = "crates/build", version = "0.1.0" }
+service-orchestrator-runtime = { path = "crates/runtime", version = "0.1.0" }
 service-orchestrator-liquibase = { path = "crates/liquibase", version = "0.1.0" }
 service-orchestrator-health = { path = "crates/health", version = "0.1.0" }
 service-orchestrator-logging = { path = "crates/logging", version = "0.1.0" }
@@ -77,4 +78,5 @@ service-orchestrator-logging.workspace = true
 service-orchestrator-mcp.workspace = true
 service-orchestrator-policy.workspace = true
 service-orchestrator-process.workspace = true
+service-orchestrator-runtime.workspace = true
 service-orchestrator-tui.workspace = true

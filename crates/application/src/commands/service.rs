@@ -111,9 +111,11 @@ impl Application {
             )));
         }
 
+        let target = self.service_runtime_target(workspace, service)?;
         let result = self.schedule(
             TaskDefinition::new(TaskKind::StartService)
                 .for_service(service_id.clone())
+                .with_parameters(target.to_parameters())
                 .with_timeout(self.default_timeout_seconds()),
         )?;
         self.runtime()
@@ -136,7 +138,7 @@ impl Application {
         service_id: &ServiceId,
     ) -> Result<OperationResult, ApplicationError> {
         self.authorize(Permission::SafeWrite)?;
-        let (_workspace, service) = self.locate_service(service_id)?;
+        let (workspace, service) = self.locate_service(service_id)?;
         if !service.supports(ServiceCapability::Run) {
             return Err(ApplicationError::invalid_operation(format!(
                 "service '{service_id}' does not declare the run capability"
@@ -146,9 +148,11 @@ impl Application {
         let current = self.runtime().service_state(service_id).unwrap_or_default();
         match current.process {
             ProcessState::Running | ProcessState::Starting | ProcessState::Unknown => {
+                let target = self.service_runtime_target(workspace, service)?;
                 let result = self.schedule(
                     TaskDefinition::new(TaskKind::StopService)
                         .for_service(service_id.clone())
+                        .with_parameters(target.to_parameters())
                         .with_timeout(self.default_timeout_seconds()),
                 )?;
                 self.runtime()
@@ -191,10 +195,12 @@ impl Application {
             )));
         }
 
+        let target = self.service_runtime_target(workspace, service)?;
         let current = self.runtime().service_state(service_id).unwrap_or_default();
         let result = self.schedule(
             TaskDefinition::new(TaskKind::RestartService)
                 .for_service(service_id.clone())
+                .with_parameters(target.to_parameters())
                 .with_timeout(self.default_timeout_seconds()),
         )?;
         self.runtime()

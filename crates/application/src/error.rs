@@ -196,6 +196,15 @@ pub enum ApplicationError {
         /// A human-readable summary.
         message: String,
     },
+
+    /// A service runtime operation failed with a structured error.
+    #[error("service runtime error ({code}): {message}")]
+    ServiceRuntime {
+        /// A stable, machine-readable code such as `RUNTIME_PORT_ALREADY_IN_USE`.
+        code: String,
+        /// A human-readable summary.
+        message: String,
+    },
 }
 
 impl ApplicationError {
