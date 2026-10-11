@@ -7,12 +7,13 @@
 //! 3. construct the concrete infrastructure adapters;
 //! 4. register their task executors and build the shared task engine;
 //! 5. wire the application core over those adapters; and
-//! 6. hand the application core to an interface adapter (`tui`, and later
-//!    `mcp` / `doctor`).
+//! 6. hand the application core to an interface adapter (`tui` or `mcp`).
 //!
 //! No business logic lives here. Every interface calls the same application
 //! core, and every long-running operation flows through the same task engine.
-//! See `docs/architecture.md` and `docs/adr/001-core-architecture.md`.
+//! The two interfaces remain strictly optional: the CLI is fully functional
+//! without an LLM or an MCP client, and `mcp` adds a transport without adding
+//! behavior. See `docs/architecture.md` and `docs/adr/001-core-architecture.md`.
 
 use std::ffi::OsString;
 use std::path::PathBuf;
@@ -29,6 +30,7 @@ use service_orchestrator_git::{register_git_executors, CliGitManager};
 use service_orchestrator_health::{register_health_executors, HealthManager};
 use service_orchestrator_liquibase::{register_migration_executors, MigrationManager};
 use service_orchestrator_logging::{spawn_process_ingestor, spawn_task_ingestor, LogHub};
+use service_orchestrator_mcp::TaskMonitor;
 use service_orchestrator_process::ProcessManager;
 use service_orchestrator_runtime::{register_service_executors, ServiceManager};
 use service_orchestrator_tui::TaskObserver;
@@ -42,6 +44,7 @@ Usage: service-orchestrator [COMMAND] [OPTIONS]
 
 Commands:
   tui                 Launch the terminal interface (default)
+  mcp                 Serve the Model Context Protocol on stdin/stdout
 
 Options:
   -c, --config <path>  Path to the configuration file
@@ -50,13 +53,28 @@ Options:
   -h, --help           Print this help
   -V, --version        Print the version
 
-The interface is fully functional offline. No LLM and no MCP client is
-required for local operations.";
+Both interfaces share the same application core. The TUI is fully functional
+offline; no LLM and no MCP client is required for local operations. When run
+with `mcp`, stdout carries MCP protocol messages only.";
+
+/// Which interface the process was asked to launch.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Interface {
+    /// The Ratatui terminal interface.
+    Tui,
+    /// The Model Context Protocol stdio server.
+    Mcp,
+}
 
 /// What the process was asked to do.
 enum Command {
     /// Launch the terminal interface, optionally against an explicit config.
     Tui {
+        /// A configuration path supplied on the command line.
+        config: Option<PathBuf>,
+    },
+    /// Serve MCP on stdio, optionally against an explicit config.
+    Mcp {
         /// A configuration path supplied on the command line.
         config: Option<PathBuf>,
     },
@@ -86,13 +104,22 @@ async fn main() -> ExitCode {
             println!("service-orchestrator {}", env!("CARGO_PKG_VERSION"));
             ExitCode::SUCCESS
         }
-        Command::Tui { config } => match run_tui(config).await {
-            Ok(()) => ExitCode::SUCCESS,
-            Err(error) => {
-                eprintln!("service-orchestrator: {error}");
-                ExitCode::FAILURE
-            }
-        },
+        Command::Tui { config } => report(run_tui(config).await),
+        Command::Mcp { config } => report(run_mcp(config).await),
+    }
+}
+
+/// Maps an interface outcome onto a process exit code, reporting the error on
+/// stderr.
+///
+/// Reporting to stderr (never stdout) keeps the MCP stream pure even on failure.
+fn report(outcome: Result<(), Box<dyn std::error::Error>>) -> ExitCode {
+    match outcome {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(error) => {
+            eprintln!("service-orchestrator: {error}");
+            ExitCode::FAILURE
+        }
     }
 }
 
@@ -104,11 +131,13 @@ async fn main() -> ExitCode {
 /// option value.
 fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Command, String> {
     let mut config: Option<PathBuf> = None;
+    let mut interface = Interface::Tui;
     let mut args = args.peekable();
     while let Some(arg) = args.next() {
         let value = arg.to_string_lossy();
         match value.as_ref() {
-            "tui" => {}
+            "tui" => interface = Interface::Tui,
+            "mcp" => interface = Interface::Mcp,
             "-h" | "--help" => return Ok(Command::Help),
             "-V" | "--version" => return Ok(Command::Version),
             "-c" | "--config" => {
@@ -123,7 +152,10 @@ fn parse_args(args: impl Iterator<Item = OsString>) -> Result<Command, String> {
             other => return Err(format!("unrecognized argument '{other}'")),
         }
     }
-    Ok(Command::Tui { config })
+    Ok(match interface {
+        Interface::Tui => Command::Tui { config },
+        Interface::Mcp => Command::Mcp { config },
+    })
 }
 
 /// Resolves, loads, and validates the configuration.
@@ -144,18 +176,48 @@ fn resolve_config(explicit: Option<PathBuf>) -> Result<(Config, PathBuf), Config
     Ok((config, path))
 }
 
-/// Loads configuration, wires the infrastructure adapters, builds the task
-/// engine and application core, and runs the terminal interface.
+/// The wired, running core shared by every interface.
+///
+/// It owns the task engine, the process manager, and the log ingestors so an
+/// interface can hand the application core to its adapter and then shut the
+/// core down in the correct order.
+struct Runtime {
+    application: Application,
+    engine: Arc<TaskEngine>,
+    processes: ProcessManager,
+    config_path: PathBuf,
+    process_ingestor: tokio::task::JoinHandle<()>,
+    task_ingestor: tokio::task::JoinHandle<()>,
+}
+
+impl Runtime {
+    /// Shuts the core down in the correct order.
+    ///
+    /// The ingestors are stopped first so no further log/session message is
+    /// produced, then the task engine drains, then the process manager reaps
+    /// every managed process before the process exits.
+    async fn shutdown(self) {
+        self.process_ingestor.abort();
+        self.task_ingestor.abort();
+        self.engine.shutdown().await;
+        self.processes.shutdown().await;
+    }
+}
+
+/// Loads configuration, wires the infrastructure adapters, and builds the task
+/// engine and application core.
 ///
 /// The order matters: the task engine must be built inside the Tokio runtime,
-/// the log ingestors must be spawned once it exists, and the process manager is
-/// shut down last so every managed process is reaped before the process exits.
+/// and the log ingestors must be spawned once it exists. Both interfaces call
+/// this so they share identical wiring (`AGENTS.md` §1).
 ///
 /// # Errors
 ///
 /// Returns an error when configuration loading, infrastructure construction, or
-/// the terminal interface fails.
-async fn run_tui(explicit_config: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+/// task-engine construction fails.
+async fn bootstrap(
+    explicit_config: Option<PathBuf>,
+) -> Result<Runtime, Box<dyn std::error::Error>> {
     let (config, config_path) = resolve_config(explicit_config)?;
     let config = Arc::new(config);
 
@@ -204,6 +266,8 @@ async fn run_tui(explicit_config: Option<PathBuf>) -> Result<(), Box<dyn std::er
     let task_ingestor = spawn_task_ingestor(Arc::clone(&logs), engine.subscribe());
 
     // -- application core ----------------------------------------------------
+    // MCP and the TUI both run with `Authorization::standard`; a destructive
+    // operation is denied unless an interactive interface confirms it.
     let application = Application::new(
         (*config).clone(),
         engine.clone(),
@@ -215,17 +279,47 @@ async fn run_tui(explicit_config: Option<PathBuf>) -> Result<(), Box<dyn std::er
     .with_service_runtime(services.clone())
     .with_health_index(health.store());
 
-    // -- interface -----------------------------------------------------------
-    let observer: Arc<dyn TaskObserver> = engine.clone();
-    let outcome =
-        service_orchestrator_tui::run(application, observer, config_path.display().to_string())
-            .await;
+    Ok(Runtime {
+        application,
+        engine,
+        processes,
+        config_path,
+        process_ingestor,
+        task_ingestor,
+    })
+}
 
-    // -- orderly shutdown ----------------------------------------------------
-    process_ingestor.abort();
-    task_ingestor.abort();
-    engine.shutdown().await;
-    processes.shutdown().await;
+/// Boots the core and runs the terminal interface.
+///
+/// # Errors
+///
+/// Returns an error when startup or the terminal interface fails.
+async fn run_tui(explicit_config: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = bootstrap(explicit_config).await?;
+    let observer: Arc<dyn TaskObserver> = runtime.engine.clone();
+    let outcome = service_orchestrator_tui::run(
+        runtime.application.clone(),
+        observer,
+        runtime.config_path.display().to_string(),
+    )
+    .await;
+    runtime.shutdown().await;
+    outcome.map_err(Into::into)
+}
 
+/// Boots the core and serves the Model Context Protocol on stdin/stdout.
+///
+/// The application core is the same one the TUI would use: the same task
+/// engine, runtime state, and log service. Nothing about the core changes for
+/// MCP — it is purely a second transport (`AGENTS.md` §1, §21).
+///
+/// # Errors
+///
+/// Returns an error when startup or the MCP transport fails.
+async fn run_mcp(explicit_config: Option<PathBuf>) -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = bootstrap(explicit_config).await?;
+    let monitor: Arc<dyn TaskMonitor> = runtime.engine.clone();
+    let outcome = service_orchestrator_mcp::serve_stdio(runtime.application.clone(), monitor).await;
+    runtime.shutdown().await;
     outcome.map_err(Into::into)
 }
