@@ -20,6 +20,7 @@ use crate::app::Application;
 use crate::error::ApplicationError;
 use crate::models::OperationResult;
 
+mod git;
 mod library;
 mod service;
 mod workflow;
@@ -59,6 +60,17 @@ impl WorkflowBuilder {
         depends_on: Vec<StepId>,
         description: Option<String>,
     ) -> StepId {
+        self.add_with_parameters(task, depends_on, description, BTreeMap::new())
+    }
+
+    /// Adds a step together with the parameters its executor needs.
+    pub(crate) fn add_with_parameters(
+        &mut self,
+        task: TaskKind,
+        depends_on: Vec<StepId>,
+        description: Option<String>,
+        parameters: BTreeMap<String, String>,
+    ) -> StepId {
         let id = StepId::new(format!("s{}", self.counter))
             .expect("generated step identifiers are always valid");
         self.counter += 1;
@@ -67,6 +79,7 @@ impl WorkflowBuilder {
             description,
             task,
             depends_on,
+            parameters,
         });
         id
     }

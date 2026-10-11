@@ -151,6 +151,8 @@ future cli ───┘            │    └──> config  ──> domain
 git, process, build, liquibase, health, logging
     ────────────────────────> application + domain   (implement ports)
 
+git ──> execution (TaskExecutor) + process (run git)  (documented exception)
+
 service-orchestrator (root) ──> everything         (composition root)
 ```
 
@@ -161,7 +163,11 @@ service-orchestrator (root) ──> everything         (composition root)
 - `application` depends on `domain`, `execution`, `policy`, and `config`. It
   consumes the validated `Config`; it never parses configuration files itself.
 - Infrastructure crates depend on `application` (to implement its ports) and
-  `domain`. They must not depend on each other or on interfaces.
+  `domain`. They must not depend on each other or on interfaces, with one
+  documented exception (`docs/adr/007-git-manager.md`): the `git` adapter also
+  depends on `execution` (it implements a `TaskExecutor` for mutating Git
+  operations) and on `process` (it runs the Git CLI through the single process
+  owner). No other infrastructure crate may take such an edge without an ADR.
 - `tui` and `mcp` depend only on `application`.
 - The root binary is the only crate allowed to depend on both infrastructure
   and interfaces; it is the composition root.
@@ -351,7 +357,42 @@ test approach are in `docs/process-manager.md`; the decisions behind them are in
 
 ---
 
-## 12. Enforcement and validation
+## 12. Where the Git manager belongs
+
+The Git manager is the infrastructure adapter that implements the application's
+Git port. It lives in the `git` crate and drives the installed Git CLI through
+the process manager; it never spawns an operating-system process itself
+(`AGENTS.md` §15).
+
+- It implements the `GitManager` port (`status`, `branches`, `diff`, `fetch`,
+  `pull`, `checkout`, `clone`, `sync`, and the guarded destructive operations)
+  from a workspace-aware `ResolvedRepository`, and returns structured
+  `RepositoryStatus`, `BranchInfo`, `RepoDiff`, `GitOperationResult`, and
+  `GitError` values — never pre-formatted terminal text.
+- Mutating operations are expressed as tasks. The crate registers a
+  `GitTaskExecutor` against every Git `TaskKind`, so the application submits a
+  `TaskDefinition` carrying the repository as parameters and the engine runs it
+  with the configured concurrency. Read-only operations (`status`, `branches`,
+  `diff`) are called directly on the port.
+- It depends on `application` (the port it implements), `domain` (the values it
+  produces), `execution` (the `TaskExecutor`/`TaskContext` boundary), and
+  `process` (to run Git). The `git -> execution` and `git -> process` edges are
+  the one documented infrastructure-to-infrastructure exception; the rationale
+  is recorded in `docs/adr/007-git-manager.md`.
+- Repository-scoped coordination serializes mutations of the same checkout while
+  independent repositories and concurrent reads proceed in parallel. The
+  engine's `max_parallel_tasks` remains the only global concurrency bound.
+- It contains no business rules: validation, safety checks, conflict policy, and
+  destructive-operation gating stay in the application and policy layers, so the
+  TUI and MCP reach identical behavior through the same engine.
+
+The full model, operations, safety rules, concurrency, and authentication
+behavior are in `docs/git-manager.md`; the decisions behind them are in
+`docs/adr/007-git-manager.md`.
+
+---
+
+## 13. Enforcement and validation
 
 - Dependencies are declared exclusively through `[workspace.dependencies]` so
   boundaries are visible in one place.
@@ -370,7 +411,7 @@ test approach are in `docs/process-manager.md`; the decisions behind them are in
 
 ---
 
-## 13. Domain model
+## 14. Domain model
 
 The domain layer defines the vocabulary every other layer speaks. It lives in
 the `service-orchestrator-domain` crate and depends on no other workspace crate
@@ -408,7 +449,7 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 14. The application core
+## 15. The application core
 
 The `application` crate is the shared application core (`docs/application-core.md`).
 It is the one API the TUI, MCP, and any future interface call, so business
@@ -440,8 +481,16 @@ behavior lives in exactly one place.
 - **Work is described, not executed.** The application submits `TaskDefinition`
   and `WorkflowDefinition` values to the `execution` engine; it never runs Git,
   Maven, npm, Liquibase, or processes itself.
+- **Git.** Git use cases express every mutating operation (`sync`, `fetch`,
+  `pull`, `checkout`, `clone`, and the destructive `reset`/`clean`/`discard`) as
+  a task, and read-only operations (`get_git_status`, `list_branches`,
+  `get_repository_diff`) as queries over the `GitManager` port. Destructive
+  commands pass through `authorize(Permission::Destructive)` at submission, so
+  an interface cannot schedule them without confirmation (`AGENTS.md` §30).
+  Bulk commands submit one independent workflow step per repository;
+  `summarize_workflow` aggregates the per-repository outcomes.
 
-## 15. Related documents
+## 16. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -454,11 +503,14 @@ behavior lives in exactly one place.
   scheduler.
 - `docs/adr/006-process-manager.md` — the decision record for the process
   manager.
+- `docs/adr/007-git-manager.md` — the decision record for the Git manager.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
   dependencies, concurrency, cancellation, retry, timeout, events, shutdown.
 - `docs/process-manager.md` — the process manager: specification, lifecycle,
   supervision, registry, cancellation, logs, and events.
+- `docs/git-manager.md` — the Git manager: operations, safety, coordination,
+  task-engine integration, and authentication.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

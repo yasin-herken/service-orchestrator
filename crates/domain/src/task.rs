@@ -34,6 +34,14 @@ pub enum TaskKind {
     GitCheckout,
     /// Pull the current branch.
     GitPull,
+    /// Clone a repository that is not yet available locally.
+    GitClone,
+    /// Discard the working tree with a hard reset.
+    GitResetHard,
+    /// Remove untracked files.
+    GitClean,
+    /// Discard every local change (reset and clean).
+    GitDiscardChanges,
     /// Build a library.
     BuildLibrary,
     /// Run a Maven build.
@@ -68,6 +76,10 @@ impl TaskKind {
             Self::GitFetch => "git_fetch",
             Self::GitCheckout => "git_checkout",
             Self::GitPull => "git_pull",
+            Self::GitClone => "git_clone",
+            Self::GitResetHard => "git_reset_hard",
+            Self::GitClean => "git_clean",
+            Self::GitDiscardChanges => "git_discard_changes",
             Self::BuildLibrary => "build_library",
             Self::MavenBuild => "maven_build",
             Self::NpmInstall => "npm_install",

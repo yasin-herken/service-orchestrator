@@ -14,13 +14,13 @@ use std::sync::Arc;
 
 use service_orchestrator_config::{Config, ConfiguredWorkspace, LiquibaseConfig};
 use service_orchestrator_domain::{
-    GroupId, Library, LibraryId, Permission, Profile, ProfileId, Service, ServiceGroup, ServiceId,
-    WorkspaceId,
+    AbsolutePath, GroupId, Library, LibraryId, Permission, Profile, ProfileId, Repository, Service,
+    ServiceGroup, ServiceId, WorkspaceId,
 };
 use service_orchestrator_policy::{Authorization, PolicyEngine};
 
 use crate::error::ApplicationError;
-use crate::ports::{LogService, RuntimeStateStore};
+use crate::ports::{GitManager, LogService, NullGitManager, ResolvedRepository, RuntimeStateStore};
 
 /// The shared application core.
 #[derive(Clone)]
@@ -29,12 +29,17 @@ pub struct Application {
     tasks: Arc<dyn service_orchestrator_execution::TaskManager>,
     runtime: Arc<dyn RuntimeStateStore>,
     logs: Arc<dyn LogService>,
+    git: Arc<dyn GitManager>,
     policy: PolicyEngine,
     authorization: Authorization,
 }
 
 impl Application {
     /// Creates an application core from validated configuration and its ports.
+    ///
+    /// No Git manager is wired; call [`Application::with_git_manager`] to
+    /// provide one. Until then, Git operations report
+    /// [`ApplicationError::Git`].
     #[must_use]
     pub fn new(
         config: Config,
@@ -47,9 +52,17 @@ impl Application {
             tasks,
             runtime,
             logs,
+            git: Arc::new(NullGitManager),
             policy: PolicyEngine::new(),
             authorization: Authorization::standard(),
         }
+    }
+
+    /// Replaces the Git manager.
+    #[must_use]
+    pub fn with_git_manager(mut self, git: Arc<dyn GitManager>) -> Self {
+        self.git = git;
+        self
     }
 
     /// Replaces the policy engine.
@@ -110,6 +123,85 @@ impl Application {
     /// Returns the log service.
     pub(crate) fn logs(&self) -> &dyn LogService {
         self.logs.as_ref()
+    }
+
+    /// Returns the Git manager boundary.
+    pub(crate) fn git(&self) -> &dyn GitManager {
+        self.git.as_ref()
+    }
+
+    // -- repository resolution ------------------------------------------------
+
+    /// Resolves the repository of a service into a workspace-aware value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::ServiceNotFound`] if the service does not
+    /// exist and [`ApplicationError::InvalidOperation`] if it has no repository.
+    pub(crate) fn resolve_service_repository(
+        &self,
+        id: &ServiceId,
+    ) -> Result<ResolvedRepository, ApplicationError> {
+        let (workspace, service) = self.locate_service(id)?;
+        let repository = service.repository.as_ref().ok_or_else(|| {
+            ApplicationError::invalid_operation(format!(
+                "service '{id}' has no repository configured"
+            ))
+        })?;
+        self.resolve_repository(workspace, id.as_str(), repository)
+    }
+
+    /// Resolves the repository of a library into a workspace-aware value.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::LibraryNotFound`] if the library does not
+    /// exist and [`ApplicationError::InvalidOperation`] if it has no repository.
+    pub(crate) fn resolve_library_repository(
+        &self,
+        id: &LibraryId,
+    ) -> Result<ResolvedRepository, ApplicationError> {
+        let (workspace, library) = self.locate_library(id)?;
+        let repository = library.repository.as_ref().ok_or_else(|| {
+            ApplicationError::invalid_operation(format!(
+                "library '{id}' has no repository configured"
+            ))
+        })?;
+        self.resolve_repository(workspace, id.as_str(), repository)
+    }
+
+    /// Builds a [`ResolvedRepository`] from a workspace and a repository,
+    /// joining the workspace root with the repository's relative checkout path.
+    pub(crate) fn resolve_repository(
+        &self,
+        workspace: &ConfiguredWorkspace,
+        name: &str,
+        repository: &Repository,
+    ) -> Result<ResolvedRepository, ApplicationError> {
+        let root = workspace.workspace.root.as_str().trim_end_matches('/');
+        let path = AbsolutePath::new(format!("{root}/{}", repository.local_path.as_str()))
+            .map_err(|error| ApplicationError::Git {
+                code: "GIT_INVALID_PATH".to_owned(),
+                message: error.to_string(),
+            })?;
+        let resolved = ResolvedRepository {
+            workspace_id: workspace.workspace.id.clone(),
+            name: name.to_owned(),
+            url: repository.url.clone(),
+            path,
+            workspace_root: workspace.workspace.root.clone(),
+            default_branch: repository.default_branch.clone(),
+        };
+        if !resolved.is_inside_workspace() {
+            return Err(ApplicationError::Git {
+                code: "GIT_PATH_OUTSIDE_WORKSPACE".to_owned(),
+                message: format!(
+                    "repository '{name}' resolves to '{}', outside workspace root '{}'",
+                    resolved.path, resolved.workspace_root
+                ),
+            });
+        }
+        Ok(resolved)
     }
 
     // -- configuration lookups ------------------------------------------------

@@ -117,6 +117,18 @@ impl TaskEngineBuilder {
         self
     }
 
+    /// Replaces the executor registry wholesale.
+    ///
+    /// Compositions that populate a registry outside the builder — for example
+    /// an infrastructure adapter's `register_*` helper — can hand the finished
+    /// registry in here. The registry is consumed, so it cannot be shared with
+    /// a second engine.
+    #[must_use]
+    pub fn registry(mut self, registry: ExecutorRegistry) -> Self {
+        self.executors = registry;
+        self
+    }
+
     /// Builds the engine inside the current Tokio runtime context.
     ///
     /// # Errors
@@ -269,6 +281,7 @@ impl EngineInner {
         TaskRecord {
             task,
             target: definition.target,
+            parameters: definition.parameters,
             retry: definition.retry,
             dependency_policy: definition.dependency_policy,
             timeout: definition
@@ -409,6 +422,7 @@ impl TaskEngine {
                 description: step.description.clone(),
                 retry: crate::retry::RetryPolicy::none(),
                 dependency_policy: DependencyPolicy::AllSucceeded,
+                parameters: step.parameters.clone(),
             };
             records.push(
                 self.inner
@@ -473,6 +487,18 @@ impl TaskEngine {
         self.inner
             .store
             .workflow(id)
+            .ok_or_else(|| TaskEngineError::WorkflowNotFound(id.clone()))
+    }
+
+    /// Returns every task that belongs to a workflow, oldest first.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskEngineError::WorkflowNotFound`] if it does not exist.
+    pub fn get_workflow_tasks(&self, id: &WorkflowId) -> Result<Vec<Task>, TaskEngineError> {
+        self.inner
+            .store
+            .workflow_tasks(id)
             .ok_or_else(|| TaskEngineError::WorkflowNotFound(id.clone()))
     }
 
@@ -597,6 +623,10 @@ impl TaskManager for TaskEngine {
 
     fn workflow(&self, id: &WorkflowId) -> Result<Workflow, TaskManagerError> {
         TaskEngine::get_workflow(self, id).map_err(Into::into)
+    }
+
+    fn workflow_tasks(&self, id: &WorkflowId) -> Result<Vec<Task>, TaskManagerError> {
+        TaskEngine::get_workflow_tasks(self, id).map_err(Into::into)
     }
 
     fn cancel(&self, id: &TaskId) -> Result<(), TaskManagerError> {

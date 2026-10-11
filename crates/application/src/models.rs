@@ -14,7 +14,7 @@ use std::collections::BTreeSet;
 use serde::{Deserialize, Serialize};
 use service_orchestrator_domain::{
     AbsolutePath, Branch, GitState, Port, ProcessState, ServiceCapability, ServiceId, ServiceType,
-    TaskId, TaskKind, WorkflowId, WorkflowKind, WorkspaceId,
+    Task, TaskId, TaskKind, TaskStatus, WorkflowId, WorkflowKind, WorkspaceId,
 };
 
 use crate::ports::HealthState;
@@ -176,6 +176,57 @@ pub struct ServiceStatus {
     pub ports: Vec<Port>,
     /// The capabilities the service declares.
     pub capabilities: BTreeSet<ServiceCapability>,
+}
+
+/// An aggregate of a multi-repository operation's per-repository outcomes.
+///
+/// A bulk Git command submits one independent step per repository. Each step
+/// settles on its own, so the summary is computed from the workflow's tasks
+/// rather than from a single all-or-nothing result: one repository's failure
+/// never changes another's outcome.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BulkOperationSummary {
+    /// The total number of repositories in the operation.
+    pub total: u32,
+    /// The number of repositories that completed successfully.
+    pub succeeded: u32,
+    /// The number of repositories that failed.
+    pub failed: u32,
+    /// The number of repositories that were cancelled.
+    pub cancelled: u32,
+    /// The number of repositories that were deliberately skipped.
+    pub skipped: u32,
+    /// The number of repositories that are still queued, blocked, or running.
+    pub pending: u32,
+}
+
+impl BulkOperationSummary {
+    /// Builds a summary from a workflow's tasks.
+    #[must_use]
+    pub fn from_tasks(tasks: &[Task]) -> Self {
+        let mut summary = Self {
+            total: tasks.len() as u32,
+            ..Self::default()
+        };
+        for task in tasks {
+            match task.status {
+                TaskStatus::Succeeded => summary.succeeded += 1,
+                TaskStatus::Failed => summary.failed += 1,
+                TaskStatus::Cancelled => summary.cancelled += 1,
+                TaskStatus::Skipped => summary.skipped += 1,
+                TaskStatus::Queued | TaskStatus::Running | TaskStatus::Blocked => {
+                    summary.pending += 1;
+                }
+            }
+        }
+        summary
+    }
+
+    /// Returns `true` when no repository is still pending.
+    #[must_use]
+    pub const fn is_complete(&self) -> bool {
+        self.pending == 0
+    }
 }
 
 /// A structured snapshot of a workspace and its services.
