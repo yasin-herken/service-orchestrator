@@ -353,6 +353,8 @@ pub struct SelectOption {
 pub enum InputPurpose {
     /// Check out a branch in a service's repository.
     CheckoutBranch(ServiceId),
+    /// Choose a branch for an environment preparation.
+    PrepareBranch(Box<service_orchestrator_application::PrepareEnvironmentRequest>),
 }
 
 /// A confirmation dialog for a potentially destructive action.

@@ -14,11 +14,12 @@
 use std::sync::Arc;
 
 use service_orchestrator_application::{
-    ApplicationError, Authorization, HealthCheckScope, LibraryPrepareOptions, OperationResult,
+    ApplicationError, Authorization, EnvironmentPlan, HealthCheckScope, LibraryPrepareOptions,
+    OperationResult, PrepareEnvironmentRequest,
 };
 use service_orchestrator_client::OrchestratorClient;
 use service_orchestrator_domain::{
-    Branch, LibraryId, Permission, ServiceId, Task, TaskId, WorkspaceId,
+    Branch, LibraryId, Permission, ServiceId, Task, TaskId, WorkflowId, WorkspaceId,
 };
 
 use crate::action::Action;
@@ -26,8 +27,8 @@ use crate::event::{AppEvent, AsyncOutcome, Effect};
 use crate::input::{InputEvent, Key};
 use crate::observer::TaskObserver;
 use crate::state::{
-    ConfirmDialog, Dialog, Focus, InputPurpose, LogTarget, LogView, MessageDialog, Screen,
-    SelectDialog, SelectOption, Snapshot, Toast, ToastLevel, UiState, LOG_BUFFER_CAPACITY,
+    ConfirmDialog, Dialog, Focus, InputDialog, InputPurpose, LogTarget, LogView, MessageDialog,
+    Screen, SelectDialog, SelectOption, Snapshot, Toast, ToastLevel, UiState, LOG_BUFFER_CAPACITY,
 };
 
 /// How many finished tasks the snapshot retains for the tasks screen.
@@ -258,6 +259,12 @@ impl App {
             Action::SelectTask(id) => self.select_task(&id),
             Action::CancelTask(id) => self.cancel_task(&id),
 
+            Action::PrepareEnvironment => self.start_prepare_environment(),
+            Action::PrepareEnvironmentBranch(request) => self.open_prepare_branch(*request),
+            Action::PlanPrepareEnvironment(request) => self.plan_prepare_environment(*request),
+            Action::RequestCancelWorkflow => self.request_cancel_workflow(),
+            Action::CancelWorkflow(id) => self.cancel_workflow(&id),
+
             Action::StartSelected
             | Action::StopSelected
             | Action::RestartSelected
@@ -287,7 +294,8 @@ impl App {
             | Action::MigrationValidate(_)
             | Action::MigrationApply(_)
             | Action::SyncWorkspace
-            | Action::BuildWorkspace => self.dispatch_application(action),
+            | Action::BuildWorkspace
+            | Action::ConfirmPrepareEnvironment(_) => self.dispatch_application(action),
         }
     }
 
@@ -410,6 +418,7 @@ impl App {
                 Key::Char('t') => Some(Action::SwitchScreen(Screen::Tasks)),
                 Key::Char('o') => Some(Action::SwitchScreen(Screen::Logs)),
                 Key::Char('h') => Some(Action::SwitchScreen(Screen::Health)),
+                Key::Char('P') => Some(Action::PrepareEnvironment),
                 _ => None,
             },
             Screen::Services | Screen::ServiceDetail => self.services_action(key),
@@ -447,6 +456,7 @@ impl App {
             Key::Char('a') => Some(Action::SelectAllVisible),
             Key::Char('c') => Some(Action::ClearSelection),
             Key::Char('t') => Some(Action::CycleServiceFilter),
+            Key::Char('P') => Some(Action::PrepareEnvironment),
             _ => None,
         }
     }
@@ -517,6 +527,7 @@ impl App {
             Key::Enter | Key::Char('l') => current().map(Action::ViewTaskLogs),
             Key::Char('x') => current().map(Action::CancelTask),
             Key::Char('t') => Some(Action::CycleTaskFilter),
+            Key::Char('W') => Some(Action::RequestCancelWorkflow),
             _ => None,
         }
     }
@@ -778,6 +789,24 @@ impl App {
                 InputPurpose::CheckoutBranch(service) => {
                     self.apply(Action::CheckoutBranch(service, input.value));
                 }
+                InputPurpose::PrepareBranch(request) => {
+                    let mut request = *request;
+                    let branch = input.value.trim();
+                    if !branch.is_empty() {
+                        match Branch::new(branch.to_owned()) {
+                            Ok(branch) => request = request.with_branch(branch),
+                            Err(error) => {
+                                return self.show_error(
+                                    "prepare environment",
+                                    &ApplicationError::InvalidOperation {
+                                        message: error.to_string(),
+                                    },
+                                );
+                            }
+                        }
+                    }
+                    self.apply(Action::PlanPrepareEnvironment(Box::new(request)));
+                }
             },
             Dialog::Info(_) | Dialog::Error(_) | Dialog::Help => {}
         }
@@ -925,6 +954,9 @@ impl App {
                 let workspace = self.require_workspace()?;
                 app.build_workspace(&workspace)
             }
+            Action::ConfirmPrepareEnvironment(request) => {
+                app.prepare_environment(request.as_ref().clone())
+            }
 
             _ => Err(ApplicationError::InvalidOperation {
                 message: "not an application operation".to_owned(),
@@ -995,6 +1027,147 @@ impl App {
                 self.refresh_tasks();
             }
             Err(error) => self.show_error("cancel task", &error),
+        }
+    }
+
+    // -- environment preparation --------------------------------------------
+
+    /// Opens the environment-preparation depth chooser for the current targets.
+    fn start_prepare_environment(&mut self) {
+        let workspace = match self.require_workspace() {
+            Ok(workspace) => workspace,
+            Err(error) => return self.show_error("prepare environment", &error),
+        };
+        let services = self.target_services();
+        let base =
+            || PrepareEnvironmentRequest::new(workspace.clone()).with_services(services.clone());
+        let options = vec![
+            SelectOption {
+                label: "Synchronize repositories only (safe default)".to_owned(),
+                action: Action::PrepareEnvironmentBranch(Box::new(base())),
+            },
+            SelectOption {
+                label: "Synchronize and build required libraries".to_owned(),
+                action: Action::PrepareEnvironmentBranch(Box::new(base().build_libraries())),
+            },
+            SelectOption {
+                label: "Synchronize and build libraries and services".to_owned(),
+                action: Action::PrepareEnvironmentBranch(Box::new(base().build())),
+            },
+            SelectOption {
+                label: "Full: sync, migrate, build, start, health".to_owned(),
+                action: Action::PrepareEnvironmentBranch(Box::new(
+                    base().run_liquibase().build().start(),
+                )),
+            },
+        ];
+        self.state.dialog = Some(Dialog::Select(SelectDialog {
+            title: "Prepare environment — depth".to_owned(),
+            options,
+            index: 0,
+        }));
+    }
+
+    /// Prompts for an optional branch before planning.
+    fn open_prepare_branch(&mut self, request: PrepareEnvironmentRequest) {
+        self.state.dialog = Some(Dialog::Input(InputDialog {
+            prompt: "Branch to check out (empty keeps the configured branch)".to_owned(),
+            value: String::new(),
+            purpose: InputPurpose::PrepareBranch(Box::new(request)),
+        }));
+    }
+
+    /// Plans a preparation and opens the review dialog.
+    fn plan_prepare_environment(&mut self, request: PrepareEnvironmentRequest) {
+        let app = self
+            .application
+            .with_authorization(Authorization::standard());
+        match app.plan_prepare_environment(&request) {
+            Ok(plan) => self.open_plan_review(request, &plan),
+            Err(error) => self.show_error("plan environment", &error),
+        }
+    }
+
+    /// Shows what the preparation would do, then asks for confirmation.
+    fn open_plan_review(&mut self, request: PrepareEnvironmentRequest, plan: &EnvironmentPlan) {
+        let mut lines = vec![
+            format!("Workspace: {}", plan.workspace_id),
+            format!("Selected services: {}", join_ids(&plan.selected_services)),
+            format!("Resolved services: {}", join_ids(&plan.resolved_services)),
+            format!("Required libraries: {}", join_ids(&plan.required_libraries)),
+        ];
+        if let Some(branch) = &plan.target_branch {
+            lines.push(format!("Branch: {branch}"));
+        }
+        lines.push(format!("Planned steps: {}", plan.step_count));
+        for phase in &plan.phases {
+            lines.push(format!(
+                "  {:<16} {} step(s)",
+                phase.kind.label(),
+                phase.steps.len()
+            ));
+        }
+        for warning in &plan.warnings {
+            lines.push(format!("Warning: {warning}"));
+        }
+        if plan.requires_destructive_authorization {
+            lines.push(String::new());
+            lines.push(
+                "This plan mutates a non-local database and requires explicit authorization."
+                    .to_owned(),
+            );
+        }
+        lines.push(String::new());
+        lines.push("[Enter] Run   [Esc] Cancel".to_owned());
+        self.state.dialog = Some(Dialog::Confirm(ConfirmDialog {
+            title: "Review environment plan".to_owned(),
+            lines,
+            action: Action::ConfirmPrepareEnvironment(Box::new(request)),
+            destructive: plan.requires_destructive_authorization,
+        }));
+    }
+
+    /// Opens a chooser over the workflows still being tracked.
+    fn request_cancel_workflow(&mut self) {
+        let options: Vec<SelectOption> = self
+            .state
+            .pending_workflows
+            .iter()
+            .map(|workflow| SelectOption {
+                label: workflow.to_string(),
+                action: Action::CancelWorkflow(workflow.clone()),
+            })
+            .collect();
+        if options.is_empty() {
+            self.toast("no active workflows to cancel", ToastLevel::Info);
+            return;
+        }
+        self.state.dialog = Some(Dialog::Select(SelectDialog {
+            title: "Cancel workflow".to_owned(),
+            options,
+            index: 0,
+        }));
+    }
+
+    /// Cancels every still-active task in a workflow.
+    fn cancel_workflow(&mut self, id: &WorkflowId) {
+        match self.application.cancel_workflow(id) {
+            Ok(cancellation) => {
+                let level = if cancellation.already_complete {
+                    ToastLevel::Info
+                } else {
+                    ToastLevel::Success
+                };
+                self.toast(
+                    format!(
+                        "workflow {id}: {} task(s) cancelled",
+                        cancellation.cancelled_tasks
+                    ),
+                    level,
+                );
+                self.refresh_tasks();
+            }
+            Err(error) => self.show_error("cancel workflow", &error),
         }
     }
 
@@ -1465,6 +1638,18 @@ fn present_error(label: &str, error: &ApplicationError) -> MessageDialog {
     MessageDialog::new("Operation Failed", lines)
 }
 
+/// Joins identifiers for a dialog, or a placeholder when there are none.
+fn join_ids<T: std::fmt::Display>(ids: &[T]) -> String {
+    if ids.is_empty() {
+        "-".to_owned()
+    } else {
+        ids.iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
 /// Renders a human-readable label for an action, used in dialogs and toasts.
 fn describe_action(action: &Action) -> String {
     match action {
@@ -1502,6 +1687,12 @@ fn describe_action(action: &Action) -> String {
         Action::SyncWorkspace => "Synchronize workspace".to_owned(),
         Action::BuildWorkspace => "Build workspace".to_owned(),
         Action::CancelTask(id) => format!("Cancel task {id}"),
+        Action::PrepareEnvironment => "Prepare environment".to_owned(),
+        Action::PrepareEnvironmentBranch(_) => "Prepare environment".to_owned(),
+        Action::PlanPrepareEnvironment(_) => "Plan environment".to_owned(),
+        Action::ConfirmPrepareEnvironment(_) => "Prepare environment".to_owned(),
+        Action::RequestCancelWorkflow => "Cancel workflow".to_owned(),
+        Action::CancelWorkflow(id) => format!("Cancel workflow {id}"),
         other => format!("{other:?}"),
     }
 }

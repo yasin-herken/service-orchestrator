@@ -486,24 +486,97 @@ impl PrepareSelectedLibrariesRequest {
 }
 
 /// `prepare_environment` arguments.
+///
+/// Every option maps to a [`service_orchestrator_application::PrepareEnvironmentRequest`]
+/// field. Selection precedence is service ids, then profile, then group, then the
+/// whole workspace; the application core resolves and documents the defaults.
 #[derive(Debug, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct PrepareEnvironmentRequest {
     /// The workspace identifier.
     pub(crate) workspace_id: String,
-    /// The services to include. Empty selects every service in the workspace.
+    /// The services to include. Empty falls back to the profile, the group, then
+    /// the whole workspace.
     #[serde(default)]
     pub(crate) service_ids: Vec<String>,
+    /// An optional development profile whose services should be selected.
+    #[serde(default)]
+    pub(crate) profile: Option<String>,
+    /// An optional service group whose members should be selected.
+    #[serde(default)]
+    pub(crate) group: Option<String>,
     /// A branch to check out before building.
     #[serde(default)]
     pub(crate) branch: Option<String>,
-    /// Whether to run Liquibase migrations.
+    /// Whether to synchronize repositories. Defaults to `true`.
+    #[serde(default)]
+    pub(crate) sync: Option<bool>,
+    /// Whether to include required dependencies automatically. Defaults to `true`.
+    #[serde(default)]
+    pub(crate) include_dependencies: Option<bool>,
+    /// Whether to build required libraries. Defaults to `false`.
+    #[serde(default)]
+    pub(crate) build_libraries: Option<bool>,
+    /// Whether to run Liquibase migrations. Defaults to `false`.
     #[serde(default)]
     pub(crate) run_liquibase: bool,
-    /// Whether to build libraries and services.
+    /// Whether to build the selected services. Defaults to `false`.
     #[serde(default)]
     pub(crate) build: bool,
-    /// Whether to start the selected services.
+    /// Whether to start the selected services. Defaults to `false`.
     #[serde(default)]
     pub(crate) start: bool,
+    /// Whether to run health checks after starting services. Defaults to `true`.
+    #[serde(default)]
+    pub(crate) wait_for_health: Option<bool>,
+}
+
+impl PrepareEnvironmentRequest {
+    /// Materializes the strict MCP arguments into an application request.
+    pub(crate) fn into_request(
+        self,
+    ) -> Result<service_orchestrator_application::PrepareEnvironmentRequest, crate::ToolError> {
+        let mut request = service_orchestrator_application::PrepareEnvironmentRequest::new(
+            crate::parse_workspace_id(&self.workspace_id)?,
+        )
+        .with_services(
+            self.service_ids
+                .iter()
+                .map(|id| crate::parse_service_id(id))
+                .collect::<Result<Vec<_>, _>>()?,
+        );
+        if let Some(profile) = self.profile {
+            request = request.with_profile(crate::parse_profile_id(&profile)?);
+        }
+        if let Some(group) = self.group {
+            request = request.with_group(crate::parse_group_id(&group)?);
+        }
+        if let Some(branch) = self.branch {
+            request = request.with_branch(crate::parse_branch(&branch)?);
+        }
+        if let Some(sync) = self.sync {
+            request = request.with_sync(sync);
+        }
+        if let Some(include_dependencies) = self.include_dependencies {
+            request = request.with_dependencies(include_dependencies);
+        }
+        if let Some(build_libraries) = self.build_libraries {
+            if build_libraries {
+                request = request.build_libraries();
+            }
+        }
+        if self.run_liquibase {
+            request = request.run_liquibase();
+        }
+        if self.build {
+            request = request.build();
+        }
+        if self.start {
+            request = request.start();
+        }
+        if let Some(wait_for_health) = self.wait_for_health {
+            request = request.with_wait_for_health(wait_for_health);
+        }
+        Ok(request)
+    }
 }

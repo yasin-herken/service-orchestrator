@@ -290,6 +290,18 @@ pub(crate) async fn route(
             let (request,): (PrepareEnvironmentRequest,) = decode(params)?;
             encode(app.prepare_environment(request)?)
         }
+        ops::PLAN_PREPARE_ENVIRONMENT => {
+            let (request,): (PrepareEnvironmentRequest,) = decode(params)?;
+            encode(app.plan_prepare_environment(&request)?)
+        }
+        ops::GET_WORKFLOW_STATUS => {
+            let (id,): (service_orchestrator_domain::WorkflowId,) = decode(params)?;
+            encode(app.get_workflow_status(&id)?)
+        }
+        ops::CANCEL_WORKFLOW => {
+            let (id,): (service_orchestrator_domain::WorkflowId,) = decode(params)?;
+            encode(app.cancel_workflow(&id)?)
+        }
         ops::START_GROUP => {
             let (workspace, group): (WorkspaceId, GroupId) = decode(params)?;
             encode(app.start_group(&workspace, &group)?)

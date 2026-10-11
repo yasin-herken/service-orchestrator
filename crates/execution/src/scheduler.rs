@@ -49,6 +49,16 @@ pub(crate) async fn run(inner: Arc<EngineInner>) {
 
 /// Starts as many runnable tasks as the concurrency limit allows.
 fn pump(inner: &Arc<EngineInner>) {
+    // Honour cancellation before scheduling: a queued task whose cancellation
+    // was requested is settled as cancelled without taking an execution slot,
+    // and its dependents settle as skipped (`tasks/016.md` §25).
+    for change in inner.store.cancel_queued_signalled() {
+        inner.publish_status_change(&change);
+        for settled in inner.store.settle_dependents(&change.id) {
+            inner.publish_status_change(&settled);
+        }
+    }
+
     loop {
         if inner.is_shutdown() {
             break;

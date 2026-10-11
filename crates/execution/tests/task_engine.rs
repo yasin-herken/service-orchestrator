@@ -865,6 +865,58 @@ async fn workflow_executes_steps_in_dependency_order() {
 }
 
 #[tokio::test]
+async fn failed_workflow_step_skips_the_entire_dependent_chain() {
+    let engine = TaskEngine::builder()
+        .executor(
+            TaskKind::Custom("a".to_owned()),
+            Arc::new(FailingExecutor::always("BOOM")),
+        )
+        .build()
+        .unwrap();
+
+    let step = |name: &str| {
+        WorkflowStep::new(
+            StepId::new(name).unwrap(),
+            TaskKind::Custom(name.to_owned()),
+        )
+    };
+    let workflow = WorkflowDefinition::new(WorkflowKind::PrepareEnvironment)
+        .with_step(step("a"))
+        .with_step(step("b").after(StepId::new("a").unwrap()))
+        .with_step(step("c").after(StepId::new("b").unwrap()));
+    let workflow_id = engine.submit_workflow(workflow).unwrap();
+
+    let tasks: Vec<_> = engine
+        .list_tasks()
+        .into_iter()
+        .filter(|task| task.workflow.as_ref() == Some(&workflow_id))
+        .collect();
+    assert_eq!(tasks.len(), 3);
+
+    let mut statuses = Vec::new();
+    for task in &tasks {
+        statuses.push(engine.wait_for(&task.id).await.unwrap().status);
+    }
+
+    // Step "a" fails and the failure propagates transitively: both downstream
+    // steps settle as skipped instead of being left blocked forever.
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|s| **s == TaskStatus::Failed)
+            .count(),
+        1
+    );
+    assert_eq!(
+        statuses
+            .iter()
+            .filter(|s| **s == TaskStatus::Skipped)
+            .count(),
+        2
+    );
+}
+
+#[tokio::test]
 async fn workflow_with_a_cycle_is_rejected() {
     let engine = TaskEngine::builder().build().unwrap();
     let first = StepId::new("a").unwrap();

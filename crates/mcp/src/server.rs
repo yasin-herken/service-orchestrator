@@ -42,8 +42,7 @@ use rmcp::ErrorData;
 use serde::Serialize;
 use serde_json::Value;
 use service_orchestrator_application::{
-    ApplicationError, DiffOptions, LogRequest, PrepareEnvironmentRequest,
-    PrepareSelectedLibrariesRequest,
+    ApplicationError, DiffOptions, LogRequest, PrepareSelectedLibrariesRequest,
 };
 use service_orchestrator_client::OrchestratorClient;
 
@@ -560,22 +559,25 @@ impl OrchestratorServer {
             }
             "prepare_environment" => {
                 let p = parse::<params::PrepareEnvironmentRequest>(arguments)?;
-                let mut request =
-                    PrepareEnvironmentRequest::new(parse_workspace_id(&p.workspace_id)?)
-                        .with_services(service_ids(&p.service_ids)?);
-                if let Some(branch) = p.branch {
-                    request = request.with_branch(parse_branch(&branch)?);
-                }
-                if p.run_liquibase {
-                    request = request.run_liquibase();
-                }
-                if p.build {
-                    request = request.build();
-                }
-                if p.start {
-                    request = request.start();
-                }
-                self.operation(self.client.prepare_environment(request))
+                self.operation(self.client.prepare_environment(p.into_request()?))
+            }
+            "plan_prepare_environment" => {
+                let p = parse::<params::PrepareEnvironmentRequest>(arguments)?;
+                query(self.client.plan_prepare_environment(&p.into_request()?))
+            }
+            "get_workflow_status" => {
+                let p = parse::<params::WorkflowRef>(arguments)?;
+                query(
+                    self.client
+                        .get_workflow_status(&parse_workflow_id(&p.workflow_id)?),
+                )
+            }
+            "cancel_workflow" => {
+                let p = parse::<params::WorkflowRef>(arguments)?;
+                query(
+                    self.client
+                        .cancel_workflow(&parse_workflow_id(&p.workflow_id)?),
+                )
             }
             "start_group" => {
                 let p = parse::<params::GroupAction>(arguments)?;

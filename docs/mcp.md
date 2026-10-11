@@ -253,12 +253,23 @@ agent never has to construct a shell command: there is deliberately **no
 | `cancel_task` | safe write | cancellation request |
 | `summarize_workflow` | read | aggregated per-step outcomes |
 | `sync_workspace` | safe write | workflow id |
+| `plan_prepare_environment` | read | a read-only `EnvironmentPlan` (selection, closure, phases, authorization, warnings) |
 | `prepare_environment` | safe write | workflow id |
+| `get_workflow_status` | read | aggregated workflow state, per-phase progress, structured failures |
+| `cancel_workflow` | safe write | how many still-active tasks were asked to cancel |
 | `start_group` / `stop_group` | safe write | workflow id |
 | `start_profile` / `stop_profile` | safe write | workflow id |
 
 Tool descriptions state what each one **does**, whether it **mutates** state, and
 what it **returns**, so an agent can plan without guessing.
+
+`prepare_environment` accepts a structured request — explicit `serviceIds`, or a
+`profile`, or a `group`, or the whole workspace; an optional `branch`; and the
+`sync`, `includeDependencies`, `buildLibraries`, `runLiquibase`, `build`,
+`start`, and `waitForHealth` options. Defaults are conservative: synchronize Git
+only. Plan first with `plan_prepare_environment` (no mutation), review the
+resolved closure and `requires_destructive_authorization`, then execute and track
+with `get_workflow_status` (`docs/environment-workflows.md`).
 
 ### Documented gaps
 
@@ -441,11 +452,17 @@ resulting task.
 
 **Prepare an environment**
 
-1. `get_workspace_status` with `{ "workspaceId": "acme" }`.
-2. `prepare_environment` with `{ "workspaceId": "acme", "runLiquibase": true,
-   "build": true, "start": true }` → `workflowId`.
-3. Poll `summarize_workflow` until the steps finish; read `get_task` for any
-   failed task's structured error.
+1. `list_profiles` (or `get_profile`) to pick a development profile, if any.
+2. `plan_prepare_environment` with `{ "workspaceId": "acme", "serviceIds":
+   ["payment-service"], "branch": "master", "build": true, "runLiquibase": true,
+   "start": true }` → review `resolved_services`, `required_libraries`, the
+   phases, warnings, and `requires_destructive_authorization`.
+3. `prepare_environment` with the same request → `workflowId`.
+4. Poll `get_workflow_status` until the workflow reaches a terminal `state`; read
+   the structured `failures` (task id, kind, code, message) rather than scraping
+   logs, and fetch logs only for a failed task.
+5. If the plan required destructive authorization (a non-local migration), the
+   agent asks a human to run it interactively — it cannot self-authorize.
 
 **Debug an unhealthy service**
 

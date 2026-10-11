@@ -185,6 +185,13 @@ pub enum ApplicationError {
         libraries: String,
     },
 
+    /// The selected services form a dependency cycle.
+    #[error("service dependency cycle detected: {services}")]
+    ServiceDependencyCycle {
+        /// The services that form the cycle.
+        services: String,
+    },
+
     /// The effective dependency version could not be inspected.
     #[error("dependency version inspection is unsupported for library '{library}': {message}")]
     VersionInspectionUnsupported {

@@ -183,6 +183,7 @@ the cursor, uppercase acts on the whole selection.
 | `S` / `X` / `R` | Start / stop / restart the selection |
 | `B` / `F` / `Y` / `H` | Build / fetch / sync / health-check the selection |
 | `a` / `c` / `t` | Select all visible / clear selection / cycle the filter |
+| `P` | Prepare the environment for the selection (also on the Dashboard) |
 
 **Git** — `c` checkout (choose a branch), `f`/`F` fetch, `y`/`Y` sync, `p` pull,
 `r` refresh status, `d` hard reset, `D` discard local changes, `n` clean,
@@ -197,7 +198,8 @@ artifact, `a` inspect version alignment, `r` refresh status.
 **Migrations** — `s` status, `p` pending, `P` preview, `v` validate, `a` apply,
 `l` logs.
 
-**Tasks** — `Enter`/`l` view task logs, `x` cancel, `t` cycle the status filter.
+**Tasks** — `Enter`/`l` view task logs, `x` cancel, `t` cycle the status filter,
+`W` cancel an active workflow.
 
 **Logs** — `f` toggle follow, `c` clear, `v` cycle the minimum level,
 `↑`/`↓` scroll (which pauses follow).
@@ -247,6 +249,7 @@ Every operation is an application use case:
 | Logs | `get_service_logs`, `get_task_logs`, `subscribe_service_logs` |
 | Health | `check_service_health`, `list_service_health` |
 | Workspace | `sync_workspace`, `build_workspace` |
+| Environment | `plan_prepare_environment`, `prepare_environment`, `get_workflow_status`, `cancel_workflow` |
 
 The interface holds no operation logic of its own. It maps a key to an `Action`,
 and `App` maps the `Action` to a use case, presenting the structured
@@ -276,6 +279,19 @@ mutates the database and is treated as a controlled operation: it flows through
 the same policy path and confirmation dialog, and the screen labels read-only
 actions distinctly from the mutating one. Maven POMs and migration files are
 never rewritten from the UI.
+
+### Environment preparation
+
+`P` opens a depth chooser (*synchronize only*, *+ libraries*, *+ services*,
+*full*), then an optional branch prompt, then calls
+`plan_prepare_environment`. The returned `EnvironmentPlan` is rendered for review
+in a confirmation dialog — selected and resolved services, required libraries,
+the target branch, the per-phase step counts, warnings, and whether any step
+requires destructive authorization. Confirming calls `prepare_environment`
+through the trusted confirmation path; the resulting workflow is tracked in the
+shared engine and observed on the Tasks screen. No workflow step is hard-coded
+in the interface. `W` on the Tasks screen cancels an active workflow
+(`docs/environment-workflows.md`).
 
 ---
 

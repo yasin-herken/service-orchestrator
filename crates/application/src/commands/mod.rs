@@ -56,16 +56,6 @@ impl WorkflowBuilder {
         }
     }
 
-    /// Adds a step with the given task and prerequisites, returning its id.
-    pub(crate) fn add(
-        &mut self,
-        task: TaskKind,
-        depends_on: Vec<StepId>,
-        description: Option<String>,
-    ) -> StepId {
-        self.add_with_parameters(task, depends_on, description, BTreeMap::new())
-    }
-
     /// Adds a step together with the parameters its executor needs.
     pub(crate) fn add_with_parameters(
         &mut self,
@@ -224,22 +214,5 @@ impl Application {
             }
         }
         Ok(())
-    }
-
-    /// Returns the start-step prerequisites for a service: its build and
-    /// migration steps, if any.
-    pub(crate) fn start_prerequisites(
-        service_id: &ServiceId,
-        build_steps: &BTreeMap<ServiceId, StepId>,
-        migrate_steps: &BTreeMap<ServiceId, StepId>,
-    ) -> Vec<StepId> {
-        let mut prerequisites = Vec::new();
-        if let Some(step) = build_steps.get(service_id) {
-            prerequisites.push(step.clone());
-        }
-        if let Some(step) = migrate_steps.get(service_id) {
-            prerequisites.push(step.clone());
-        }
-        prerequisites
     }
 }

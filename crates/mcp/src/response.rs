@@ -154,6 +154,10 @@ pub(crate) fn error_body(error: &ApplicationError) -> ErrorBody {
             ErrorBody::new("DEPENDENCY_CYCLE", error.to_string())
                 .with_details(json!({ "libraries": libraries }))
         }
+        ApplicationError::ServiceDependencyCycle { services } => {
+            ErrorBody::new("SERVICE_DEPENDENCY_CYCLE", error.to_string())
+                .with_details(json!({ "services": services }))
+        }
         ApplicationError::VersionInspectionUnsupported { library, message } => {
             ErrorBody::new("VERSION_INSPECTION_UNSUPPORTED", message.clone())
                 .with_details(json!({ "library": library }))

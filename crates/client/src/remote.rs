@@ -35,11 +35,12 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use service_orchestrator_application::{
-    ApplicationError, Authorization, BulkOperationSummary, DiffOptions, HealthCheckScope,
-    LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions, LibraryStatus, LogEntry,
-    LogPage, LogRequest, LogStreamError, LogSubscription, MigrationStatus, OperationResult,
-    PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest, ServiceDiagnostics, ServiceHealth,
-    ServiceRuntimeStatus, ServiceStatus, WorkspaceStatus,
+    ApplicationError, Authorization, BulkOperationSummary, DiffOptions, EnvironmentPlan,
+    HealthCheckScope, LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions,
+    LibraryStatus, LogEntry, LogPage, LogRequest, LogStreamError, LogSubscription, MigrationStatus,
+    OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
+    ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus, ServiceStatus, WorkflowCancellation,
+    WorkflowStatus, WorkspaceStatus,
 };
 use service_orchestrator_domain::{
     Branch, BranchInfo, GroupId, Library, LibraryId, Profile, ProfileId, RepoDiff,
@@ -1029,6 +1030,27 @@ impl OrchestratorClient for RemoteClient {
         request: PrepareEnvironmentRequest,
     ) -> Result<OperationResult, ApplicationError> {
         self.call(ops::PREPARE_ENVIRONMENT, (request,))
+    }
+
+    fn plan_prepare_environment(
+        &self,
+        request: &PrepareEnvironmentRequest,
+    ) -> Result<EnvironmentPlan, ApplicationError> {
+        self.call(ops::PLAN_PREPARE_ENVIRONMENT, (request,))
+    }
+
+    fn get_workflow_status(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<WorkflowStatus, ApplicationError> {
+        self.call(ops::GET_WORKFLOW_STATUS, (workflow_id,))
+    }
+
+    fn cancel_workflow(
+        &self,
+        workflow_id: &WorkflowId,
+    ) -> Result<WorkflowCancellation, ApplicationError> {
+        self.call(ops::CANCEL_WORKFLOW, (workflow_id,))
     }
 
     fn start_group(
