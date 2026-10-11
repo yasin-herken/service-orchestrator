@@ -214,6 +214,31 @@ pub enum ApplicationError {
         /// A human-readable summary.
         message: String,
     },
+
+    /// A health operation failed with a structured error.
+    #[error("health error ({code}): {message}")]
+    Health {
+        /// A stable, machine-readable code such as `HEALTH_CHECK_TIMEOUT`.
+        code: String,
+        /// A human-readable summary.
+        message: String,
+    },
+
+    /// Diagnostics could not be produced for a service.
+    #[error("diagnostics are unavailable for service '{service}': {message}")]
+    DiagnosticsUnavailable {
+        /// The service identifier.
+        service: String,
+        /// A human-readable explanation.
+        message: String,
+    },
+
+    /// A log query was rejected as invalid.
+    #[error("invalid log query: {message}")]
+    LogQueryInvalid {
+        /// What is wrong with the query.
+        message: String,
+    },
 }
 
 impl ApplicationError {

@@ -548,6 +548,9 @@ pub(crate) fn parse_health_check(
     if let Some(seconds) = raw.interval_seconds {
         check = check.with_interval(Duration::from_secs(seconds));
     }
+    if let Some(required) = raw.required {
+        check = check.with_required(required);
+    }
     Some(check)
 }
 

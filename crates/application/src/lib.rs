@@ -57,18 +57,20 @@ mod queries;
 pub use app::Application;
 pub use error::ApplicationError;
 pub use models::{
-    AlignmentStatus, BulkOperationSummary, ConsumerAlignment, LibraryArtifactVerification,
-    LibraryDependent, LibraryPrepareOptions, LibraryStatus, MigrationStatus, OperationResult,
-    PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest, ServiceRuntimeStatus,
-    ServiceStatus, VersionAlignmentPlan, WorkspaceStatus,
+    AlignmentStatus, BulkOperationSummary, ConsumerAlignment, DiagnosticFailure, HealthCheckScope,
+    LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions, LibraryStatus,
+    MigrationStatus, OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
+    ServiceDiagnostics, ServiceRuntimeStatus, ServiceStatus, VersionAlignmentPlan, WorkspaceStatus,
 };
 pub use ports::{
     artifact_parameter, build_parameter, migration_parameter, parameter, service_runtime_parameter,
     ArtifactInspectionError, ArtifactInspector, ArtifactPresence, BuildError,
-    DependencyVersionInspection, DiffOptions, GitError, GitManager, GitOptions, HealthState,
-    InMemoryRuntimeStateStore, LogEntry, LogLevel, LogRequest, LogService, LogServiceError,
-    MigrationError, NullArtifactInspector, NullGitManager, NullLogService, NullServiceRuntimeIndex,
-    ResolvedArtifact, ResolvedBuildCommand, ResolvedBuildTarget, ResolvedDependency,
-    ResolvedMigrationTarget, ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore,
-    ServiceProcessInfo, ServiceRuntimeError, ServiceRuntimeIndex, ServiceRuntimeState,
+    DependencyVersionInspection, DiffOptions, GitError, GitManager, GitOptions, HealthCheckOutcome,
+    HealthIndex, HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogPage, LogRequest,
+    LogService, LogServiceError, LogSource, LogStream, LogStreamError, LogSubscription,
+    MigrationError, NullArtifactInspector, NullGitManager, NullHealthIndex, NullLogService,
+    NullServiceRuntimeIndex, ResolvedArtifact, ResolvedBuildCommand, ResolvedBuildTarget,
+    ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository, ResolvedServiceTarget,
+    RuntimeStateStore, ServiceHealth, ServiceProcessInfo, ServiceRuntimeError, ServiceRuntimeIndex,
+    ServiceRuntimeState, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
 };

@@ -22,6 +22,7 @@ use crate::models::OperationResult;
 
 mod build;
 mod git;
+mod health;
 mod library;
 mod migration;
 mod service;

@@ -74,8 +74,16 @@ pub enum TaskKind {
     StopService,
     /// Restart a service.
     RestartService,
-    /// Run health checks.
+    /// Run every configured health check for a service.
     HealthCheck,
+    /// Run only a service's process health checks.
+    ProcessHealthCheck,
+    /// Run only a service's TCP/port health checks.
+    TcpHealthCheck,
+    /// Run only a service's HTTP/actuator health checks.
+    HttpHealthCheck,
+    /// Poll a service until it is ready, or the deadline elapses.
+    ReadinessCheck,
     /// A project-specific task.
     Custom(String),
 }
@@ -111,6 +119,10 @@ impl TaskKind {
             Self::StopService => "stop_service",
             Self::RestartService => "restart_service",
             Self::HealthCheck => "health_check",
+            Self::ProcessHealthCheck => "process_health_check",
+            Self::TcpHealthCheck => "tcp_health_check",
+            Self::HttpHealthCheck => "http_health_check",
+            Self::ReadinessCheck => "readiness_check",
             Self::Custom(name) => name,
         }
     }

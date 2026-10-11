@@ -33,10 +33,44 @@ pub enum HealthState {
     /// Health has not been observed.
     #[default]
     Unknown,
-    /// The last health check succeeded.
+    /// A probe is currently running and the previous result is not yet known.
+    Checking,
+    /// Every required health check succeeded.
     Healthy,
-    /// The last health check failed.
+    /// At least one required health check failed.
     Unhealthy,
+    /// Only optional health checks failed; the service is still serving.
+    Degraded,
+    /// The service is reachable at the process level but not yet answering its
+    /// configured network probe.
+    Unreachable,
+}
+
+impl HealthState {
+    /// Returns a short, stable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Unknown => "unknown",
+            Self::Checking => "checking",
+            Self::Healthy => "healthy",
+            Self::Unhealthy => "unhealthy",
+            Self::Degraded => "degraded",
+            Self::Unreachable => "unreachable",
+        }
+    }
+
+    /// Returns `true` when the service is fully healthy.
+    #[must_use]
+    pub const fn is_healthy(self) -> bool {
+        matches!(self, Self::Healthy)
+    }
+
+    /// Returns `true` when the service is serving but not fully healthy.
+    #[must_use]
+    pub const fn is_serving(self) -> bool {
+        matches!(self, Self::Healthy | Self::Degraded)
+    }
 }
 
 /// A snapshot of a service's transient runtime state.

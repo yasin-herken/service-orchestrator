@@ -299,8 +299,15 @@ dependencies = [
 name = "service-orchestrator-health"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
+ "serde_json",
  "service-orchestrator-application",
+ "service-orchestrator-config",
  "service-orchestrator-domain",
+ "service-orchestrator-execution",
+ "service-orchestrator-process",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -321,8 +328,14 @@ dependencies = [
 name = "service-orchestrator-logging"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "service-orchestrator-application",
+ "service-orchestrator-config",
  "service-orchestrator-domain",
+ "service-orchestrator-execution",
+ "service-orchestrator-process",
+ "time",
+ "tokio",
 ]
 
 [[package]]
@@ -380,6 +393,16 @@ checksum = "c4db69cba1110affc0e9f7bcd48bbf87b3f4fc7c61fc9155afd4c469eb3d6c1b"
 dependencies = [
  "errno",
  "libc",
+]
+
+[[package]]
+name = "socket2"
+version = "0.6.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
+dependencies = [
+ "libc",
+ "windows-sys",
 ]
 
 [[package]]
@@ -454,6 +477,7 @@ dependencies = [
  "mio",
  "pin-project-lite",
  "signal-hook-registry",
+ "socket2",
  "tokio-macros",
  "windows-sys",
 ]
