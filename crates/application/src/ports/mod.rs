@@ -19,12 +19,18 @@
 //! executor decodes, plus a small read-only [`ServiceRuntimeIndex`] the adapter
 //! implements so runtime-status queries can read live managed-process state.
 //!
+//! Database migrations follow the same pattern again: every operation is a task,
+//! so the boundary declares the workspace-aware
+//! [`ResolvedMigrationTarget`] a task executor decodes and re-exports the
+//! structured [`MigrationError`] the migration adapter returns.
+//!
 //! [`execution::TaskManager`]: service_orchestrator_execution::TaskManager
 
 pub(crate) mod artifact;
 pub(crate) mod build;
 pub(crate) mod git;
 pub(crate) mod logs;
+pub(crate) mod migration;
 pub(crate) mod runtime_state;
 pub(crate) mod service_runtime;
 
@@ -39,6 +45,7 @@ pub use git::{
     parameter, DiffOptions, GitError, GitManager, GitOptions, NullGitManager, ResolvedRepository,
 };
 pub use logs::{LogEntry, LogLevel, LogRequest, LogService, LogServiceError, NullLogService};
+pub use migration::{parameter as migration_parameter, MigrationError, ResolvedMigrationTarget};
 pub use runtime_state::{
     HealthState, InMemoryRuntimeStateStore, RuntimeStateStore, ServiceRuntimeState,
 };

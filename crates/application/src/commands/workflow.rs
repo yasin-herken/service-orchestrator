@@ -10,8 +10,9 @@ use std::collections::BTreeMap;
 
 use service_orchestrator_config::ConfiguredWorkspace;
 use service_orchestrator_domain::{
-    BuildOperation, CommandKind, DependencyTarget, GroupId, Permission, ProcessState, ProfileId,
-    ServiceCapability, ServiceId, StepId, TaskKind, WorkflowKind, WorkspaceId,
+    BuildOperation, CommandKind, DependencyTarget, GroupId, MigrationOperation, Permission,
+    ProcessState, ProfileId, ServiceCapability, ServiceId, StepId, TaskKind, WorkflowKind,
+    WorkspaceId,
 };
 
 use crate::app::Application;
@@ -228,11 +229,17 @@ impl Application {
                     .liquibase_config(workspace, id)
                     .is_some_and(|config| config.enabled);
                 if enabled {
+                    // The step keeps the historical `Liquibase` task kind (an
+                    // apply alias) but now carries the resolved target so the
+                    // migration adapter knows exactly which database it targets.
+                    let (target, _timeout) =
+                        self.resolve_migration(id, MigrationOperation::Apply)?;
                     let prerequisites = build_steps.get(id).cloned().into_iter().collect();
-                    let step = builder.add(
+                    let step = builder.add_with_parameters(
                         TaskKind::Liquibase,
                         prerequisites,
                         Some(format!("liquibase {id}")),
+                        target.to_parameters(),
                     );
                     migrate_steps.insert(id.clone(), step);
                 }

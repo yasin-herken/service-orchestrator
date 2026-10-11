@@ -205,6 +205,15 @@ pub enum ApplicationError {
         /// A human-readable summary.
         message: String,
     },
+
+    /// A database migration operation failed with a structured error.
+    #[error("migration error ({code}): {message}")]
+    Migration {
+        /// A stable, machine-readable code such as `MIGRATION_DATABASE_TARGET_NOT_AUTHORIZED`.
+        code: String,
+        /// A human-readable summary.
+        message: String,
+    },
 }
 
 impl ApplicationError {

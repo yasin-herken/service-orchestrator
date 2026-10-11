@@ -272,11 +272,42 @@ plus a new provider, with no change to the rest of the schema.
 ```toml
 [services.liquibase]
 enabled = true                                  # defaults to true when present
-command = "./mvnw liquibase:update"
-timeout_seconds = 300
+provider = "liquibase"                          # defaults to "liquibase"
+execution_mode = "maven"                        # "maven" (default) or "cli"
+timeout_seconds = 300                           # optional; falls back to execution.default_timeout_seconds
+
+[services.liquibase.commands]                   # optional; per-operation commands
+validate = "./mvnw liquibase:validate"
+status   = "./mvnw liquibase:status"
+pending  = "./mvnw liquibase:status"
+preview  = "./mvnw liquibase:updateSQL"
+update   = "./mvnw liquibase:update"
+
+[services.liquibase.database]                   # optional; display-safe target identity
+environment   = "local"                         # local | shared_development | staging | production | <other>
+database_type = "postgresql"
+name          = "acme_auth"
+host          = "localhost"
+schema        = "public"
+contexts      = ["local"]
+labels        = []
+
 [services.liquibase.environment]
 LIQUIBASE_COMMAND_CONTEXT = "local"
 ```
+
+The legacy single `command` key is still accepted and maps to the apply
+(`update`) operation; an explicit `commands.update` wins. A per-operation command
+is authoritative and used verbatim (program plus typed arguments, never a shell
+line); only the *default* command needs build-tool knowledge. In `cli` execution
+mode a command must be configured for each operation, otherwise the request fails
+with `MIGRATION_COMMAND_MISSING`.
+
+`database.environment` identifies the target for safety: only `local` may migrate
+without explicit authorization. Any other value — including an unrecognized name
+or an absent one — requires confirmation, and locality is never inferred from a
+hostname. Credentials are never stored here; secrets belong in the environment,
+referenced by name (`AGENTS.md` §31). See `docs/migration-manager.md`.
 
 ### 5.8 Health checks
 
@@ -451,6 +482,9 @@ against the real filesystem, and repositories are not assumed to exist.
 | dependency kind (libraries) | `build` | |
 | dependency `required` | `true` | |
 | liquibase `enabled` | `true` when the block is present | |
+| liquibase `provider` | `liquibase` | |
+| liquibase `execution_mode` | `maven` | `maven` or `cli`. |
+| liquibase `database.environment` | `unknown` | Only `local` migrates without explicit authorization; `unknown` is non-local. |
 | `execution.max_parallel_tasks` | `4` | |
 | `execution.default_timeout_seconds` | `1800` | |
 

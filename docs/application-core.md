@@ -124,6 +124,12 @@ Use cases are split conceptually (not into a distributed CQRS system):
 | `build_service` | `ServiceId` | `OperationResult` |
 | `build_library` | `LibraryId` | `OperationResult` |
 | `run_liquibase` | `ServiceId` | `OperationResult` |
+| `validate_migration` | `ServiceId` | `OperationResult` |
+| `get_migration_status` | `ServiceId` | `OperationResult` |
+| `inspect_migration_pending` | `ServiceId` | `OperationResult` |
+| `preview_migration` | `ServiceId` | `OperationResult` |
+| `apply_migration` | `ServiceId` | `OperationResult` |
+| `apply_selected_migrations` | `WorkspaceId`, `[ServiceId]` | `OperationResult` |
 | `start_service` | `ServiceId` | `OperationResult` |
 | `stop_service` | `ServiceId` | `OperationResult` |
 | `restart_service` | `ServiceId` | `OperationResult` |
@@ -316,7 +322,17 @@ Commands validate before scheduling:
   `AlreadyInDesiredState`.
 - **`build_service`** — declares `Build`, has a build command and a path.
 - **`sync_service`** — has a repository.
-- **`run_liquibase`** — Liquibase is configured, enabled, and has a command.
+- **`run_liquibase`** — an alias for `apply_migration`: Liquibase is configured
+  and enabled.
+- **`validate_migration` / `get_migration_status` / `inspect_migration_pending` /
+  `preview_migration`** — Liquibase is configured and enabled. These are read-only
+  and require only `Permission::Read`.
+- **`apply_migration`** — Liquibase is configured and enabled, and the target's
+  declared environment permits the operation: a local target needs
+  `Permission::SafeWrite`, any other (including an unidentified) target needs
+  `Permission::Destructive`.
+- **`apply_selected_migrations`** — the workspace exists; services without enabled
+  migration configuration are skipped rather than failing the batch.
 - **`health_check`** — has at least one configured health check.
 - **`start_group` / `start_profile`** — every selected service can be started;
   already-running services are skipped, and if nothing remains the result is

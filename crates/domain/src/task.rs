@@ -56,6 +56,16 @@ pub enum TaskKind {
     NpmBuild,
     /// Run database migrations.
     Liquibase,
+    /// Validate migration configuration without touching the database.
+    MigrationValidate,
+    /// Inspect migration status.
+    MigrationStatus,
+    /// Inspect pending changesets.
+    MigrationPending,
+    /// Generate SQL for a planned migration without applying it.
+    MigrationPreview,
+    /// Apply pending migrations.
+    MigrationApply,
     /// Build a service.
     BuildService,
     /// Start a service.
@@ -91,6 +101,11 @@ impl TaskKind {
             Self::NpmInstall => "npm_install",
             Self::NpmBuild => "npm_build",
             Self::Liquibase => "liquibase",
+            Self::MigrationValidate => "migration_validate",
+            Self::MigrationStatus => "migration_status",
+            Self::MigrationPending => "migration_pending",
+            Self::MigrationPreview => "migration_preview",
+            Self::MigrationApply => "migration_apply",
             Self::BuildService => "build_service",
             Self::StartService => "start_service",
             Self::StopService => "stop_service",

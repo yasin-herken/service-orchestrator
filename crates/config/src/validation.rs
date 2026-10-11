@@ -22,9 +22,9 @@ use std::time::Duration;
 
 use service_orchestrator_domain::{
     ArtifactCoordinate, BuildSystem, CommandKind, CommandSet, CommandSpec, DependencyKind,
-    Environment, EnvironmentVariable, HealthCheck, HealthCheckKind, HttpHealthCheck, Library, Port,
-    RelativePath, RepositoryProvider, Runtime, RuntimeKind, Service, ServiceCapability,
-    ServiceType, Version,
+    Environment, EnvironmentVariable, HealthCheck, HealthCheckKind, HttpHealthCheck, Library,
+    LiquibaseExecutionMode, MigrationProviderType, Port, RelativePath, RepositoryProvider, Runtime,
+    RuntimeKind, Service, ServiceCapability, ServiceType, Version,
 };
 
 use crate::error::ValidationError;
@@ -201,6 +201,52 @@ pub(crate) fn parse_build_system(
                 .expected("one of: maven, npm")
                 .suggested_fix(
                     "Use `build_system = \"maven\"` or `build_system = \"npm\"`.".to_owned(),
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// Parses a migration provider name.
+///
+/// Any non-empty, unrecognized value becomes a custom provider so
+/// configuration remains forward-compatible; whether the provider is usable is
+/// decided by the provider registry, not here.
+pub(crate) fn parse_migration_provider(
+    location: &str,
+    value: &str,
+    errors: &mut Vec<ValidationError>,
+) -> Option<MigrationProviderType> {
+    match MigrationProviderType::parse(value) {
+        Some(provider) => Some(provider),
+        None => {
+            errors.push(
+                ValidationError::new(location, "migration provider must not be empty")
+                    .expected("a provider name such as 'liquibase' or 'flyway'"),
+            );
+            None
+        }
+    }
+}
+
+/// Parses a Liquibase execution mode.
+pub(crate) fn parse_execution_mode(
+    location: &str,
+    value: &str,
+    errors: &mut Vec<ValidationError>,
+) -> Option<LiquibaseExecutionMode> {
+    match LiquibaseExecutionMode::parse(value) {
+        Some(mode) => Some(mode),
+        None => {
+            errors.push(
+                ValidationError::new(
+                    location,
+                    format!("'{value}' is not a supported Liquibase execution mode"),
+                )
+                .expected("one of: maven, cli")
+                .suggested_fix(
+                    "Use `execution_mode = \"maven\"` or `execution_mode = \"cli\"`.".to_owned(),
                 ),
             );
             None

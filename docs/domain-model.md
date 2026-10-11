@@ -347,6 +347,8 @@ crates/domain/src/
 ├── profile.rs      Profile
 ├── workspace.rs    Workspace and cross-cutting validation
 ├── task.rs         Task, TaskKind, TaskStatus, TaskProgress, TaskFailure
+├── migration.rs    MigrationProviderType, MigrationOperation, LiquibaseExecutionMode,
+│                   MigrationTargetEnvironment
 ├── workflow.rs     Workflow, WorkflowKind, WorkflowStep
 ├── process.rs      ProcessState
 ├── git.rs          GitState

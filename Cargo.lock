@@ -307,8 +307,14 @@ dependencies = [
 name = "service-orchestrator-liquibase"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "service-orchestrator-application",
+ "service-orchestrator-build",
+ "service-orchestrator-config",
  "service-orchestrator-domain",
+ "service-orchestrator-execution",
+ "service-orchestrator-process",
+ "tokio",
 ]
 
 [[package]]

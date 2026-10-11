@@ -106,7 +106,167 @@ fn records_liquibase_configuration() {
         .expect("auth-service has liquibase config");
     assert!(liquibase.enabled);
     assert_eq!(liquibase.timeout_seconds, Some(300));
-    assert!(liquibase.command.is_some());
+    assert_eq!(
+        liquibase.provider,
+        service_orchestrator_domain::MigrationProviderType::Liquibase
+    );
+    assert_eq!(
+        liquibase.execution_mode,
+        service_orchestrator_domain::LiquibaseExecutionMode::Maven
+    );
+    assert!(liquibase.commands.update.is_some());
+    assert!(liquibase.commands.status.is_some());
+    assert!(liquibase.commands.preview.is_some());
+    assert_eq!(
+        liquibase.database.environment,
+        service_orchestrator_domain::MigrationTargetEnvironment::Local
+    );
+    assert_eq!(liquibase.database.name.as_deref(), Some("acme_auth"));
+}
+
+#[test]
+fn maps_legacy_liquibase_command_to_update() {
+    let text = r#"
+config_version = 1
+
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+
+[[services]]
+id = "auth-service"
+type = "backend"
+workspace = "acme"
+
+[services.commands]
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+
+[services.liquibase]
+enabled = true
+command = "./mvnw liquibase:update"
+"#;
+    let config = load(text).unwrap();
+    let liquibase = config.workspaces[0]
+        .liquibase
+        .get(&"auth-service".parse().unwrap())
+        .expect("liquibase config present");
+    let update = liquibase
+        .commands
+        .update
+        .as_ref()
+        .expect("legacy command maps to update");
+    assert_eq!(update.program, "./mvnw");
+    assert_eq!(update.args, vec!["liquibase:update"]);
+    // With no database block the target environment is the safe default.
+    assert_eq!(
+        liquibase.database.environment,
+        service_orchestrator_domain::MigrationTargetEnvironment::Unknown
+    );
+    assert!(liquibase.database.environment.requires_authorization());
+}
+
+#[test]
+fn an_explicit_update_command_wins_over_the_legacy_key() {
+    let text = r#"
+config_version = 1
+
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+
+[[services]]
+id = "auth-service"
+type = "backend"
+workspace = "acme"
+
+[services.commands]
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+
+[services.liquibase]
+command = "./mvnw liquibase:update"
+
+[services.liquibase.commands]
+update = "./mvnw liquibase:updateSQL"
+"#;
+    let config = load(text).unwrap();
+    let liquibase = &config.workspaces[0].liquibase[&"auth-service".parse().unwrap()];
+    assert_eq!(
+        liquibase.commands.update.as_ref().unwrap().args,
+        vec!["liquibase:updateSQL"]
+    );
+}
+
+#[test]
+fn an_unknown_migration_provider_is_accepted_as_custom() {
+    let text = r#"
+config_version = 1
+
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+
+[[services]]
+id = "auth-service"
+type = "backend"
+workspace = "acme"
+
+[services.commands]
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+
+[services.liquibase]
+provider = "dbmate"
+"#;
+    let config = load(text).unwrap();
+    let liquibase = &config.workspaces[0].liquibase[&"auth-service".parse().unwrap()];
+    assert_eq!(
+        liquibase.provider,
+        service_orchestrator_domain::MigrationProviderType::Custom("dbmate".to_owned())
+    );
+}
+
+#[test]
+fn rejects_an_unsafe_migration_command() {
+    // A program must be a single executable: shell metacharacters and
+    // whitespace are rejected before anything can run (`tasks/011.md` §32).
+    let text = format!(
+        "{MINIMAL}\n[services.liquibase.commands]\nupdate = {{ program = \"mvn; rm -rf /\", args = [] }}\n"
+    );
+    let error = load(&text).unwrap_err();
+    let errors = validation_errors(&error);
+    let command_error = errors
+        .errors()
+        .iter()
+        .find(|e| e.location.contains("liquibase.commands.update"))
+        .expect("expected an unsafe migration command to be rejected");
+    assert!(command_error.problem.contains("mvn; rm -rf /"));
+}
+
+#[test]
+fn an_invalid_execution_mode_is_rejected() {
+    let text = r#"
+config_version = 1
+
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+
+[[services]]
+id = "auth-service"
+type = "backend"
+workspace = "acme"
+
+[services.liquibase]
+execution_mode = "docker"
+"#;
+    let error = load(text).unwrap_err();
+    let errors = validation_errors(&error);
+    assert!(errors
+        .errors()
+        .iter()
+        .any(|error| error.location.contains("execution_mode")));
 }
 
 #[test]

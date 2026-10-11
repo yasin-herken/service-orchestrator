@@ -7,6 +7,7 @@
 
 mod git;
 mod library;
+mod migration;
 mod runtime;
 mod service;
 mod task;
