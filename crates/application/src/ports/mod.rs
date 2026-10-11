@@ -7,17 +7,23 @@
 //! subsystems directly — it requests tasks and the execution engine reaches the
 //! adapters. Git is the exception: read-only inspection and authorized
 //! destructive operations are exposed directly through `GitManager`, while
-//! mutations are scheduled as tasks.
+//! mutations are scheduled as tasks. Builds are entirely task-driven, so the
+//! build boundary declares only the workspace-aware [`ResolvedBuildTarget`]
+//! value that a task executor decodes.
 //!
 //! The task-engine contract itself lives in the `execution` core service (the
 //! application depends *inward* on the engine); see [`execution::TaskManager`].
 //!
 //! [`execution::TaskManager`]: service_orchestrator_execution::TaskManager
 
+pub(crate) mod build;
 pub(crate) mod git;
 pub(crate) mod logs;
 pub(crate) mod runtime_state;
 
+pub use build::{
+    parameter as build_parameter, BuildError, ResolvedBuildCommand, ResolvedBuildTarget,
+};
 pub use git::{
     parameter, DiffOptions, GitError, GitManager, GitOptions, NullGitManager, ResolvedRepository,
 };

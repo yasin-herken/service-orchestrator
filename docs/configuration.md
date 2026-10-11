@@ -175,10 +175,12 @@ type = "backend"                 # backend | frontend | library | other:<name>
 workspace = "acme"               # required
 path = "backend/auth-service"    # optional; required if a repository is given
 default_branch = "main"          # optional; fallback for the repository
+build_system = "maven"           # optional; maven | npm; inferred when omitted
 ```
 
 A service typed `library` is rejected with a pointer to `[[libraries]]`;
-libraries are a separate entity.
+libraries are a separate entity. Whether `build_system` is declared or inferred
+is described in §5.6.
 
 ### 5.3 Repository
 
@@ -234,7 +236,38 @@ rejected. Structured commands are preferred for anything non-trivial
 
 Commands are only modeled and validated here; this task executes nothing.
 
-### 5.6 Liquibase
+### 5.6 Build system
+
+```toml
+build_system = "maven"           # maven | npm
+```
+
+A service or library may declare which build system it uses. The value is
+optional; when it is omitted the system is inferred, and when nothing is
+recognizable the entity simply has no known build system.
+
+Inference order:
+
+- a `maven` or `npm` **runtime** requirement is the most explicit signal, so it
+  is consulted first;
+- otherwise the **program** of the build, install, and test commands is matched
+  by its basename (`mvn`/`mvnw` → Maven; `npm`/`npx`/`yarn`/`pnpm` → npm). Only
+  build-related commands are inspected, so `start = "node index.js"` is not
+  mistaken for npm;
+- for a **library**, its `type` is consulted first (a `maven` library defaults
+  to Maven), then the runtime/command inference above.
+
+An explicit `build_system` is **authoritative**: it is validated and, unlike an
+inferred value, an unrecognized spelling is a configuration error rather than a
+silent fallback. The build system drives provider selection in the Build Manager
+(`docs/build-manager.md`).
+
+Only `maven` and `npm` are accepted today. **Gradle is planned but deliberately
+not accepted yet**: it has no provider, and offering it would let a configuration
+select a system that cannot build it. Adding it later is a new accepted spelling
+plus a new provider, with no change to the rest of the schema.
+
+### 5.7 Liquibase
 
 ```toml
 [services.liquibase]
@@ -245,7 +278,7 @@ timeout_seconds = 300
 LIQUIBASE_COMMAND_CONTEXT = "local"
 ```
 
-### 5.7 Health checks
+### 5.8 Health checks
 
 ```toml
 [[services.health_checks]]
@@ -262,7 +295,7 @@ port = 8081                                     # required for port
 
 A port health check must target a port the service declares.
 
-### 5.8 Ports
+### 5.9 Ports
 
 ```toml
 [[services.ports]]
@@ -270,7 +303,7 @@ port = 8081                 # required, 1..=65535
 protocol = "tcp"            # tcp | udp, defaults to tcp
 ```
 
-### 5.9 Dependencies
+### 5.10 Dependencies
 
 ```toml
 [services.dependencies]
@@ -297,7 +330,7 @@ finalization, using the combined service + library graph.
 Libraries may only depend on libraries; a library dependency on a service is
 rejected with a suggestion to move it under `dependencies.libraries`.
 
-### 5.10 Libraries
+### 5.11 Libraries
 
 ```toml
 [[libraries]]
@@ -307,6 +340,7 @@ workspace = "acme"
 path = "libraries/common-core"
 default_branch = "main"
 type = "maven"                  # defaults to maven
+build_system = "maven"          # optional; inferred from type when omitted
 
 [libraries.repository]
 url = "git@github.com:acme/common-core.git"
@@ -320,9 +354,11 @@ artifact_id = "common-core"
 version = "1.8.0-SNAPSHOT"
 ```
 
-A `maven` library must declare artifact metadata and a build command.
+A `maven` library must declare artifact metadata and a build command. A library
+may declare `build_system` like a service; when it is omitted the library `type`
+is consulted first (§5.6).
 
-### 5.11 Service groups
+### 5.12 Service groups
 
 ```toml
 [[groups]]
@@ -337,7 +373,7 @@ Groups reference services; they never duplicate their definitions. A group must
 contain at least one service, and every reference must resolve in the same
 workspace.
 
-### 5.12 Profiles
+### 5.13 Profiles
 
 ```toml
 [[profiles]]
@@ -352,7 +388,7 @@ groups = ["customer"]
 Profiles reference services and groups. They must reference at least one entity
 and must not contain duplicate references.
 
-### 5.13 Execution settings
+### 5.14 Execution settings
 
 ```toml
 [execution]
@@ -363,7 +399,7 @@ default_timeout_seconds = 1800  # default 1800
 Scheduling is not implemented here; these values are validated and carried
 forward for the execution engine.
 
-### 5.14 Environment variables
+### 5.15 Environment variables
 
 ```toml
 [services.environment]
@@ -409,6 +445,7 @@ against the real filesystem, and repositories are not assumed to exist.
 | workspace `name` | the workspace `id` | |
 | service/library `name` | the entity `id` | |
 | library `type` | `maven` | |
+| service/library `build_system` | inferred | From `maven`/`npm` runtimes, then build-command programs; a library's `type` is tried first. No inference leaves the entity with no known build system. |
 | port `protocol` | `tcp` | |
 | dependency kind (services) | `runtime` | |
 | dependency kind (libraries) | `build` | |
@@ -434,6 +471,8 @@ crate, then a final `Workspace::validate` in the domain.
 - Unknown fields → parse error naming the field.
 - Invalid enum spellings (`type`, runtime, health check, capability, dependency
   kind, protocol) → validation error listing the accepted values.
+- An explicit `build_system` other than `maven`/`npm` → validation error listing
+  those two. `gradle` is intentionally not accepted yet (it has no provider).
 - `config_version` not an integer, or unsupported → dedicated error.
 
 ### References

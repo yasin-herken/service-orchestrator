@@ -126,7 +126,7 @@ domain. Nothing inner knows about anything outer.
 | `application` | Application | The shared application core: use cases (commands and queries), orchestration, policy application, and the ports infrastructure implements (`RuntimeStateStore`, `LogService`). Consumes `Config` and submits work to the `execution` engine. |
 | `git` | Infrastructure | Git adapter implementing the application Git port. |
 | `process` | Infrastructure | Local process lifecycle, state, ports, child processes, logs. |
-| `build` | Infrastructure | Build tooling (Maven, npm) via structured process execution. |
+| `build` | Infrastructure | Build adapter. A build-system-agnostic manager selects a `BuildProvider` (Maven, npm) that emits a structured `BuildPlan`, which is run in the process manager. |
 | `liquibase` | Infrastructure | Liquibase migration adapter. |
 | `health` | Infrastructure | Configurable health checks (process, port, HTTP/actuator). |
 | `logging` | Infrastructure | Structured logging and bounded, filterable log retrieval. |
@@ -151,7 +151,8 @@ future cli ───┘            │    └──> config  ──> domain
 git, process, build, liquibase, health, logging
     ────────────────────────> application + domain   (implement ports)
 
-git ──> execution (TaskExecutor) + process (run git)  (documented exception)
+git   ──> execution (TaskExecutor) + process (run git)     (documented exception, ADR 007)
+build ──> execution (TaskExecutor) + process (run builds)  (documented exception, ADR 008)
 
 service-orchestrator (root) ──> everything         (composition root)
 ```
@@ -163,10 +164,11 @@ service-orchestrator (root) ──> everything         (composition root)
 - `application` depends on `domain`, `execution`, `policy`, and `config`. It
   consumes the validated `Config`; it never parses configuration files itself.
 - Infrastructure crates depend on `application` (to implement its ports) and
-  `domain`. They must not depend on each other or on interfaces, with one
-  documented exception (`docs/adr/007-git-manager.md`): the `git` adapter also
-  depends on `execution` (it implements a `TaskExecutor` for mutating Git
-  operations) and on `process` (it runs the Git CLI through the single process
+  `domain`. They must not depend on each other or on interfaces, with two
+  documented exceptions (`docs/adr/007-git-manager.md`,
+  `docs/adr/008-build-manager.md`): the `git` adapter and the `build` adapter
+  each depend on `execution` (they implement a `TaskExecutor` for mutating
+  operations) and on `process` (they run the tool through the single process
   owner). No other infrastructure crate may take such an edge without an ADR.
 - `tui` and `mcp` depend only on `application`.
 - The root binary is the only crate allowed to depend on both infrastructure
@@ -377,8 +379,8 @@ the process manager; it never spawns an operating-system process itself
 - It depends on `application` (the port it implements), `domain` (the values it
   produces), `execution` (the `TaskExecutor`/`TaskContext` boundary), and
   `process` (to run Git). The `git -> execution` and `git -> process` edges are
-  the one documented infrastructure-to-infrastructure exception; the rationale
-  is recorded in `docs/adr/007-git-manager.md`.
+  the first documented infrastructure-to-infrastructure exception (`docs/adr/007-git-manager.md`);
+  the Build Manager takes the second (`docs/adr/008-build-manager.md`, §13).
 - Repository-scoped coordination serializes mutations of the same checkout while
   independent repositories and concurrent reads proceed in parallel. The
   engine's `max_parallel_tasks` remains the only global concurrency bound.
@@ -392,7 +394,53 @@ behavior are in `docs/git-manager.md`; the decisions behind them are in
 
 ---
 
-## 13. Enforcement and validation
+## 13. Where the Build Manager belongs
+
+The Build Manager turns a validated build target into a structured build plan
+and has it executed. It lives in the `build` crate and is **build-system
+agnostic**: Maven is the primary implementation and npm the second, but nothing
+in orchestration is coupled to either.
+
+- A focused `BuildProvider` abstraction declares a provider's capabilities,
+  validates its build-system requirements, resolves the executable or wrapper,
+  and emits a `BuildPlan` (program, typed arguments, working directory,
+  environment *requirements*, timeout, expected outputs). Providers are pure,
+  stateless, and synchronous; their only output is a value.
+- **Providers never spawn processes or schedule tasks.** The `BuildManager` hands
+  a plan to the `BuildRunner`, which runs it through the process manager — the
+  single process owner (`AGENTS.md` §15). Builds therefore stay supervised,
+  cancellable, timeout-bounded, and inside the engine's concurrency.
+- Operations are build-system-neutral (`Clean`, `Build`, `Test`,
+  `InstallDependencies`, `PublishLocalArtifact`). Providers declare the subset
+  their system genuinely supports; an unsupported request fails fast with
+  `BUILD_UNSUPPORTED_OPERATION` instead of being approximated. `BuildSystem` and
+  `BuildOperation` are domain vocabulary; whether a system supports an operation
+  is the provider's honest declaration.
+- `BuildProviderRegistry` is a small map from `BuildSystem` to provider. Adding a
+  system (Gradle, for example) is: implement `BuildProvider`, register it,
+  extend configuration validation, and add tests — no change to the manager, the
+  engine, the application core, or the interfaces.
+- Every build is a task. `BuildTaskExecutor` decodes a workspace-aware
+  `ResolvedBuildTarget` from the task's parameters and delegates to the manager.
+  There is no `BuildManager` port in the application, because a build has no
+  read-only query an interface would call directly.
+- Build-system selection is configuration-driven: an explicit `build_system`
+  key is authoritative and validated, otherwise the system is inferred from
+  declared runtimes and the programs of the build-related commands. Gradle is
+  planned but intentionally not accepted yet, so a configuration can never
+  select a system that cannot build it.
+- It depends on `application` and `domain`, and — like Git — on `execution`
+  (the `TaskExecutor` boundary) and `process` (to run build tools). This is the
+  second documented infrastructure-to-infrastructure exception, recorded in
+  `docs/adr/008-build-manager.md`.
+
+The full model, operations, capabilities, plans, provider selection, errors, and
+test approach are in `docs/build-manager.md`; the decisions behind them are in
+`docs/adr/008-build-manager.md`.
+
+---
+
+## 14. Enforcement and validation
 
 - Dependencies are declared exclusively through `[workspace.dependencies]` so
   boundaries are visible in one place.
@@ -411,7 +459,7 @@ behavior are in `docs/git-manager.md`; the decisions behind them are in
 
 ---
 
-## 14. Domain model
+## 15. Domain model
 
 The domain layer defines the vocabulary every other layer speaks. It lives in
 the `service-orchestrator-domain` crate and depends on no other workspace crate
@@ -449,7 +497,7 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 15. The application core
+## 16. The application core
 
 The `application` crate is the shared application core (`docs/application-core.md`).
 It is the one API the TUI, MCP, and any future interface call, so business
@@ -490,7 +538,7 @@ behavior lives in exactly one place.
   Bulk commands submit one independent workflow step per repository;
   `summarize_workflow` aggregates the per-repository outcomes.
 
-## 16. Related documents
+## 17. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -504,6 +552,8 @@ behavior lives in exactly one place.
 - `docs/adr/006-process-manager.md` — the decision record for the process
   manager.
 - `docs/adr/007-git-manager.md` — the decision record for the Git manager.
+- `docs/adr/008-build-manager.md` — the decision record for the Build Manager
+  and its provider abstraction.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
@@ -512,5 +562,7 @@ behavior lives in exactly one place.
   supervision, registry, cancellation, logs, and events.
 - `docs/git-manager.md` — the Git manager: operations, safety, coordination,
   task-engine integration, and authentication.
+- `docs/build-manager.md` — the Build Manager: provider abstraction, build
+  plans, operations and capabilities, provider selection, and errors.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

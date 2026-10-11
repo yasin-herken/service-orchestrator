@@ -1,6 +1,6 @@
 //! Library commands.
 
-use service_orchestrator_domain::{CommandKind, LibraryId, Permission, TaskKind};
+use service_orchestrator_domain::{BuildOperation, CommandKind, LibraryId, Permission, TaskKind};
 use service_orchestrator_execution::TaskDefinition;
 
 use crate::app::Application;
@@ -20,20 +20,17 @@ impl Application {
         library_id: &LibraryId,
     ) -> Result<OperationResult, ApplicationError> {
         self.authorize(Permission::SafeWrite)?;
-        let (_workspace, library) = self.locate_library(library_id)?;
+        let (workspace, library) = self.locate_library(library_id)?;
         if !library.commands.contains(&CommandKind::Build) {
             return Err(ApplicationError::invalid_operation(format!(
                 "library '{library_id}' has no build command configured"
             )));
         }
-        if library.path.is_none() {
-            return Err(ApplicationError::invalid_operation(format!(
-                "library '{library_id}' has no workspace path configured"
-            )));
-        }
+        let target = self.library_build_target(workspace, library, BuildOperation::Build)?;
         self.schedule(
             TaskDefinition::new(TaskKind::BuildLibrary)
                 .for_library(library_id.clone())
+                .with_parameters(target.to_parameters())
                 .with_timeout(self.default_timeout_seconds()),
         )
     }

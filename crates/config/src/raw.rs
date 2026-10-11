@@ -92,6 +92,9 @@ pub(crate) struct RawService {
     /// The configured commands.
     #[serde(default)]
     pub(crate) commands: RawCommands,
+    /// The build system (`maven` or `npm`). When omitted it is inferred from
+    /// the runtimes and commands.
+    pub(crate) build_system: Option<String>,
     /// Optional Liquibase configuration.
     pub(crate) liquibase: Option<RawLiquibase>,
     /// Health checks.
@@ -140,6 +143,9 @@ pub(crate) struct RawLibrary {
     /// The configured commands.
     #[serde(default)]
     pub(crate) commands: RawCommands,
+    /// The build system (`maven` or `npm`). When omitted it is inferred from
+    /// the library `type`, runtimes, and commands.
+    pub(crate) build_system: Option<String>,
     /// Declared dependencies (libraries only).
     #[serde(default)]
     pub(crate) dependencies: RawDependencies,

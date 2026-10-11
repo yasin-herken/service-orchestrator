@@ -20,6 +20,7 @@ use crate::app::Application;
 use crate::error::ApplicationError;
 use crate::models::OperationResult;
 
+mod build;
 mod git;
 mod library;
 mod service;

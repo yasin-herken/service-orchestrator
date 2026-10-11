@@ -10,7 +10,7 @@ use service_orchestrator_config::{
     DEFAULT_TIMEOUT_SECONDS, SUPPORTED_CONFIG_VERSION,
 };
 use service_orchestrator_domain::{
-    CommandKind, DependencyKind, DependencyTarget, ServiceType, WorkspaceId,
+    BuildSystem, CommandKind, DependencyKind, DependencyTarget, ServiceType, WorkspaceId,
 };
 
 const ORIGIN: &str = "<test>";
@@ -206,6 +206,115 @@ lint = "npm run lint"
     assert!(service
         .commands
         .contains(&CommandKind::Other("lint".to_owned())));
+}
+
+// ---------------------------------------------------------------------------
+// Build system selection
+// ---------------------------------------------------------------------------
+
+#[test]
+fn infers_maven_from_a_maven_build_command() {
+    let config = load(MINIMAL).unwrap();
+    let service = config.service(&"auth-service".parse().unwrap()).unwrap();
+    assert_eq!(service.build_system, Some(BuildSystem::Maven));
+}
+
+#[test]
+fn infers_maven_from_a_maven_runtime() {
+    let text = r#"
+config_version = 1
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+[[services]]
+id = "svc"
+type = "backend"
+workspace = "acme"
+[services.runtime]
+type = "maven"
+[services.commands]
+build = "build.sh"
+start = "start.sh"
+"#;
+    let config = load(text).unwrap();
+    let service = config.service(&"svc".parse().unwrap()).unwrap();
+    assert_eq!(service.build_system, Some(BuildSystem::Maven));
+}
+
+#[test]
+fn infers_npm_from_an_npm_build_command() {
+    let text = r#"
+config_version = 1
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+[[services]]
+id = "web-ui"
+type = "frontend"
+workspace = "acme"
+[services.runtime]
+type = "node"
+version = "20.19.4"
+[services.commands]
+build = "npm run build"
+start = "npm start"
+"#;
+    let config = load(text).unwrap();
+    let service = config.service(&"web-ui".parse().unwrap()).unwrap();
+    assert_eq!(service.build_system, Some(BuildSystem::Npm));
+}
+
+#[test]
+fn honours_an_explicit_build_system() {
+    let text = MINIMAL.replace(
+        "workspace = \"acme\"",
+        "workspace = \"acme\"\nbuild_system = \"npm\"",
+    );
+    let config = load(&text).unwrap();
+    let service = config.service(&"auth-service".parse().unwrap()).unwrap();
+    assert_eq!(service.build_system, Some(BuildSystem::Npm));
+}
+
+#[test]
+fn infers_a_library_build_system_from_its_type() {
+    let text = r#"
+config_version = 1
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+[[libraries]]
+id = "common-core"
+type = "maven"
+workspace = "acme"
+[libraries.commands]
+build = "./mvnw clean install"
+[libraries.artifact]
+group_id = "com.company"
+artifact_id = "common-core"
+version = "1.8.0-SNAPSHOT"
+"#;
+    let config = load(text).unwrap();
+    let library = config.workspaces[0]
+        .workspace
+        .library(&"common-core".parse().unwrap())
+        .unwrap();
+    assert_eq!(library.build_system, Some(BuildSystem::Maven));
+}
+
+#[test]
+fn rejects_an_unknown_build_system() {
+    let text = MINIMAL.replace(
+        "workspace = \"acme\"",
+        "workspace = \"acme\"\nbuild_system = \"gradle\"",
+    );
+    let error = load(&text).unwrap_err();
+    let errors = validation_errors(&error);
+    let build_error = errors
+        .errors()
+        .iter()
+        .find(|e| e.location.ends_with(".build_system"))
+        .expect("expected a build_system error");
+    assert!(build_error.problem.contains("not a supported build system"));
 }
 
 // ---------------------------------------------------------------------------

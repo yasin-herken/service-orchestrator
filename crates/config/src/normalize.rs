@@ -13,9 +13,9 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use service_orchestrator_domain::{
-    AbsolutePath, DependencyKind, DependencyTarget, Environment, GroupId, Library, LibraryId,
-    Profile, ProfileId, RelativePath, Service, ServiceGroup, ServiceId, ServiceType, Workspace,
-    WorkspaceId,
+    AbsolutePath, BuildSystem, DependencyKind, DependencyTarget, Environment, GroupId, Library,
+    LibraryId, Profile, ProfileId, RelativePath, Service, ServiceGroup, ServiceId, ServiceType,
+    Workspace, WorkspaceId,
 };
 
 use crate::error::{ConfigError, ValidationError, ValidationErrors};
@@ -25,8 +25,9 @@ use crate::model::{
 };
 use crate::raw::{RawConfig, RawLibrary, RawService, RawWorkspace};
 use crate::validation::{
-    parse_artifact, parse_capability, parse_commands, parse_dependency, parse_environment,
-    parse_health_check, parse_id, parse_port, parse_repository, parse_runtime, parse_service_type,
+    infer_build_system, infer_library_build_system, parse_artifact, parse_build_system,
+    parse_capability, parse_commands, parse_dependency, parse_environment, parse_health_check,
+    parse_id, parse_port, parse_repository, parse_runtime, parse_service_type,
     validate_library_consistency, validate_service_consistency,
 };
 
@@ -462,6 +463,16 @@ fn build_service(
         }
     }
 
+    let build_system = resolve_build_system(
+        location,
+        raw.build_system.as_deref(),
+        infer_build_system(&service.runtimes, &service.commands),
+        errors,
+    );
+    if let Some(build_system) = build_system {
+        service = service.with_build_system(build_system);
+    }
+
     validate_service_consistency(location, &service, errors);
     Some(service)
 }
@@ -574,6 +585,16 @@ fn build_library(
     errors.append(&mut env_errors);
     library = library.with_environment(environment);
 
+    let build_system = resolve_build_system(
+        location,
+        raw.build_system.as_deref(),
+        infer_library_build_system(&library_type, &library.runtimes, &library.commands),
+        errors,
+    );
+    if let Some(build_system) = build_system {
+        library = library.with_build_system(build_system);
+    }
+
     validate_library_consistency(location, &library_type, &library, errors);
     Some(library)
 }
@@ -600,6 +621,22 @@ fn build_liquibase(
         timeout_seconds: raw_liquibase.timeout_seconds,
         environment,
     })
+}
+
+/// Chooses the build system for an entity.
+///
+/// An explicit `build_system` key is authoritative and validated; otherwise the
+/// inferred value (which may be `None`) is used unchanged.
+fn resolve_build_system(
+    location: &str,
+    explicit: Option<&str>,
+    inferred: Option<BuildSystem>,
+    errors: &mut Vec<ValidationError>,
+) -> Option<BuildSystem> {
+    match explicit {
+        Some(value) => parse_build_system(&format!("{location}.build_system"), value, errors),
+        None => inferred,
+    }
 }
 
 fn resolve_name(

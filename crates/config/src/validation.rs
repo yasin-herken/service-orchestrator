@@ -21,9 +21,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use service_orchestrator_domain::{
-    ArtifactCoordinate, CommandKind, CommandSpec, DependencyKind, Environment, EnvironmentVariable,
-    HealthCheck, HealthCheckKind, HttpHealthCheck, Library, Port, RelativePath, RepositoryProvider,
-    Runtime, RuntimeKind, Service, ServiceCapability, ServiceType, Version,
+    ArtifactCoordinate, BuildSystem, CommandKind, CommandSet, CommandSpec, DependencyKind,
+    Environment, EnvironmentVariable, HealthCheck, HealthCheckKind, HttpHealthCheck, Library, Port,
+    RelativePath, RepositoryProvider, Runtime, RuntimeKind, Service, ServiceCapability,
+    ServiceType, Version,
 };
 
 use crate::error::ValidationError;
@@ -176,6 +177,92 @@ pub(crate) fn parse_capability(
             );
             None
         }
+    }
+}
+
+/// Parses an explicitly configured build system.
+///
+/// Gradle is intentionally absent: it is planned but has no provider, and
+/// offering it here would let a configuration appear operational when it is
+/// not. The error names only the systems that can actually be built today.
+pub(crate) fn parse_build_system(
+    location: &str,
+    value: &str,
+    errors: &mut Vec<ValidationError>,
+) -> Option<BuildSystem> {
+    match BuildSystem::parse(value) {
+        Some(system) => Some(system),
+        None => {
+            errors.push(
+                ValidationError::new(
+                    location,
+                    format!("'{value}' is not a supported build system"),
+                )
+                .expected("one of: maven, npm")
+                .suggested_fix(
+                    "Use `build_system = \"maven\"` or `build_system = \"npm\"`.".to_owned(),
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// Infers a build system from declared runtimes and commands.
+///
+/// A configured [`RuntimeKind::Maven`]/[`RuntimeKind::Npm`] requirement is the
+/// most explicit signal, so it is consulted first. Failing that, the program
+/// basename of the build-related commands is matched. Returns `None` when
+/// nothing is recognizable, in which case the entity simply has no known build
+/// system.
+pub(crate) fn infer_build_system(
+    runtimes: &[Runtime],
+    commands: &CommandSet,
+) -> Option<BuildSystem> {
+    for runtime in runtimes {
+        match runtime.kind {
+            RuntimeKind::Maven => return Some(BuildSystem::Maven),
+            RuntimeKind::Npm => return Some(BuildSystem::Npm),
+            _ => {}
+        }
+    }
+    // Only the commands that actually build or fetch dependencies are
+    // meaningful for build-system inference; a `start = "node index.js"` must
+    // not be mistaken for npm.
+    for kind in [CommandKind::Build, CommandKind::Install, CommandKind::Test] {
+        if let Some(spec) = commands.get(&kind) {
+            if let Some(system) = build_system_from_program(&spec.program) {
+                return Some(system);
+            }
+        }
+    }
+    None
+}
+
+/// Infers a library's build system.
+///
+/// A library's `type` declares its artifact technology and defaults to
+/// `maven`, so it is the first signal. When the type is unrecognized, the same
+/// runtime/command inference used for services applies.
+pub(crate) fn infer_library_build_system(
+    library_type: &str,
+    runtimes: &[Runtime],
+    commands: &CommandSet,
+) -> Option<BuildSystem> {
+    BuildSystem::parse(library_type).or_else(|| infer_build_system(runtimes, commands))
+}
+
+/// Maps a command's program basename to a build system.
+fn build_system_from_program(program: &str) -> Option<BuildSystem> {
+    let basename = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .trim_end_matches(".cmd");
+    match basename {
+        "mvn" | "mvnw" => Some(BuildSystem::Maven),
+        "npm" | "npx" | "yarn" | "pnpm" => Some(BuildSystem::Npm),
+        _ => None,
     }
 }
 

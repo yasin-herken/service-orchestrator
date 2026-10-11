@@ -61,7 +61,8 @@ pub use models::{
     WorkspaceStatus,
 };
 pub use ports::{
-    parameter, DiffOptions, GitError, GitManager, GitOptions, HealthState,
-    InMemoryRuntimeStateStore, LogEntry, LogLevel, LogRequest, LogService, LogServiceError,
-    NullGitManager, NullLogService, ResolvedRepository, RuntimeStateStore, ServiceRuntimeState,
+    build_parameter, parameter, BuildError, DiffOptions, GitError, GitManager, GitOptions,
+    HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogRequest, LogService,
+    LogServiceError, NullGitManager, NullLogService, ResolvedBuildCommand, ResolvedBuildTarget,
+    ResolvedRepository, RuntimeStateStore, ServiceRuntimeState,
 };
