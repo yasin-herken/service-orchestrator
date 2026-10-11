@@ -25,6 +25,13 @@ use crate::runtime::Version;
 
 /// A Maven-style artifact coordinate, for example
 /// `com.company:common-core:1.8.0-SNAPSHOT`.
+///
+/// The coordinate is the artifact's *identity*: `group_id`, `artifact_id`, and
+/// `version`. Packaging and classifier are optional attributes that affect the
+/// artifact's *file name* in a repository but not its identity — two coordinates
+/// that differ only by packaging describe the same logical artifact. They are
+/// carried here so an artifact's location can be computed without a second
+/// lookup, and so multi-artifact (reactor) libraries can be modelled.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct ArtifactCoordinate {
     /// The group identifier.
@@ -33,10 +40,17 @@ pub struct ArtifactCoordinate {
     pub artifact_id: String,
     /// The artifact version.
     pub version: Version,
+    /// The packaging (for example `jar` or `pom`). Defaults to `jar` when
+    /// omitted, which is Maven's default packaging.
+    #[serde(default)]
+    pub packaging: Option<String>,
+    /// The classifier (for example `sources`), when the artifact has one.
+    #[serde(default)]
+    pub classifier: Option<String>,
 }
 
 impl ArtifactCoordinate {
-    /// Constructs an artifact coordinate.
+    /// Constructs an artifact coordinate with default packaging.
     ///
     /// # Errors
     ///
@@ -65,7 +79,96 @@ impl ArtifactCoordinate {
             group_id,
             artifact_id,
             version,
+            packaging: None,
+            classifier: None,
         })
+    }
+
+    /// Sets the artifact packaging (for example `jar` or `pom`).
+    #[must_use]
+    pub fn with_packaging(mut self, packaging: impl Into<String>) -> Self {
+        self.packaging = Some(packaging.into());
+        self
+    }
+
+    /// Sets the artifact classifier.
+    #[must_use]
+    pub fn with_classifier(mut self, classifier: impl Into<String>) -> Self {
+        self.classifier = Some(classifier.into());
+        self
+    }
+
+    /// The packaging, defaulting to Maven's `jar`.
+    #[must_use]
+    pub fn packaging_or_default(&self) -> &str {
+        self.packaging.as_deref().unwrap_or("jar")
+    }
+
+    /// The artifact's directory group path (`com.company` → `com/company`).
+    ///
+    /// This is the standard Maven repository layout and is deliberately kept in
+    /// the domain as a pure, total function: it computes a *location* from an
+    /// identity and performs no repository access.
+    #[must_use]
+    pub fn group_path(&self) -> String {
+        self.group_id.replace('.', "/")
+    }
+
+    /// The artifact's file name within a version directory, for example
+    /// `common-core-1.8.0-SNAPSHOT.jar` or `common-core-1.8.0-SNAPSHOT-sources.jar`.
+    #[must_use]
+    pub fn file_name(&self) -> String {
+        let mut name = format!("{}-{}", self.artifact_id, self.version);
+        if let Some(classifier) = &self.classifier {
+            name.push('-');
+            name.push_str(classifier);
+        }
+        name.push('.');
+        name.push_str(self.packaging_or_default());
+        name
+    }
+
+    /// The artifact's path relative to a repository root, using the standard
+    /// Maven layout, for example
+    /// `com/company/common-core/1.8.0-SNAPSHOT/common-core-1.8.0-SNAPSHOT.jar`.
+    #[must_use]
+    pub fn repository_path(&self) -> String {
+        format!(
+            "{}/{}/{}/{}",
+            self.group_path(),
+            self.artifact_id,
+            self.version,
+            self.file_name()
+        )
+    }
+
+    /// Validates the coordinate's optional attributes.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DomainError::Validation`] if packaging or classifier is
+    /// present but empty or contains whitespace or a path separator.
+    pub fn validate(&self) -> Result<(), DomainError> {
+        for (label, value) in [
+            ("packaging", &self.packaging),
+            ("classifier", &self.classifier),
+        ] {
+            if let Some(value) = value {
+                if value.trim().is_empty() || value.contains(char::is_whitespace) {
+                    return Err(DomainError::validation(
+                        "library",
+                        format!("artifact {label} must be non-empty and contain no whitespace"),
+                    ));
+                }
+                if value.contains(['/', '\\']) {
+                    return Err(DomainError::validation(
+                        "library",
+                        format!("artifact {label} must not contain a path separator"),
+                    ));
+                }
+            }
+        }
+        Ok(())
     }
 }
 
@@ -86,8 +189,20 @@ pub struct Library {
     pub repository: Option<Repository>,
     /// The library's directory relative to the workspace root.
     pub path: Option<RelativePath>,
-    /// The published artifact coordinate, if known.
+    /// The library's primary published artifact coordinate, if known.
+    ///
+    /// A single-module Maven library produces exactly this artifact. A
+    /// multi-module (reactor) repository produces several; the additional
+    /// artifacts are listed in [`Library::artifacts`]. The primary coordinate is
+    /// the one interfaces display and the one a consumer most commonly depends
+    /// on.
     pub artifact: Option<ArtifactCoordinate>,
+    /// Additional artifacts the library produces, beyond [`Library::artifact`].
+    ///
+    /// This exists so a reactor project can be modelled without pretending it
+    /// has a single output. It is empty for the common single-artifact case.
+    #[serde(default)]
+    pub artifacts: Vec<ArtifactCoordinate>,
     /// The runtimes the library requires to build.
     pub runtimes: Vec<Runtime>,
     /// The configured commands for the library.
@@ -126,6 +241,7 @@ impl Library {
             repository: None,
             path: None,
             artifact: None,
+            artifacts: Vec::new(),
             runtimes: Vec::new(),
             commands: CommandSet::new(),
             build_system: None,
@@ -153,6 +269,32 @@ impl Library {
     pub fn with_artifact(mut self, artifact: ArtifactCoordinate) -> Self {
         self.artifact = Some(artifact);
         self
+    }
+
+    /// Adds an additional artifact the library produces.
+    #[must_use]
+    pub fn with_additional_artifact(mut self, artifact: ArtifactCoordinate) -> Self {
+        self.artifacts.push(artifact);
+        self
+    }
+
+    /// Returns every artifact the library produces, primary first.
+    ///
+    /// A single-module library returns just its primary coordinate; a
+    /// multi-module one returns the primary followed by its additional
+    /// artifacts, with duplicates removed.
+    #[must_use]
+    pub fn produced_artifacts(&self) -> Vec<&ArtifactCoordinate> {
+        let mut artifacts: Vec<&ArtifactCoordinate> = Vec::new();
+        if let Some(primary) = &self.artifact {
+            artifacts.push(primary);
+        }
+        for artifact in &self.artifacts {
+            if !artifacts.contains(&artifact) {
+                artifacts.push(artifact);
+            }
+        }
+        artifacts
     }
 
     /// Adds a runtime requirement.
@@ -206,6 +348,10 @@ impl Library {
         }
 
         self.commands.validate()?;
+
+        for artifact in self.produced_artifacts() {
+            artifact.validate()?;
+        }
 
         let mut seen_targets = BTreeSet::new();
         for dependency in &self.dependencies {
@@ -307,5 +453,59 @@ mod tests {
                 LibraryId::new("common-utils").unwrap(),
             ));
         assert!(library.validate().is_err());
+    }
+
+    #[test]
+    fn computes_artifacts_in_maven_repository_layout() {
+        let artifact = ArtifactCoordinate::new(
+            "com.company",
+            "common-core",
+            Version::new("1.8.0-SNAPSHOT").unwrap(),
+        )
+        .unwrap();
+        assert_eq!(artifact.group_path(), "com/company");
+        assert_eq!(artifact.file_name(), "common-core-1.8.0-SNAPSHOT.jar");
+        assert_eq!(
+            artifact.repository_path(),
+            "com/company/common-core/1.8.0-SNAPSHOT/common-core-1.8.0-SNAPSHOT.jar"
+        );
+    }
+
+    #[test]
+    fn honours_packaging_and_classifier_in_the_file_name() {
+        let artifact =
+            ArtifactCoordinate::new("com.company", "common-core", Version::new("1.8.0").unwrap())
+                .unwrap()
+                .with_packaging("pom");
+        assert_eq!(artifact.file_name(), "common-core-1.8.0.pom");
+
+        let classified = artifact.clone().with_classifier("sources");
+        assert_eq!(classified.file_name(), "common-core-1.8.0-sources.pom");
+    }
+
+    #[test]
+    fn rejects_invalid_packaging_or_classifier() {
+        let artifact =
+            ArtifactCoordinate::new("com.company", "common-core", Version::new("1.8.0").unwrap())
+                .unwrap()
+                .with_classifier("bad/value");
+        assert!(artifact.validate().is_err());
+    }
+
+    #[test]
+    fn produced_artifacts_prefer_primary_then_deduplicate() {
+        let primary =
+            ArtifactCoordinate::new("com.company", "common-core", Version::new("1.8.0").unwrap())
+                .unwrap();
+        let extra =
+            ArtifactCoordinate::new("com.company", "common-api", Version::new("1.8.0").unwrap())
+                .unwrap();
+        let library = library("common-core")
+            .with_artifact(primary.clone())
+            .with_additional_artifact(extra.clone())
+            .with_additional_artifact(primary.clone());
+        let produced = library.produced_artifacts();
+        assert_eq!(produced, vec![&primary, &extra]);
+        assert!(library.validate().is_ok());
     }
 }

@@ -6,6 +6,7 @@
 //! repository or start a process.
 
 mod git;
+mod library;
 mod service;
 mod task;
 mod workspace;

@@ -16,11 +16,16 @@
 //!
 //! [`execution::TaskManager`]: service_orchestrator_execution::TaskManager
 
+pub(crate) mod artifact;
 pub(crate) mod build;
 pub(crate) mod git;
 pub(crate) mod logs;
 pub(crate) mod runtime_state;
 
+pub use artifact::{
+    parameter as artifact_parameter, ArtifactInspectionError, ArtifactInspector, ArtifactPresence,
+    DependencyVersionInspection, NullArtifactInspector, ResolvedArtifact, ResolvedDependency,
+};
 pub use build::{
     parameter as build_parameter, BuildError, ResolvedBuildCommand, ResolvedBuildTarget,
 };

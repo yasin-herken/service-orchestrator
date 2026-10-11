@@ -20,7 +20,10 @@ use service_orchestrator_domain::{
 use service_orchestrator_policy::{Authorization, PolicyEngine};
 
 use crate::error::ApplicationError;
-use crate::ports::{GitManager, LogService, NullGitManager, ResolvedRepository, RuntimeStateStore};
+use crate::ports::{
+    ArtifactInspector, GitManager, LogService, NullArtifactInspector, NullGitManager,
+    ResolvedRepository, RuntimeStateStore,
+};
 
 /// The shared application core.
 #[derive(Clone)]
@@ -30,6 +33,7 @@ pub struct Application {
     runtime: Arc<dyn RuntimeStateStore>,
     logs: Arc<dyn LogService>,
     git: Arc<dyn GitManager>,
+    artifacts: Arc<dyn ArtifactInspector>,
     policy: PolicyEngine,
     authorization: Authorization,
 }
@@ -37,9 +41,11 @@ pub struct Application {
 impl Application {
     /// Creates an application core from validated configuration and its ports.
     ///
-    /// No Git manager is wired; call [`Application::with_git_manager`] to
-    /// provide one. Until then, Git operations report
-    /// [`ApplicationError::Git`].
+    /// No Git manager or artifact inspector is wired; call
+    /// [`Application::with_git_manager`] and
+    /// [`Application::with_artifact_inspector`] to provide them. Until then, Git
+    /// operations report [`ApplicationError::Git`] and artifact inspection
+    /// reports [`ApplicationError::ArtifactInspection`].
     #[must_use]
     pub fn new(
         config: Config,
@@ -53,6 +59,7 @@ impl Application {
             runtime,
             logs,
             git: Arc::new(NullGitManager),
+            artifacts: Arc::new(NullArtifactInspector),
             policy: PolicyEngine::new(),
             authorization: Authorization::standard(),
         }
@@ -62,6 +69,18 @@ impl Application {
     #[must_use]
     pub fn with_git_manager(mut self, git: Arc<dyn GitManager>) -> Self {
         self.git = git;
+        self
+    }
+
+    /// Replaces the artifact inspector.
+    ///
+    /// The inspector is provided by the build adapter; it resolves artifacts
+    /// against the effective local Maven repository and inspects consumer
+    /// dependency versions. Without it, those queries report
+    /// [`ApplicationError::ArtifactInspection`].
+    #[must_use]
+    pub fn with_artifact_inspector(mut self, artifacts: Arc<dyn ArtifactInspector>) -> Self {
+        self.artifacts = artifacts;
         self
     }
 
@@ -128,6 +147,37 @@ impl Application {
     /// Returns the Git manager boundary.
     pub(crate) fn git(&self) -> &dyn GitManager {
         self.git.as_ref()
+    }
+
+    /// Returns the artifact inspector boundary.
+    pub(crate) fn artifacts(&self) -> &dyn ArtifactInspector {
+        self.artifacts.as_ref()
+    }
+
+    /// Resolves an entity's workspace-relative directory into an absolute path.
+    ///
+    /// The domain guarantees the relative path is valid; joining it with the
+    /// workspace root cannot escape the workspace because a [`RelativePath`]
+    /// contains no `..` segments.
+    ///
+    /// [`RelativePath`]: service_orchestrator_domain::RelativePath
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ApplicationError::InvalidOperation`] if the joined path cannot
+    /// be represented as an absolute path.
+    pub(crate) fn absolute_entity_path(
+        &self,
+        workspace: &ConfiguredWorkspace,
+        relative: &service_orchestrator_domain::RelativePath,
+    ) -> Result<AbsolutePath, ApplicationError> {
+        let root = workspace.workspace.root.as_str().trim_end_matches('/');
+        AbsolutePath::new(format!("{root}/{}", relative.as_str())).map_err(|error| {
+            ApplicationError::invalid_operation(format!(
+                "path '{}' is not a valid absolute path: {error}",
+                relative.as_str()
+            ))
+        })
     }
 
     // -- repository resolution ------------------------------------------------

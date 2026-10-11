@@ -314,7 +314,21 @@ pub(crate) fn parse_artifact(
 ) -> Option<ArtifactCoordinate> {
     let version = parse_version(&format!("{location}.version"), &raw.version, errors)?;
     match ArtifactCoordinate::new(raw.group_id.clone(), raw.artifact_id.clone(), version) {
-        Ok(artifact) => Some(artifact),
+        Ok(artifact) => {
+            let artifact = match &raw.packaging {
+                Some(packaging) => artifact.with_packaging(packaging.clone()),
+                None => artifact,
+            };
+            let artifact = match &raw.classifier {
+                Some(classifier) => artifact.with_classifier(classifier.clone()),
+                None => artifact,
+            };
+            if let Err(error) = artifact.validate() {
+                errors.push(ValidationError::new(location, error.to_string()));
+                return None;
+            }
+            Some(artifact)
+        }
         Err(error) => {
             errors.push(ValidationError::new(location, error.to_string()));
             None
@@ -759,7 +773,7 @@ pub(crate) fn validate_library_consistency(
             ),
         );
     }
-    if library_type == "maven" && library.artifact.is_none() {
+    if library_type == "maven" && library.produced_artifacts().is_empty() {
         errors.push(
             ValidationError::new(
                 format!("{location}.artifact"),

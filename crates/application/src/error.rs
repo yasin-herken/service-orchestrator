@@ -121,6 +121,81 @@ pub enum ApplicationError {
         /// A human-readable summary.
         message: String,
     },
+
+    /// A library's configuration is not valid for the requested operation.
+    #[error("library '{library}' is not configured for this operation: {message}")]
+    LibraryConfigurationInvalid {
+        /// The library identifier.
+        library: String,
+        /// What is wrong with the configuration.
+        message: String,
+    },
+
+    /// The library's build provider does not support the requested capability.
+    #[error("the build provider for library '{library}' does not support '{operation}'")]
+    BuildProviderUnsupported {
+        /// The library identifier.
+        library: String,
+        /// The unsupported capability or operation.
+        operation: String,
+    },
+
+    /// The expected artifact is not present in the local repository.
+    #[error("artifact '{coordinate}' for library '{library}' was not found")]
+    ArtifactNotFound {
+        /// The library identifier.
+        library: String,
+        /// The artifact coordinate that was not found.
+        coordinate: String,
+    },
+
+    /// A consumer references a different artifact version than the library
+    /// provides.
+    #[error(
+        "artifact version mismatch for library '{library}': expected '{expected}', found '{found}'"
+    )]
+    ArtifactVersionMismatch {
+        /// The library identifier.
+        library: String,
+        /// The target version.
+        expected: String,
+        /// The version a consumer references.
+        found: String,
+    },
+
+    /// A dependency relationship could not be resolved.
+    #[error("could not resolve dependencies for library '{library}': {message}")]
+    DependencyResolution {
+        /// The library identifier.
+        library: String,
+        /// A human-readable explanation.
+        message: String,
+    },
+
+    /// The selected libraries form a dependency cycle.
+    #[error("library dependency cycle detected: {libraries}")]
+    DependencyCycle {
+        /// The libraries that form the cycle.
+        libraries: String,
+    },
+
+    /// The effective dependency version could not be inspected.
+    #[error("dependency version inspection is unsupported for library '{library}': {message}")]
+    VersionInspectionUnsupported {
+        /// The library identifier.
+        library: String,
+        /// A human-readable explanation.
+        message: String,
+    },
+
+    /// An artifact inspection failed with a structured error.
+    #[error("artifact inspection error ({code}): {message}")]
+    ArtifactInspection {
+        /// A stable, machine-readable code.
+        code: String,
+        /// A human-readable summary.
+        message: String,
+    },
 }
 
 impl ApplicationError {

@@ -57,12 +57,16 @@ mod queries;
 pub use app::Application;
 pub use error::ApplicationError;
 pub use models::{
-    BulkOperationSummary, OperationResult, PrepareEnvironmentRequest, ServiceStatus,
-    WorkspaceStatus,
+    AlignmentStatus, BulkOperationSummary, ConsumerAlignment, LibraryArtifactVerification,
+    LibraryDependent, LibraryPrepareOptions, LibraryStatus, OperationResult,
+    PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest, ServiceStatus,
+    VersionAlignmentPlan, WorkspaceStatus,
 };
 pub use ports::{
-    build_parameter, parameter, BuildError, DiffOptions, GitError, GitManager, GitOptions,
-    HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogRequest, LogService,
-    LogServiceError, NullGitManager, NullLogService, ResolvedBuildCommand, ResolvedBuildTarget,
-    ResolvedRepository, RuntimeStateStore, ServiceRuntimeState,
+    artifact_parameter, build_parameter, parameter, ArtifactInspectionError, ArtifactInspector,
+    ArtifactPresence, BuildError, DependencyVersionInspection, DiffOptions, GitError, GitManager,
+    GitOptions, HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogRequest, LogService,
+    LogServiceError, NullArtifactInspector, NullGitManager, NullLogService, ResolvedArtifact,
+    ResolvedBuildCommand, ResolvedBuildTarget, ResolvedDependency, ResolvedRepository,
+    RuntimeStateStore, ServiceRuntimeState,
 };

@@ -135,6 +135,9 @@ pub(crate) struct RawLibrary {
     pub(crate) repository: Option<RawRepository>,
     /// The published artifact coordinate.
     pub(crate) artifact: Option<RawArtifact>,
+    /// Additional artifacts a multi-module (reactor) library produces.
+    #[serde(default)]
+    pub(crate) artifacts: Vec<RawArtifact>,
     /// A single runtime requirement.
     pub(crate) runtime: Option<RawRuntime>,
     /// Additional runtime requirements.
@@ -187,6 +190,10 @@ pub(crate) struct RawArtifact {
     pub(crate) artifact_id: String,
     /// The artifact version.
     pub(crate) version: String,
+    /// The packaging (for example `jar` or `pom`). Defaults to `jar`.
+    pub(crate) packaging: Option<String>,
+    /// The classifier (for example `sources`), when the artifact has one.
+    pub(crate) classifier: Option<String>,
 }
 
 /// The raw command table.

@@ -25,6 +25,7 @@ use service_orchestrator_domain::{BuildOperation, BuildSystem};
 use service_orchestrator_execution::Cancellation;
 use service_orchestrator_process::{ExitReason, ProcessError, ProcessManager};
 
+use crate::coordinator::ArtifactCoordinator;
 use crate::plan::BuildPlan;
 use crate::provider::{BuildHost, SystemBuildHost};
 use crate::registry::BuildProviderRegistry;
@@ -56,6 +57,7 @@ pub struct BuildManager {
     registry: Arc<BuildProviderRegistry>,
     host: Arc<dyn BuildHost>,
     runner: BuildRunner,
+    coordinator: ArtifactCoordinator,
 }
 
 impl BuildManager {
@@ -72,6 +74,7 @@ impl BuildManager {
             registry: Arc::new(registry),
             host: Arc::new(SystemBuildHost::new()),
             runner: BuildRunner::new(processes),
+            coordinator: ArtifactCoordinator::new(),
         }
     }
 
@@ -82,6 +85,16 @@ impl BuildManager {
     #[must_use]
     pub fn with_host(mut self, host: Arc<dyn BuildHost>) -> Self {
         self.host = host;
+        self
+    }
+
+    /// Replaces the artifact coordinator.
+    ///
+    /// Sharing one coordinator across managers serializes writes to the same
+    /// module while leaving unrelated builds concurrent (`tasks/009.md` §23).
+    #[must_use]
+    pub fn with_coordinator(mut self, coordinator: ArtifactCoordinator) -> Self {
+        self.coordinator = coordinator;
         self
     }
 
@@ -118,6 +131,11 @@ impl BuildManager {
     /// `timeout`, when present, is the task's deadline and takes precedence over
     /// the plan's own declared timeout.
     ///
+    /// Writes to the same module are coordinated: the manager holds the module's
+    /// write lock for the duration of the run, so a build and an install of the
+    /// same module never interleave. Unrelated modules are unaffected
+    /// (`tasks/009.md` §23).
+    ///
     /// # Errors
     ///
     /// Returns the structured [`BuildError`] for an invalid or unsupported
@@ -130,6 +148,7 @@ impl BuildManager {
     ) -> Result<BuildOutcome, BuildError> {
         let plan = self.plan(target)?;
         let effective_timeout = timeout.or(plan.timeout);
+        let _coordination = self.coordinator.acquire(target.path.as_str()).await;
         let output = self
             .runner
             .run(&plan, timeout, cancellation)

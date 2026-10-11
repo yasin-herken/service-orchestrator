@@ -28,6 +28,10 @@ pub enum WorkflowKind {
     SyncWorkspace,
     /// Build every selected service.
     BuildWorkspace,
+    /// Prepare one library: sync, build, install, verify.
+    PrepareLibrary,
+    /// Prepare several libraries in dependency order.
+    PrepareLibraries,
     /// Start a developer profile.
     StartProfile,
     /// Stop a developer profile.
@@ -44,6 +48,8 @@ impl WorkflowKind {
             Self::PrepareEnvironment => "prepare_environment",
             Self::SyncWorkspace => "sync_workspace",
             Self::BuildWorkspace => "build_workspace",
+            Self::PrepareLibrary => "prepare_library",
+            Self::PrepareLibraries => "prepare_libraries",
             Self::StartProfile => "start_profile",
             Self::StopProfile => "stop_profile",
             Self::Custom(name) => name,

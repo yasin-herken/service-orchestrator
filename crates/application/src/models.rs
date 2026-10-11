@@ -13,8 +13,9 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use service_orchestrator_domain::{
-    AbsolutePath, Branch, GitState, Port, ProcessState, ServiceCapability, ServiceId, ServiceType,
-    Task, TaskId, TaskKind, TaskStatus, WorkflowId, WorkflowKind, WorkspaceId,
+    AbsolutePath, ArtifactCoordinate, Branch, DependencyKind, GitState, LibraryId, Port,
+    ProcessState, ServiceCapability, ServiceId, ServiceType, Task, TaskId, TaskKind, TaskStatus,
+    Version, WorkflowId, WorkflowKind, WorkspaceId,
 };
 
 use crate::ports::HealthState;
@@ -240,4 +241,270 @@ pub struct WorkspaceStatus {
     pub root: AbsolutePath,
     /// The status of each service in the workspace.
     pub services: Vec<ServiceStatus>,
+}
+
+// -- library management -------------------------------------------------------
+
+/// A structured snapshot of a library's configuration and repository state.
+///
+/// The snapshot combines validated configuration with the last observed Git
+/// state. It performs no build and no artifact write; local artifact presence is
+/// reported separately and definitively by
+/// [`Application::verify_library_artifact`](crate::Application::verify_library_artifact).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryStatus {
+    /// The library identifier.
+    pub library_id: LibraryId,
+    /// The workspace that owns the library.
+    pub workspace_id: WorkspaceId,
+    /// The human-readable library name.
+    pub display_name: String,
+    /// The build system used to build the library, when known.
+    pub build_system: Option<service_orchestrator_domain::BuildSystem>,
+    /// The primary artifact coordinate, when configured.
+    pub artifact: Option<ArtifactCoordinate>,
+    /// Every artifact the library produces (primary first).
+    pub artifacts: Vec<ArtifactCoordinate>,
+    /// The library's configured repository URL, if it has one.
+    pub repository_url: Option<String>,
+    /// The branch currently checked out, when observed.
+    pub branch: Option<Branch>,
+    /// The current commit, when observed.
+    pub commit: Option<String>,
+    /// The last observed Git state, when a repository is configured and
+    /// inspected.
+    pub git_state: GitState,
+    /// A structured description of why repository state could not be inspected,
+    /// when it could not.
+    pub repository_error: Option<String>,
+    /// Local artifact availability, when known. This is `None` unless a caller
+    /// has inspected the repository; the definitive answer is
+    /// [`Application::verify_library_artifact`](crate::Application::verify_library_artifact).
+    pub artifact_present: Option<bool>,
+}
+
+/// A dependent of a library.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryDependent {
+    /// The dependent service.
+    pub service_id: ServiceId,
+    /// The workspace that owns the service.
+    pub workspace_id: WorkspaceId,
+    /// Whether the dependency is mandatory.
+    pub required: bool,
+    /// Whether the dependency is needed for building or for running.
+    pub kind: DependencyKind,
+}
+
+/// The result of verifying a library's artifact in the local repository.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryArtifactVerification {
+    /// The library identifier.
+    pub library_id: LibraryId,
+    /// The workspace that owns the library.
+    pub workspace_id: WorkspaceId,
+    /// The artifact that was verified.
+    pub artifact: ArtifactCoordinate,
+    /// Whether the artifact is present in the effective local repository.
+    pub present: bool,
+    /// The artifact file's absolute path, when it was found.
+    pub path: Option<AbsolutePath>,
+    /// A human-readable summary.
+    pub message: String,
+}
+
+/// How a consumer's dependency compares with a library's target version.
+///
+/// The four outcomes are deliberately distinct: the use case never guesses a
+/// version Maven configuration prevents it from resolving (`tasks/009.md` §14).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AlignmentStatus {
+    /// The consumer references the target version.
+    Aligned,
+    /// The consumer references a different, resolved version.
+    Mismatch,
+    /// A version exists but could not be resolved reliably.
+    Unknown,
+    /// The consumer does not declare a dependency on the artifact.
+    Unresolved,
+}
+
+impl AlignmentStatus {
+    /// Returns a short, stable label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Aligned => "aligned",
+            Self::Mismatch => "mismatch",
+            Self::Unknown => "unknown",
+            Self::Unresolved => "unresolved",
+        }
+    }
+}
+
+/// One consumer's alignment with a library's target version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConsumerAlignment {
+    /// The dependent service.
+    pub service_id: ServiceId,
+    /// The workspace that owns the service.
+    pub workspace_id: WorkspaceId,
+    /// The consumer module's absolute directory, when it could be resolved.
+    pub path: Option<AbsolutePath>,
+    /// The version the consumer resolves to, when known.
+    pub current_version: Option<Version>,
+    /// The alignment outcome.
+    pub status: AlignmentStatus,
+    /// Additional context, for example why a version is unknown.
+    pub detail: Option<String>,
+}
+
+/// A structured version-alignment plan for a library and its consumers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct VersionAlignmentPlan {
+    /// The library identifier.
+    pub library_id: LibraryId,
+    /// The workspace that owns the library.
+    pub workspace_id: WorkspaceId,
+    /// The coordinate whose version consumers should align with.
+    pub target: ArtifactCoordinate,
+    /// One entry per dependent service.
+    pub consumers: Vec<ConsumerAlignment>,
+}
+
+impl VersionAlignmentPlan {
+    /// Returns the number of consumers aligned with the target version.
+    #[must_use]
+    pub fn aligned_count(&self) -> usize {
+        self.consumers
+            .iter()
+            .filter(|consumer| consumer.status == AlignmentStatus::Aligned)
+            .count()
+    }
+
+    /// Returns `true` when every consumer is aligned.
+    ///
+    /// An empty consumer set is trivially aligned.
+    #[must_use]
+    pub fn is_fully_aligned(&self) -> bool {
+        self.consumers
+            .iter()
+            .all(|consumer| consumer.status == AlignmentStatus::Aligned)
+    }
+}
+
+/// Options for a prepare-library workflow.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct LibraryPrepareOptions {
+    /// Whether to synchronize the library's repository first.
+    ///
+    /// Synchronization is optional so a developer can build the current local
+    /// branch with uncommitted changes (`tasks/009.md` §20).
+    pub sync: bool,
+    /// An optional branch to check out after synchronizing. When absent, the
+    /// configured branch is left untouched.
+    pub branch: Option<Branch>,
+    /// Whether to build the library.
+    pub build: bool,
+    /// Whether to install the artifact into the local repository.
+    pub install: bool,
+    /// Whether to verify the artifact after installation.
+    pub verify: bool,
+}
+
+impl Default for LibraryPrepareOptions {
+    fn default() -> Self {
+        Self {
+            sync: true,
+            branch: None,
+            build: true,
+            install: true,
+            verify: true,
+        }
+    }
+}
+
+impl LibraryPrepareOptions {
+    /// Creates the default options: synchronize, build, install, and verify.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enables or disables repository synchronization.
+    #[must_use]
+    pub const fn with_sync(mut self, sync: bool) -> Self {
+        self.sync = sync;
+        self
+    }
+
+    /// Sets the branch to check out after synchronizing.
+    #[must_use]
+    pub fn with_branch(mut self, branch: Branch) -> Self {
+        self.branch = Some(branch);
+        self
+    }
+
+    /// Enables or disables building the library.
+    #[must_use]
+    pub const fn with_build(mut self, build: bool) -> Self {
+        self.build = build;
+        self
+    }
+
+    /// Enables or disables installing the artifact locally.
+    #[must_use]
+    pub const fn with_install(mut self, install: bool) -> Self {
+        self.install = install;
+        self
+    }
+
+    /// Enables or disables artifact verification.
+    #[must_use]
+    pub const fn with_verify(mut self, verify: bool) -> Self {
+        self.verify = verify;
+        self
+    }
+}
+
+/// A request to prepare several libraries in dependency order.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrepareSelectedLibrariesRequest {
+    /// The workspace the libraries belong to.
+    pub workspace_id: WorkspaceId,
+    /// The libraries to prepare. When empty, every library in the workspace is
+    /// selected.
+    pub libraries: Vec<LibraryId>,
+    /// The phases to run.
+    pub options: LibraryPrepareOptions,
+}
+
+impl PrepareSelectedLibrariesRequest {
+    /// Creates a request with default options.
+    #[must_use]
+    pub fn new(workspace_id: WorkspaceId) -> Self {
+        Self {
+            workspace_id,
+            libraries: Vec::new(),
+            options: LibraryPrepareOptions::new(),
+        }
+    }
+
+    /// Selects the libraries to prepare.
+    #[must_use]
+    pub fn with_libraries<I>(mut self, libraries: I) -> Self
+    where
+        I: IntoIterator<Item = LibraryId>,
+    {
+        self.libraries = libraries.into_iter().collect();
+        self
+    }
+
+    /// Replaces the phase options.
+    #[must_use]
+    pub fn with_options(mut self, options: LibraryPrepareOptions) -> Self {
+        self.options = options;
+        self
+    }
 }
