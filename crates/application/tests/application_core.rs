@@ -19,14 +19,14 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 
 use service_orchestrator_application::{
-    Application, ApplicationError, HealthState, InMemoryRuntimeStateStore, LogRequest,
+    parameter, Application, ApplicationError, HealthState, InMemoryRuntimeStateStore, LogRequest,
     NullLogService, OperationResult, PrepareEnvironmentRequest, RuntimeStateStore,
     ServiceRuntimeState,
 };
 use service_orchestrator_config::{load_from_str, Config};
 use service_orchestrator_domain::{
-    Branch, GroupId, LibraryId, Permission, ProcessState, ProfileId, ServiceId, TaskId, TaskKind,
-    WorkflowId, WorkflowKind, WorkspaceId,
+    Branch, GroupId, LibraryId, Permission, ProcessState, ProfileId, ServiceId, Task, TaskId,
+    TaskKind, WorkflowId, WorkflowKind, WorkspaceId,
 };
 use service_orchestrator_execution::{
     TaskDefinition, TaskManager, TaskManagerError, TaskTarget, WorkflowDefinition,
@@ -151,6 +151,7 @@ default_timeout_seconds = 1800
 struct FakeTaskManager {
     submitted: Mutex<Vec<TaskDefinition>>,
     workflows: Mutex<Vec<WorkflowDefinition>>,
+    workflow_tasks: Mutex<std::collections::BTreeMap<WorkflowId, Vec<Task>>>,
     counter: AtomicUsize,
     reject_next: AtomicBool,
 }
@@ -190,8 +191,22 @@ impl TaskManager for FakeTaskManager {
         definition: WorkflowDefinition,
     ) -> Result<WorkflowId, TaskManagerError> {
         let index = self.counter.fetch_add(1, Ordering::SeqCst);
+        let workflow_id = WorkflowId::new(format!("workflow-{index}")).unwrap();
+        let tasks = definition
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(position, step)| {
+                let task_id = TaskId::new(format!("task-{index}-{position}")).unwrap();
+                Task::new(task_id, step.task.clone())
+            })
+            .collect();
+        self.workflow_tasks
+            .lock()
+            .unwrap()
+            .insert(workflow_id.clone(), tasks);
         self.workflows.lock().unwrap().push(definition);
-        Ok(WorkflowId::new(format!("workflow-{index}")).unwrap())
+        Ok(workflow_id)
     }
 
     fn task(&self, id: &TaskId) -> Result<service_orchestrator_domain::Task, TaskManagerError> {
@@ -209,6 +224,18 @@ impl TaskManager for FakeTaskManager {
             entity: "workflow",
             id: id.to_string(),
         })
+    }
+
+    fn workflow_tasks(&self, id: &WorkflowId) -> Result<Vec<Task>, TaskManagerError> {
+        self.workflow_tasks
+            .lock()
+            .unwrap()
+            .get(id)
+            .cloned()
+            .ok_or_else(|| TaskManagerError::NotFound {
+                entity: "workflow",
+                id: id.to_string(),
+            })
     }
 
     fn cancel(&self, _id: &TaskId) -> Result<(), TaskManagerError> {
@@ -800,4 +827,172 @@ fn start_profile_selects_services_and_groups() {
 fn cancel_task_delegates_to_the_engine() {
     let h = harness();
     assert!(h.app.cancel_task(&TaskId::new("task-0").unwrap()).is_ok());
+}
+
+// -- git commands ------------------------------------------------------------
+
+#[test]
+fn sync_repository_submits_a_git_sync_task_with_repository_parameters() {
+    let h = harness();
+    h.app.sync_repository(&service("auth-service")).unwrap();
+
+    let submitted = h.tasks.submitted();
+    assert_eq!(submitted.len(), 1);
+    assert_eq!(submitted[0].kind, TaskKind::GitSync);
+    assert_eq!(
+        submitted[0]
+            .parameters
+            .get(parameter::NAME)
+            .map(String::as_str),
+        Some("auth-service")
+    );
+    assert!(submitted[0].parameters.contains_key(parameter::PATH));
+    assert!(submitted[0]
+        .parameters
+        .contains_key(parameter::WORKSPACE_ROOT));
+}
+
+#[test]
+fn sync_repository_requires_a_repository() {
+    let h = harness();
+    assert!(matches!(
+        h.app.sync_repository(&service("worker-svc")).unwrap_err(),
+        ApplicationError::InvalidOperation { .. }
+    ));
+    assert!(h.tasks.submitted().is_empty());
+}
+
+#[test]
+fn checkout_repository_sets_the_branch_parameter() {
+    let h = harness();
+    h.app
+        .checkout_repository(&service("auth-service"), &Branch::new("feature/x").unwrap())
+        .unwrap();
+
+    let submitted = h.tasks.submitted();
+    assert_eq!(submitted[0].kind, TaskKind::GitCheckout);
+    assert_eq!(
+        submitted[0]
+            .parameters
+            .get(parameter::BRANCH)
+            .map(String::as_str),
+        Some("feature/x")
+    );
+}
+
+#[test]
+fn clone_repository_submits_a_clone_task() {
+    let h = harness();
+    h.app.clone_repository(&service("auth-service")).unwrap();
+    assert_eq!(h.tasks.submitted()[0].kind, TaskKind::GitClone);
+}
+
+#[test]
+fn fetch_and_pull_submit_their_task_kinds() {
+    let h = harness();
+    h.app.fetch_repository(&service("auth-service")).unwrap();
+    h.app.pull_repository(&service("auth-service")).unwrap();
+    let kinds: Vec<TaskKind> = h.tasks.submitted().iter().map(|t| t.kind.clone()).collect();
+    assert_eq!(kinds, vec![TaskKind::GitFetch, TaskKind::GitPull]);
+}
+
+#[test]
+fn destructive_git_operations_are_denied_without_authorization() {
+    let h = harness();
+    let results = [
+        h.app.reset_repository_hard(&service("auth-service")),
+        h.app.clean_repository(&service("auth-service")),
+        h.app.discard_local_changes(&service("auth-service")),
+    ];
+    for result in results {
+        assert!(matches!(
+            result.unwrap_err(),
+            ApplicationError::PermissionDenied { .. }
+        ));
+    }
+    assert!(h.tasks.submitted().is_empty());
+}
+
+#[test]
+fn authorized_destructive_git_operations_submit_tasks() {
+    let h = harness();
+    let app = h
+        .app
+        .clone()
+        .with_authorization(Authorization::allow_destructive());
+
+    app.reset_repository_hard(&service("auth-service")).unwrap();
+    app.clean_repository(&service("auth-service")).unwrap();
+    app.discard_local_changes(&service("auth-service")).unwrap();
+
+    let kinds: Vec<TaskKind> = h.tasks.submitted().iter().map(|t| t.kind.clone()).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            TaskKind::GitResetHard,
+            TaskKind::GitClean,
+            TaskKind::GitDiscardChanges
+        ]
+    );
+}
+
+#[test]
+fn sync_repositories_builds_one_independent_step_per_repository() {
+    let h = harness();
+    let result = h.app.sync_repositories(&workspace(), &[]).unwrap();
+    assert!(matches!(result, OperationResult::WorkflowScheduled { .. }));
+
+    let workflows = h.tasks.workflows();
+    // auth-service and web-ui have repositories; worker-svc does not.
+    assert_eq!(workflows[0].steps.len(), 2);
+    assert!(workflows[0]
+        .steps
+        .iter()
+        .all(|step| step.task == TaskKind::GitSync));
+    assert!(workflows[0]
+        .steps
+        .iter()
+        .all(|step| step.parameters.contains_key(parameter::PATH)));
+}
+
+#[test]
+fn checkout_repositories_attaches_the_branch_to_every_step() {
+    let h = harness();
+    h.app
+        .checkout_repositories(&workspace(), &[], &Branch::new("release/9").unwrap())
+        .unwrap();
+
+    let workflows = h.tasks.workflows();
+    assert!(!workflows[0].steps.is_empty());
+    assert!(workflows[0].steps.iter().all(|step| {
+        step.task == TaskKind::GitCheckout
+            && step.parameters.get(parameter::BRANCH).map(String::as_str) == Some("release/9")
+    }));
+}
+
+#[test]
+fn summarize_workflow_aggregates_step_outcomes() {
+    let h = harness();
+    let result = h.app.sync_repositories(&workspace(), &[]).unwrap();
+    let workflow_id = result.workflow_id().unwrap().clone();
+
+    let summary = h.app.summarize_workflow(&workflow_id).unwrap();
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.pending, 2);
+    assert_eq!(summary.succeeded, 0);
+    assert!(!summary.is_complete());
+}
+
+#[tokio::test]
+async fn git_queries_report_an_unconfigured_manager() {
+    let h = harness();
+    let error = h
+        .app
+        .get_git_status(&service("auth-service"))
+        .await
+        .unwrap_err();
+    match error {
+        ApplicationError::Git { code, .. } => assert_eq!(code, "GIT_UNAVAILABLE"),
+        other => panic!("expected a Git error, got {other:?}"),
+    }
 }

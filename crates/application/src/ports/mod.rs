@@ -2,19 +2,25 @@
 //!
 //! A port is a boundary the application needs in order to reach something it
 //! does not own. Only boundaries that exist today are declared here; there is
-//! deliberately no `GitService`, `BuildService`, `ProcessService`,
-//! `LiquibaseService`, or `HealthService` trait yet, because the application
-//! does not call those subsystems directly — it requests tasks and the
-//! execution engine reaches the adapters.
+//! deliberately no `BuildService`, `ProcessService`, `LiquibaseService`, or
+//! `HealthService` trait yet, because the application does not call those
+//! subsystems directly — it requests tasks and the execution engine reaches the
+//! adapters. Git is the exception: read-only inspection and authorized
+//! destructive operations are exposed directly through `GitManager`, while
+//! mutations are scheduled as tasks.
 //!
 //! The task-engine contract itself lives in the `execution` core service (the
 //! application depends *inward* on the engine); see [`execution::TaskManager`].
 //!
 //! [`execution::TaskManager`]: service_orchestrator_execution::TaskManager
 
+pub(crate) mod git;
 pub(crate) mod logs;
 pub(crate) mod runtime_state;
 
+pub use git::{
+    parameter, DiffOptions, GitError, GitManager, GitOptions, NullGitManager, ResolvedRepository,
+};
 pub use logs::{LogEntry, LogLevel, LogRequest, LogService, LogServiceError, NullLogService};
 pub use runtime_state::{
     HealthState, InMemoryRuntimeStateStore, RuntimeStateStore, ServiceRuntimeState,

@@ -28,7 +28,13 @@ impl Application {
                 "service '{service_id}' has no repository to synchronize"
             )));
         }
-        self.schedule(TaskDefinition::new(TaskKind::GitSync).for_service(service_id.clone()))
+        let repository = self.resolve_service_repository(service_id)?;
+        self.schedule(
+            TaskDefinition::new(TaskKind::GitSync)
+                .for_service(service_id.clone())
+                .with_parameters(repository.to_parameters())
+                .with_timeout(self.default_timeout_seconds()),
+        )
     }
 
     /// Builds a service.

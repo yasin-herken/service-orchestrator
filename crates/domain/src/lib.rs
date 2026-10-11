@@ -64,7 +64,10 @@ pub use command::{CommandEntry, CommandKind, CommandSet, CommandSpec};
 pub use dependency::{Dependency, DependencyKind, DependencyTarget};
 pub use environment::{Environment, EnvironmentVariable, REDACTED};
 pub use error::DomainError;
-pub use git::GitState;
+pub use git::{
+    BranchInfo, BranchKind, DiffFileStat, GitOperation, GitOperationResult, GitState, RepoDiff,
+    RepositoryLifecycle, RepositoryStatus,
+};
 pub use group::ServiceGroup;
 pub use health::{HealthCheck, HealthCheckKind, HttpHealthCheck};
 pub use ids::{GroupId, LibraryId, ProfileId, ServiceId, StepId, TaskId, WorkflowId, WorkspaceId};

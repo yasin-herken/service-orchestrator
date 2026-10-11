@@ -56,8 +56,12 @@ mod queries;
 
 pub use app::Application;
 pub use error::ApplicationError;
-pub use models::{OperationResult, PrepareEnvironmentRequest, ServiceStatus, WorkspaceStatus};
+pub use models::{
+    BulkOperationSummary, OperationResult, PrepareEnvironmentRequest, ServiceStatus,
+    WorkspaceStatus,
+};
 pub use ports::{
-    HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogRequest, LogService,
-    LogServiceError, NullLogService, RuntimeStateStore, ServiceRuntimeState,
+    parameter, DiffOptions, GitError, GitManager, GitOptions, HealthState,
+    InMemoryRuntimeStateStore, LogEntry, LogLevel, LogRequest, LogService, LogServiceError,
+    NullGitManager, NullLogService, ResolvedRepository, RuntimeStateStore, ServiceRuntimeState,
 };

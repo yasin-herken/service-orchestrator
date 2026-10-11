@@ -18,6 +18,7 @@ use crate::app::Application;
 use crate::commands::WorkflowBuilder;
 use crate::error::ApplicationError;
 use crate::models::{OperationResult, PrepareEnvironmentRequest};
+use crate::ports::parameter;
 
 impl Application {
     /// Synchronizes every repository in a workspace.
@@ -34,20 +35,22 @@ impl Application {
         let workspace = self.require_workspace(workspace_id)?;
         let mut builder = WorkflowBuilder::new(WorkflowKind::SyncWorkspace);
         for service in &workspace.workspace.services {
-            if service.repository.is_some() {
-                builder.add(
+            if let Some(parameters) = self.service_repository_parameters(workspace, &service.id)? {
+                builder.add_with_parameters(
                     TaskKind::GitSync,
                     Vec::new(),
                     Some(format!("sync {}", service.id)),
+                    parameters,
                 );
             }
         }
         for library in &workspace.workspace.libraries {
-            if library.repository.is_some() {
-                builder.add(
+            if let Some(parameters) = self.library_repository_parameters(workspace, &library.id)? {
+                builder.add_with_parameters(
                     TaskKind::GitSync,
                     Vec::new(),
                     Some(format!("sync {}", library.id)),
+                    parameters,
                 );
             }
         }
@@ -140,25 +143,34 @@ impl Application {
 
         // Synchronize repositories.
         let mut sync_steps: BTreeMap<ServiceId, StepId> = BTreeMap::new();
+        let mut repository_parameters: BTreeMap<ServiceId, BTreeMap<String, String>> =
+            BTreeMap::new();
         for id in &selected {
-            let service = workspace
-                .workspace
-                .service(id)
-                .expect("selected services are validated to exist");
-            if service.repository.is_some() {
-                let step = builder.add(TaskKind::GitSync, Vec::new(), Some(format!("sync {id}")));
+            if let Some(parameters) = self.service_repository_parameters(workspace, id)? {
+                let step = builder.add_with_parameters(
+                    TaskKind::GitSync,
+                    Vec::new(),
+                    Some(format!("sync {id}")),
+                    parameters.clone(),
+                );
                 sync_steps.insert(id.clone(), step);
+                repository_parameters.insert(id.clone(), parameters);
             }
         }
 
         // Optionally check out a branch after synchronizing.
         if let Some(branch) = &request.branch {
             for id in &selected {
+                let Some(mut parameters) = repository_parameters.get(id).cloned() else {
+                    continue;
+                };
+                parameters.insert(parameter::BRANCH.to_owned(), branch.to_string());
                 let prerequisites = sync_steps.get(id).cloned().into_iter().collect();
-                builder.add(
+                builder.add_with_parameters(
                     TaskKind::GitCheckout,
                     prerequisites,
                     Some(format!("checkout {branch} for {id}")),
+                    parameters,
                 );
             }
         }

@@ -68,10 +68,17 @@ pub struct WorkflowStep {
     pub task: TaskKind,
     /// The steps that must complete before this step may run.
     pub depends_on: Vec<StepId>,
+    /// Free-form parameters passed to the step's executor.
+    ///
+    /// Parameters keep the workflow vocabulary closed: a step that needs a
+    /// branch, a repository, or a target does not require a new [`TaskKind`].
+    /// Values are opaque to the domain and interpreted by the executor.
+    #[serde(default)]
+    pub parameters: BTreeMap<String, String>,
 }
 
 impl WorkflowStep {
-    /// Creates a step with no dependencies.
+    /// Creates a step with no dependencies or parameters.
     #[must_use]
     pub fn new(id: StepId, task: TaskKind) -> Self {
         Self {
@@ -79,6 +86,7 @@ impl WorkflowStep {
             description: None,
             task,
             depends_on: Vec::new(),
+            parameters: BTreeMap::new(),
         }
     }
 
@@ -93,6 +101,13 @@ impl WorkflowStep {
     #[must_use]
     pub fn after(mut self, step: StepId) -> Self {
         self.depends_on.push(step);
+        self
+    }
+
+    /// Adds a parameter for the step's executor.
+    #[must_use]
+    pub fn with_parameter(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.parameters.insert(key.into(), value.into());
         self
     }
 }

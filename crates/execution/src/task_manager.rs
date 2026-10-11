@@ -21,6 +21,8 @@
 //! means a future engine is implemented in the same crate, with no dependency
 //! back-edge from execution to application.
 
+use std::collections::BTreeMap;
+
 use service_orchestrator_domain::{
     LibraryId, ServiceId, Task, TaskId, TaskKind, Workflow, WorkflowId, WorkflowKind, WorkflowStep,
 };
@@ -81,10 +83,16 @@ pub struct TaskDefinition {
     pub retry: RetryPolicy,
     /// How the task treats its dependencies' outcomes.
     pub dependency_policy: DependencyPolicy,
+    /// Free-form parameters passed to the task's executor.
+    ///
+    /// Parameters carry data an executor needs but that does not belong in the
+    /// domain vocabulary — for example a repository path, a clone URL, or a
+    /// target branch. They are opaque to the engine.
+    pub parameters: BTreeMap<String, String>,
 }
 
 impl TaskDefinition {
-    /// Creates a task definition with no target or dependencies.
+    /// Creates a task definition with no target, dependencies, or parameters.
     #[must_use]
     pub fn new(kind: TaskKind) -> Self {
         Self {
@@ -95,6 +103,7 @@ impl TaskDefinition {
             description: None,
             retry: RetryPolicy::none(),
             dependency_policy: DependencyPolicy::AllSucceeded,
+            parameters: BTreeMap::new(),
         }
     }
 
@@ -151,6 +160,20 @@ impl TaskDefinition {
     #[must_use]
     pub fn with_dependency_policy(mut self, policy: DependencyPolicy) -> Self {
         self.dependency_policy = policy;
+        self
+    }
+
+    /// Adds a single executor parameter.
+    #[must_use]
+    pub fn with_parameter(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
+        self.parameters.insert(key.into(), value.into());
+        self
+    }
+
+    /// Adds several executor parameters.
+    #[must_use]
+    pub fn with_parameters(mut self, parameters: BTreeMap<String, String>) -> Self {
+        self.parameters.extend(parameters);
         self
     }
 }
@@ -263,6 +286,17 @@ pub trait TaskManager: Send + Sync {
     ///
     /// Returns [`TaskManagerError::NotFound`] if the workflow does not exist.
     fn workflow(&self, id: &WorkflowId) -> Result<Workflow, TaskManagerError>;
+
+    /// Returns every task that belongs to a workflow, oldest first.
+    ///
+    /// This backs bulk-operation summaries: each workflow step becomes one
+    /// task, so a caller can count per-step outcomes without the engine
+    /// exposing its store.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`TaskManagerError::NotFound`] for an unknown workflow.
+    fn workflow_tasks(&self, id: &WorkflowId) -> Result<Vec<Task>, TaskManagerError>;
 
     /// Requests cancellation of a task.
     ///

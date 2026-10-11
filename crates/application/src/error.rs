@@ -103,6 +103,15 @@ pub enum ApplicationError {
         /// The underlying log service message.
         message: String,
     },
+
+    /// A Git operation failed with a structured error.
+    #[error("git error ({code}): {message}")]
+    Git {
+        /// A stable, machine-readable code such as `GIT_WORKING_TREE_DIRTY`.
+        code: String,
+        /// A human-readable summary.
+        message: String,
+    },
 }
 
 impl ApplicationError {

@@ -5,7 +5,9 @@
 //! task store, or the application container. This keeps executors replaceable
 //! and prevents infrastructure from depending on engine internals.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::Duration;
 
 use service_orchestrator_domain::{TaskId, TaskKind};
 
@@ -94,6 +96,8 @@ pub struct TaskContext {
     id: TaskId,
     kind: TaskKind,
     target: TaskTarget,
+    parameters: BTreeMap<String, String>,
+    timeout: Option<Duration>,
     cancellation: Cancellation,
     progress: ProgressReporter,
 }
@@ -104,6 +108,8 @@ impl TaskContext {
         id: TaskId,
         kind: TaskKind,
         target: TaskTarget,
+        parameters: BTreeMap<String, String>,
+        timeout: Option<Duration>,
         cancellation: Cancellation,
         progress: ProgressReporter,
     ) -> Self {
@@ -111,6 +117,8 @@ impl TaskContext {
             id,
             kind,
             target,
+            parameters,
+            timeout,
             cancellation,
             progress,
         }
@@ -132,6 +140,27 @@ impl TaskContext {
     #[must_use]
     pub fn target(&self) -> &TaskTarget {
         &self.target
+    }
+
+    /// The free-form parameters the task was submitted with.
+    #[must_use]
+    pub fn parameters(&self) -> &BTreeMap<String, String> {
+        &self.parameters
+    }
+
+    /// Returns the value of a parameter, if present.
+    #[must_use]
+    pub fn parameter(&self, key: &str) -> Option<&str> {
+        self.parameters.get(key).map(String::as_str)
+    }
+
+    /// The per-task timeout the engine enforces, if any.
+    ///
+    /// An executor that spawns a process should apply the same deadline to it so
+    /// the process is not left running if the engine cancels the attempt.
+    #[must_use]
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
     }
 
     /// The progress reporter for this task.

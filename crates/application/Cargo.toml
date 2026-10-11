@@ -12,9 +12,13 @@ publish = false
 workspace = true
 
 [dependencies]
+async-trait.workspace = true
 serde.workspace = true
 service-orchestrator-config.workspace = true
 service-orchestrator-domain.workspace = true
 service-orchestrator-execution.workspace = true
 service-orchestrator-policy.workspace = true
 thiserror.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true }

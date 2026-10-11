@@ -40,6 +40,7 @@ use crate::task_manager::{DependencyPolicy, TaskTarget};
 pub(crate) struct TaskRecord {
     pub(crate) task: Task,
     pub(crate) target: TaskTarget,
+    pub(crate) parameters: BTreeMap<String, String>,
     pub(crate) retry: RetryPolicy,
     pub(crate) dependency_policy: DependencyPolicy,
     pub(crate) timeout: Option<Duration>,
@@ -53,6 +54,7 @@ pub(crate) struct ExecutionSpec {
     pub(crate) id: TaskId,
     pub(crate) kind: TaskKind,
     pub(crate) target: TaskTarget,
+    pub(crate) parameters: BTreeMap<String, String>,
     pub(crate) retry: RetryPolicy,
     pub(crate) timeout: Option<Duration>,
     pub(crate) cancellation: Cancellation,
@@ -130,6 +132,21 @@ impl TaskStore {
             .workflows
             .get(id)
             .cloned()
+    }
+
+    /// Returns every task that belongs to a workflow, oldest first.
+    ///
+    /// Returns `None` if the workflow does not exist.
+    #[must_use]
+    pub fn workflow_tasks(&self, id: &WorkflowId) -> Option<Vec<Task>> {
+        let inner = self.inner.lock().expect("task store mutex poisoned");
+        let ids = inner.workflow_tasks.get(id)?;
+        Some(
+            ids.iter()
+                .filter_map(|task_id| inner.tasks.get(task_id))
+                .map(|record| record.task.clone())
+                .collect(),
+        )
     }
 
     /// Returns `true` if a task with `id` exists.
@@ -334,6 +351,7 @@ impl TaskStore {
             id: id.clone(),
             kind: record.task.kind.clone(),
             target: record.target.clone(),
+            parameters: record.parameters.clone(),
             retry: record.retry,
             timeout: record.timeout,
             cancellation: record.cancellation.clone(),
@@ -515,6 +533,7 @@ mod tests {
         TaskRecord {
             task,
             target: TaskTarget::None,
+            parameters: BTreeMap::new(),
             retry: RetryPolicy::none(),
             dependency_policy: policy,
             timeout: None,

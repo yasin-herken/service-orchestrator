@@ -137,6 +137,8 @@ async fn execute_with_retry(inner: &Arc<EngineInner>, spec: &ExecutionSpec) -> R
             spec.id.clone(),
             spec.kind.clone(),
             spec.target.clone(),
+            spec.parameters.clone(),
+            spec.timeout,
             spec.cancellation.clone(),
             ProgressReporter::new(inner.clone(), spec.id.clone()),
         );
