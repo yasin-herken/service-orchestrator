@@ -128,7 +128,7 @@ domain. Nothing inner knows about anything outer.
 | `process` | Infrastructure | Local process lifecycle, state, ports, child processes, logs. |
 | `build` | Infrastructure | Build adapter. A build-system-agnostic manager selects a `BuildProvider` (Maven, npm) that emits a structured `BuildPlan`, which is run in the process manager. Also implements the application's `ArtifactInspector` port (effective Maven local repository and conservative consumer-version reading) and hosts the per-module artifact coordinator. |
 | `runtime` | Infrastructure | Service runtime adapter. A runtime-agnostic Service Manager selects a `ServiceRuntime` (Java, Node), builds a structured `StartPlan`, applies idempotency, version, port, and ownership rules, and drives the process manager to run, stop, and restart local services. Implements the read-only `ServiceRuntimeIndex` port. |
-| `liquibase` | Infrastructure | Liquibase migration adapter. |
+| `liquibase` | Infrastructure | Migration adapter. A provider-based Migration Manager selects a `MigrationProvider` (Liquibase) that emits a structured `MigrationPlan`, which is run in the process manager. Applies the database-target environment safety policy and serializes migrations against the same configured database. |
 | `health` | Infrastructure | Configurable health checks (process, port, HTTP/actuator). |
 | `logging` | Infrastructure | Structured logging and bounded, filterable log retrieval. |
 | `mcp` | Interface | MCP stdio adapter over the application core. |
@@ -155,6 +155,7 @@ git, process, build, liquibase, health, logging
 git   ──> execution (TaskExecutor) + process (run git)     (documented exception, ADR 007)
 build ──> execution (TaskExecutor) + process (run builds)  (documented exception, ADR 008)
 runtime ──> execution (TaskExecutor) + process (run services) + config   (documented exception, ADR 010)
+liquibase ──> execution (TaskExecutor) + process (run migrations) + build (Maven/host seam)   (documented exception, ADR 011)
 
 service-orchestrator (root) ──> everything         (composition root)
 ```
@@ -166,14 +167,16 @@ service-orchestrator (root) ──> everything         (composition root)
 - `application` depends on `domain`, `execution`, `policy`, and `config`. It
   consumes the validated `Config`; it never parses configuration files itself.
 - Infrastructure crates depend on `application` (to implement its ports) and
-  `domain`. They must not depend on each other or on interfaces, with three
+  `domain`. They must not depend on each other or on interfaces, with four
   documented exceptions (`docs/adr/007-git-manager.md`,
-  `docs/adr/008-build-manager.md`, `docs/adr/010-service-runtime.md`): the `git`
-  adapter, the `build` adapter, and the `runtime` adapter each depend on
-  `execution` (they implement a `TaskExecutor` for mutating operations) and on
-  `process` (they run the tool through the single process owner); the `runtime`
-  adapter additionally reads the validated `config`. No other infrastructure
-  crate may take such an edge without an ADR.
+  `docs/adr/008-build-manager.md`, `docs/adr/010-service-runtime.md`,
+  `docs/adr/011-migration-manager.md`): the `git` adapter, the `build` adapter,
+  the `runtime` adapter, and the `liquibase` adapter each depend on `execution`
+  (they implement a `TaskExecutor` for mutating operations) and on `process`
+  (they run the tool through the single process owner); the `runtime` adapter and
+  the `liquibase` adapter additionally read the validated `config` / reuse the
+  build adapter's Maven-resolution and host seam. No other infrastructure crate
+  may take such an edge without an ADR.
 - `tui` and `mcp` depend only on `application`.
 - The root binary is the only crate allowed to depend on both infrastructure
   and interfaces; it is the composition root.
@@ -536,7 +539,70 @@ them are in `docs/adr/010-service-runtime.md`.
 
 ---
 
-## 16. Enforcement and validation
+## 16. Where the Migration Manager belongs
+
+The Migration Manager turns a validated migration target into a structured
+migration plan and has it executed. It lives in the `liquibase` crate and is
+**provider-based**: Liquibase is the initial implementation, but nothing in
+orchestration is coupled to it.
+
+- A focused `MigrationProvider` abstraction declares a provider's capabilities,
+  validates its requirements, resolves its executable or wrapper, and emits a
+  `MigrationPlan` (program, typed arguments, working directory, environment,
+  optional timeout, display-safe database identity and coordination key, safety
+  classification). Providers are pure, stateless, and synchronous; their only
+  output is a value.
+- **Providers never spawn processes or schedule tasks.** The `MigrationManager`
+  hands a plan to the `MigrationRunner`, which runs it through the process
+  manager — the single process owner (`AGENTS.md` §15). Migrations therefore stay
+  supervised, cancellable, timeout-bounded, and inside the engine's concurrency.
+- Operations are provider-neutral (`Validate`, `Status`, `Pending`, `Preview`,
+  `Apply`). Only `Apply` mutates the database. Providers declare the subset they
+  support; an unsupported request fails fast with
+  `MIGRATION_UNSUPPORTED_OPERATION`. `MigrationProviderType`,
+  `MigrationOperation`, and `MigrationTargetEnvironment` are domain vocabulary;
+  whether a provider supports an operation is the provider's honest declaration.
+- `MigrationProviderRegistry` is a small map from `MigrationProviderType` to
+  provider. Adding a tool (Flyway, for example) is: implement `MigrationProvider`,
+  register it, extend configuration validation, and add tests — no change to the
+  manager, the engine, the application core, or the interfaces.
+- **Database target identification and safety.** A target is described by
+  display-safe metadata only (environment, type, name, host, schema), never a
+  credential. Only an explicitly configured local database may mutate without
+  explicit authorization; every other declared environment — including an
+  unidentified one — requires `Permission::Destructive`. Locality is never
+  inferred from a hostname. The application applies the policy at submission and
+  the manager re-checks it, so it cannot be bypassed with a hand-crafted task.
+- **Database-level coordination.** `DatabaseCoordinator` is a keyed write lock
+  over the target database's identity, so two writers never race over one
+  database while unrelated targets still run concurrently. It is not a scheduler;
+  the engine's `max_parallel_tasks` remains the only global bound. The lock is
+  in-process only — it does not coordinate separate Service Orchestrator
+  instances; Liquibase's own database lock is the cross-process mechanism, and it
+  is recognized but **never** released automatically.
+- **Failure and cancellation semantics.** A failed migration never claims a
+  rollback, is never retried automatically, and reports its affected service and
+  database target with a stable error code. Cancelling the external process does
+  not guarantee that database changes were rolled back.
+- Every migration is a task. `MigrationTaskExecutor` decodes a workspace-aware
+  `ResolvedMigrationTarget` from the task's parameters and delegates to the
+  manager. There is no `MigrationManager` port in the application, because status
+  inspection is itself a process execution — there is no read-only migration
+  query an interface would call directly.
+- It depends on `application` and `domain`, and — like Git, Build, and Runtime —
+  on `execution` (the `TaskExecutor` boundary) and `process` (to run migration
+  tools), plus the `build` crate for the Maven-resolution and host seam. This is
+  the fourth documented infrastructure-to-infrastructure exception, recorded in
+  `docs/adr/011-migration-manager.md`.
+
+The full model, provider abstraction, Liquibase implementation, configuration,
+target safety, coordination, failure semantics, and limits are in
+`docs/migration-manager.md`; the decisions behind them are in
+`docs/adr/011-migration-manager.md`.
+
+---
+
+## 17. Enforcement and validation
 
 - Dependencies are declared exclusively through `[workspace.dependencies]` so
   boundaries are visible in one place.
@@ -555,7 +621,7 @@ them are in `docs/adr/010-service-runtime.md`.
 
 ---
 
-## 17. Domain model
+## 18. Domain model
 
 The domain layer defines the vocabulary every other layer speaks. It lives in
 the `service-orchestrator-domain` crate and depends on no other workspace crate
@@ -594,7 +660,7 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 18. The application core
+## 19. The application core
 
 The `application` crate is the shared application core (`docs/application-core.md`).
 It is the one API the TUI, MCP, and any future interface call, so business
@@ -636,7 +702,7 @@ behavior lives in exactly one place.
   Bulk commands submit one independent workflow step per repository;
   `summarize_workflow` aggregates the per-repository outcomes.
 
-## 19. Related documents
+## 20. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -656,6 +722,8 @@ behavior lives in exactly one place.
   management, artifact inspection, and version alignment.
 - `docs/adr/010-service-runtime.md` — the decision record for the Service
   Runtime, its registry, and managed-process lifecycle.
+- `docs/adr/011-migration-manager.md` — the decision record for the provider-based
+  Migration Manager, database-target safety, and coordination.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
@@ -671,5 +739,8 @@ behavior lives in exactly one place.
   projects, version alignment, and safety.
 - `docs/service-runtime.md` — the Service Runtime: runtimes, registry,
   lifecycle, ownership, cancellation, events, and macOS behavior.
+- `docs/migration-manager.md` — the Migration Manager: provider abstraction,
+  Liquibase execution modes, database-target identification and safety,
+  coordination, failure semantics, and limits.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

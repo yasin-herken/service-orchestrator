@@ -273,13 +273,59 @@ pub(crate) struct RawLiquibase {
     /// Whether Liquibase should run. Defaults to `true` when the block is
     /// present.
     pub(crate) enabled: Option<bool>,
-    /// The migration command.
+    /// The legacy single migration command; mapped to `commands.update`.
     pub(crate) command: Option<RawCommand>,
+    /// The migration provider (`liquibase` by default).
+    pub(crate) provider: Option<String>,
+    /// The Liquibase execution mode (`maven` by default).
+    pub(crate) execution_mode: Option<String>,
+    /// The per-operation migration commands.
+    pub(crate) commands: Option<RawMigrationCommands>,
     /// The migration timeout.
     pub(crate) timeout_seconds: Option<u64>,
     /// Liquibase environment variables.
     #[serde(default)]
     pub(crate) environment: BTreeMap<String, RawEnvValue>,
+    /// The declared target database.
+    pub(crate) database: Option<RawMigrationDatabase>,
+}
+
+/// The raw per-operation migration command table.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawMigrationCommands {
+    /// The validation command.
+    pub(crate) validate: Option<RawCommand>,
+    /// The status command.
+    pub(crate) status: Option<RawCommand>,
+    /// The pending-changes command.
+    pub(crate) pending: Option<RawCommand>,
+    /// The SQL-preview command.
+    pub(crate) preview: Option<RawCommand>,
+    /// The apply (update) command.
+    pub(crate) update: Option<RawCommand>,
+}
+
+/// The raw declared target database.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RawMigrationDatabase {
+    /// The declared environment name.
+    pub(crate) environment: Option<String>,
+    /// The database type.
+    pub(crate) database_type: Option<String>,
+    /// The database name.
+    pub(crate) name: Option<String>,
+    /// The host identity.
+    pub(crate) host: Option<String>,
+    /// The schema.
+    pub(crate) schema: Option<String>,
+    /// Liquibase contexts.
+    #[serde(default)]
+    pub(crate) contexts: Vec<String>,
+    /// Liquibase labels.
+    #[serde(default)]
+    pub(crate) labels: Vec<String>,
 }
 
 /// A raw health check.

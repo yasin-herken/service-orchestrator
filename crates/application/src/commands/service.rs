@@ -1,7 +1,8 @@
 //! Service commands.
 
 use service_orchestrator_domain::{
-    BuildOperation, CommandKind, Permission, ProcessState, ServiceCapability, ServiceId, TaskKind,
+    BuildOperation, MigrationOperation, Permission, ProcessState, ServiceCapability, ServiceId,
+    TaskKind,
 };
 use service_orchestrator_execution::TaskDefinition;
 
@@ -210,41 +211,29 @@ impl Application {
 
     /// Runs Liquibase migrations for a service.
     ///
+    /// This is the legacy apply entry point; it is the same operation as
+    /// [`Application::apply_migration`], retained under its historical name so
+    /// callers and workflows written before the migration manager keep working
+    /// (`tasks/011.md` §8). It resolves the target through
+    /// [`Application::resolve_migration`], so the environment-safety policy is
+    /// applied identically.
+    ///
     /// # Errors
     ///
     /// Returns [`ApplicationError::ServiceNotFound`] if the service does not
-    /// exist, or [`ApplicationError::InvalidOperation`] if Liquibase is not
-    /// enabled or has no command.
+    /// exist, [`ApplicationError::InvalidOperation`] if Liquibase is not enabled,
+    /// or [`ApplicationError::PermissionDenied`] when the target's environment
+    /// requires confirmation that has not been granted.
     pub fn run_liquibase(
         &self,
         service_id: &ServiceId,
     ) -> Result<OperationResult, ApplicationError> {
-        self.authorize(Permission::SafeWrite)?;
-        let (workspace, service) = self.locate_service(service_id)?;
-        self.check_dependencies(workspace, service)?;
-        let Some(config) = self.liquibase_config(workspace, service_id) else {
-            return Err(ApplicationError::invalid_operation(format!(
-                "service '{service_id}' has no Liquibase configuration"
-            )));
-        };
-        if !config.enabled {
-            return Err(ApplicationError::invalid_operation(format!(
-                "Liquibase is disabled for service '{service_id}'"
-            )));
-        }
-        if config.command.is_none() && !service.commands.contains(&CommandKind::Liquibase) {
-            return Err(ApplicationError::invalid_operation(format!(
-                "service '{service_id}' has no Liquibase command configured"
-            )));
-        }
+        let (target, timeout) = self.resolve_migration(service_id, MigrationOperation::Apply)?;
         self.schedule(
             TaskDefinition::new(TaskKind::Liquibase)
                 .for_service(service_id.clone())
-                .with_timeout(
-                    config
-                        .timeout_seconds
-                        .unwrap_or_else(|| self.default_timeout_seconds()),
-                ),
+                .with_parameters(target.to_parameters())
+                .with_timeout(timeout),
         )
     }
 

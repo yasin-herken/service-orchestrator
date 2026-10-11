@@ -59,6 +59,7 @@ pub use loader::{
     ConfigLoader, TomlFileLoader,
 };
 pub use model::{
-    Config, ConfiguredWorkspace, ExecutionSettings, LiquibaseConfig, DEFAULT_CONFIG_VERSION,
-    DEFAULT_MAX_PARALLEL_TASKS, DEFAULT_TIMEOUT_SECONDS, SUPPORTED_CONFIG_VERSION,
+    Config, ConfiguredWorkspace, ExecutionSettings, LiquibaseConfig, MigrationCommandSet,
+    MigrationDatabaseConfig, DEFAULT_CONFIG_VERSION, DEFAULT_MAX_PARALLEL_TASKS,
+    DEFAULT_TIMEOUT_SECONDS, SUPPORTED_CONFIG_VERSION,
 };

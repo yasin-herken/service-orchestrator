@@ -13,9 +13,10 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use service_orchestrator_domain::{
-    AbsolutePath, ArtifactCoordinate, Branch, DependencyKind, GitState, LibraryId, Port,
-    ProcessState, ServiceCapability, ServiceId, ServiceType, Task, TaskId, TaskKind, TaskStatus,
-    Timestamp, Version, WorkflowId, WorkflowKind, WorkspaceId,
+    AbsolutePath, ArtifactCoordinate, Branch, DependencyKind, GitState, LibraryId,
+    LiquibaseExecutionMode, MigrationProviderType, MigrationTargetEnvironment, Port, ProcessState,
+    ServiceCapability, ServiceId, ServiceType, Task, TaskId, TaskKind, TaskStatus, Timestamp,
+    Version, WorkflowId, WorkflowKind, WorkspaceId,
 };
 
 use crate::ports::HealthState;
@@ -542,4 +543,47 @@ impl PrepareSelectedLibrariesRequest {
         self.options = options;
         self
     }
+}
+
+// -- migrations ---------------------------------------------------------------
+
+/// A configuration-derived snapshot of a service's migration setup.
+///
+/// This is deliberately *configuration*, not live database state. Inspecting
+/// migration status or pending changesets requires running the provider, which
+/// is a task (`migration_status` / `migration_pending`); a query that returned a
+/// live answer would have to execute Liquibase, which read-only queries must not
+/// do. The [`pending`](Self::pending) and [`locked`](Self::locked) fields are
+/// therefore explicit unknowns (`None`) here, never a guess
+/// (`tasks/011.md` §7, §14).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationStatus {
+    /// The service whose migrations are described.
+    pub service_id: ServiceId,
+    /// The workspace that owns the service.
+    pub workspace_id: WorkspaceId,
+    /// Whether migrations are enabled for the service.
+    pub enabled: bool,
+    /// The configured migration provider.
+    pub provider: MigrationProviderType,
+    /// How the provider is invoked.
+    pub execution_mode: LiquibaseExecutionMode,
+    /// The declared environment of the target database.
+    pub environment: MigrationTargetEnvironment,
+    /// A display-safe identity of the target database (never credentials).
+    pub database_identity: String,
+    /// Whether applying to the target requires explicit authorization.
+    pub requires_authorization: bool,
+    /// The configured migration timeout, in seconds.
+    pub timeout_seconds: Option<u64>,
+    /// The number of pending changesets, when known.
+    ///
+    /// Always `None` from this query: determining it runs the provider as a task.
+    pub pending: Option<u32>,
+    /// Whether the target database is currently locked by another migration,
+    /// when known.
+    ///
+    /// Always `None` from this query, for the same reason as
+    /// [`pending`](Self::pending).
+    pub locked: Option<bool>,
 }

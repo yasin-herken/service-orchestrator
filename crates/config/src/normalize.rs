@@ -14,21 +14,22 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use service_orchestrator_domain::{
     AbsolutePath, BuildSystem, DependencyKind, DependencyTarget, Environment, GroupId, Library,
-    LibraryId, Profile, ProfileId, RelativePath, Service, ServiceGroup, ServiceId, ServiceType,
-    Workspace, WorkspaceId,
+    LibraryId, LiquibaseExecutionMode, MigrationOperation, MigrationProviderType,
+    MigrationTargetEnvironment, Profile, ProfileId, RelativePath, Service, ServiceGroup, ServiceId,
+    ServiceType, Workspace, WorkspaceId,
 };
 
 use crate::error::{ConfigError, ValidationError, ValidationErrors};
 use crate::model::{
-    Config, ConfiguredWorkspace, ExecutionSettings, LiquibaseConfig, DEFAULT_MAX_PARALLEL_TASKS,
-    DEFAULT_TIMEOUT_SECONDS,
+    Config, ConfiguredWorkspace, ExecutionSettings, LiquibaseConfig, MigrationCommandSet,
+    MigrationDatabaseConfig, DEFAULT_MAX_PARALLEL_TASKS, DEFAULT_TIMEOUT_SECONDS,
 };
-use crate::raw::{RawConfig, RawLibrary, RawService, RawWorkspace};
+use crate::raw::{RawConfig, RawLibrary, RawLiquibase, RawService, RawWorkspace};
 use crate::validation::{
     infer_build_system, infer_library_build_system, parse_artifact, parse_build_system,
-    parse_capability, parse_commands, parse_dependency, parse_environment, parse_health_check,
-    parse_id, parse_port, parse_repository, parse_runtime, parse_service_type,
-    validate_library_consistency, validate_service_consistency,
+    parse_capability, parse_commands, parse_dependency, parse_environment, parse_execution_mode,
+    parse_health_check, parse_id, parse_migration_provider, parse_port, parse_repository,
+    parse_runtime, parse_service_type, validate_library_consistency, validate_service_consistency,
 };
 
 /// A `(workspace id, entity id)` pair used for within-workspace lookups.
@@ -613,21 +614,123 @@ fn build_liquibase(
 ) -> Option<LiquibaseConfig> {
     let raw_liquibase = raw.liquibase.as_ref()?;
     let location = format!("{location}.liquibase");
-    let command = raw_liquibase
-        .command
-        .as_ref()
-        .and_then(|command| crate::validation::parse_command(&location, command, errors));
+
+    let provider = match raw_liquibase.provider.as_deref() {
+        Some(value) => parse_migration_provider(&format!("{location}.provider"), value, errors)
+            .unwrap_or(MigrationProviderType::Liquibase),
+        None => MigrationProviderType::Liquibase,
+    };
+    let execution_mode = match raw_liquibase.execution_mode.as_deref() {
+        Some(value) => parse_execution_mode(&format!("{location}.execution_mode"), value, errors)
+            .unwrap_or_default(),
+        None => LiquibaseExecutionMode::default(),
+    };
+
+    let commands = build_migration_commands(&location, raw_liquibase, errors);
     let (environment, mut env_errors) = parse_environment(
         &format!("{location}.environment"),
         &raw_liquibase.environment,
     );
     errors.append(&mut env_errors);
+    let database = build_migration_database(raw_liquibase);
+
     Some(LiquibaseConfig {
         enabled: raw_liquibase.enabled.unwrap_or(true),
-        command,
+        provider,
+        execution_mode,
+        commands,
         timeout_seconds: raw_liquibase.timeout_seconds,
         environment,
+        database,
     })
+}
+
+/// Builds the per-operation migration commands.
+///
+/// The legacy single `command` key maps to the apply (`update`) operation; an
+/// explicit `commands.update` always wins, so the two forms can coexist without
+/// ambiguity (`tasks/011.md` §8).
+fn build_migration_commands(
+    location: &str,
+    raw_liquibase: &RawLiquibase,
+    errors: &mut Vec<ValidationError>,
+) -> MigrationCommandSet {
+    let mut commands = MigrationCommandSet::default();
+    if let Some(raw_commands) = &raw_liquibase.commands {
+        for (name, operation) in [
+            ("validate", MigrationOperation::Validate),
+            ("status", MigrationOperation::Status),
+            ("pending", MigrationOperation::Pending),
+            ("preview", MigrationOperation::Preview),
+            ("update", MigrationOperation::Apply),
+        ] {
+            let raw_command = match operation {
+                MigrationOperation::Validate => raw_commands.validate.as_ref(),
+                MigrationOperation::Status => raw_commands.status.as_ref(),
+                MigrationOperation::Pending => raw_commands.pending.as_ref(),
+                MigrationOperation::Preview => raw_commands.preview.as_ref(),
+                MigrationOperation::Apply => raw_commands.update.as_ref(),
+            };
+            if let Some(raw_command) = raw_command {
+                let parsed = crate::validation::parse_command(
+                    &format!("{location}.commands.{name}"),
+                    raw_command,
+                    errors,
+                );
+                commands.set(operation, parsed);
+            }
+        }
+    }
+    if commands.update.is_none() {
+        if let Some(command) = &raw_liquibase.command {
+            commands.update =
+                crate::validation::parse_command(&format!("{location}.command"), command, errors);
+        }
+    }
+    commands
+}
+
+/// Builds the declared target-database metadata.
+///
+/// Connection metadata is display-safe: it never contains a password or a full
+/// credential-bearing JDBC URL (`tasks/011.md` §9, §11). An undeclared or
+/// unrecognized environment becomes [`MigrationTargetEnvironment::Unknown`],
+/// which requires authorization.
+fn build_migration_database(raw_liquibase: &RawLiquibase) -> MigrationDatabaseConfig {
+    let Some(raw_database) = &raw_liquibase.database else {
+        return MigrationDatabaseConfig::default();
+    };
+    let environment = match raw_database.environment.as_deref() {
+        Some(value) => MigrationTargetEnvironment::parse(value),
+        None => MigrationTargetEnvironment::Unknown,
+    };
+    MigrationDatabaseConfig {
+        environment,
+        database_type: clean_text(raw_database.database_type.as_deref()),
+        name: clean_text(raw_database.name.as_deref()),
+        host: clean_text(raw_database.host.as_deref()),
+        schema: clean_text(raw_database.schema.as_deref()),
+        contexts: clean_list(&raw_database.contexts),
+        labels: clean_list(&raw_database.labels),
+    }
+}
+
+/// Trims an optional string, treating a blank value as absent.
+fn clean_text(value: Option<&str>) -> Option<String> {
+    value
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+/// Trims a string list, dropping blank entries.
+fn clean_list(values: &[String]) -> Vec<String> {
+    values
+        .iter()
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+        .collect()
 }
 
 /// Chooses the build system for an entity.

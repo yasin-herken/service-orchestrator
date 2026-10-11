@@ -29,7 +29,7 @@ use service_orchestrator_domain::{
     TaskKind, WorkflowId, WorkflowKind, WorkspaceId,
 };
 use service_orchestrator_execution::{
-    TaskDefinition, TaskManager, TaskManagerError, TaskTarget, WorkflowDefinition,
+    RetryPolicy, TaskDefinition, TaskManager, TaskManagerError, TaskTarget, WorkflowDefinition,
 };
 use service_orchestrator_policy::Authorization;
 
@@ -79,6 +79,9 @@ start = "./mvnw spring-boot:run"
 enabled = true
 command = "./mvnw liquibase:update"
 timeout_seconds = 300
+
+[services.liquibase.database]
+environment = "local"
 
 [services.dependencies]
 libraries = ["common-core"]
@@ -554,6 +557,232 @@ fn run_liquibase_requires_configuration() {
     let h = harness();
     assert!(matches!(
         h.app.run_liquibase(&service("worker-svc")).unwrap_err(),
+        ApplicationError::InvalidOperation { .. }
+    ));
+}
+
+// -- migrations --------------------------------------------------------------
+
+/// A minimal configuration whose target database is explicitly non-local.
+const NON_LOCAL_MIGRATION_CONFIG: &str = r#"
+config_version = 1
+
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+
+[[services]]
+id = "auth-service"
+type = "backend"
+workspace = "acme"
+path = "backend/auth-service"
+
+[services.commands]
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+
+[services.liquibase]
+enabled = true
+
+[services.liquibase.database]
+environment = "staging"
+database_type = "postgresql"
+name = "acme_auth"
+host = "db.staging.internal"
+"#;
+
+fn harness_with(config_text: &str) -> Harness {
+    let tasks = Arc::new(FakeTaskManager::new());
+    let runtime = Arc::new(InMemoryRuntimeStateStore::new());
+    let app = Application::new(
+        load_from_str(config_text, "<test>").expect("fixture configuration is valid"),
+        tasks.clone(),
+        runtime.clone(),
+        Arc::new(NullLogService),
+    );
+    Harness {
+        app,
+        tasks,
+        runtime,
+    }
+}
+
+#[test]
+fn read_only_migration_operations_schedule_their_task_kinds() {
+    let h = harness();
+    h.app.validate_migration(&service("auth-service")).unwrap();
+    h.app
+        .get_migration_status(&service("auth-service"))
+        .unwrap();
+    h.app
+        .inspect_migration_pending(&service("auth-service"))
+        .unwrap();
+    h.app.preview_migration(&service("auth-service")).unwrap();
+
+    let kinds: Vec<TaskKind> = h.tasks.submitted().iter().map(|t| t.kind.clone()).collect();
+    assert_eq!(
+        kinds,
+        vec![
+            TaskKind::MigrationValidate,
+            TaskKind::MigrationStatus,
+            TaskKind::MigrationPending,
+            TaskKind::MigrationPreview,
+        ]
+    );
+}
+
+#[test]
+fn applying_to_a_local_target_needs_no_explicit_authorization() {
+    let h = harness();
+    h.app.apply_migration(&service("auth-service")).unwrap();
+    let submitted = h.tasks.submitted();
+    assert_eq!(submitted[0].kind, TaskKind::MigrationApply);
+    assert_eq!(submitted[0].timeout_seconds, Some(300));
+    assert_eq!(
+        submitted[0]
+            .parameters
+            .get("migration.non_local_authorized")
+            .map(String::as_str),
+        Some("false")
+    );
+}
+
+#[test]
+fn migration_tasks_are_never_retried_automatically() {
+    let h = harness();
+    // Applying mutates a database and may be partially applied on failure, so a
+    // migration is submitted exactly once; a retry must be a new, inspected
+    // operation (`tasks/011.md` §19).
+    h.app.apply_migration(&service("auth-service")).unwrap();
+    h.app
+        .get_migration_status(&service("auth-service"))
+        .unwrap();
+    let submitted = h.tasks.submitted();
+    assert_eq!(submitted.len(), 2);
+    for task in &submitted {
+        assert_eq!(task.retry, RetryPolicy::none());
+        assert_eq!(task.retry.max_attempts, 1);
+    }
+}
+
+#[test]
+fn read_only_operations_never_require_authorization_for_a_non_local_target() {
+    let h = harness_with(NON_LOCAL_MIGRATION_CONFIG);
+    // Inspection must work even when the target is staging.
+    h.app.validate_migration(&service("auth-service")).unwrap();
+    h.app.preview_migration(&service("auth-service")).unwrap();
+    assert_eq!(h.tasks.submitted().len(), 2);
+}
+
+#[test]
+fn applying_to_a_non_local_target_requires_explicit_authorization() {
+    let h = harness_with(NON_LOCAL_MIGRATION_CONFIG);
+    assert!(matches!(
+        h.app.apply_migration(&service("auth-service")).unwrap_err(),
+        ApplicationError::PermissionDenied {
+            permission: Permission::Destructive,
+            ..
+        }
+    ));
+    assert!(h.tasks.submitted().is_empty());
+
+    let authorized = h
+        .app
+        .clone()
+        .with_authorization(Authorization::allow_destructive());
+    authorized
+        .apply_migration(&service("auth-service"))
+        .unwrap();
+    assert_eq!(
+        h.tasks.submitted()[0]
+            .parameters
+            .get("migration.non_local_authorized")
+            .map(String::as_str),
+        Some("true")
+    );
+}
+
+#[test]
+fn an_unknown_database_environment_is_treated_as_non_local() {
+    let config = r#"
+config_version = 1
+
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+
+[[services]]
+id = "auth-service"
+type = "backend"
+workspace = "acme"
+path = "backend/auth-service"
+
+[services.commands]
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+
+[services.liquibase]
+enabled = true
+"#;
+    let h = harness_with(config);
+    assert!(matches!(
+        h.app.apply_migration(&service("auth-service")).unwrap_err(),
+        ApplicationError::PermissionDenied {
+            permission: Permission::Destructive,
+            ..
+        }
+    ));
+}
+
+#[test]
+fn apply_selected_migrations_skips_services_without_migrations() {
+    let h = harness();
+    let result = h
+        .app
+        .apply_selected_migrations(
+            &workspace(),
+            &[
+                service("auth-service"),
+                service("web-ui"),
+                service("worker-svc"),
+            ],
+        )
+        .unwrap();
+    assert!(matches!(
+        result,
+        OperationResult::WorkflowScheduled {
+            kind: WorkflowKind::Custom(ref name),
+            ..
+        } if name == "apply_migrations"
+    ));
+    let workflows = h.tasks.workflows();
+    assert_eq!(workflows[0].steps.len(), 1);
+    assert_eq!(workflows[0].steps[0].task, TaskKind::MigrationApply);
+}
+
+#[test]
+fn migration_status_query_reports_configuration_and_explicit_unknowns() {
+    let h = harness_with(NON_LOCAL_MIGRATION_CONFIG);
+    let status = h.app.migration_status(&service("auth-service")).unwrap();
+    assert!(status.enabled);
+    assert_eq!(status.workspace_id, workspace());
+    assert_eq!(
+        status.environment,
+        service_orchestrator_domain::MigrationTargetEnvironment::Staging
+    );
+    assert!(status.requires_authorization);
+    // The identity is display-safe: no credentials, and it names the target.
+    assert!(status.database_identity.contains("acme_auth"));
+    // Live values cannot be known without running the provider.
+    assert_eq!(status.pending, None);
+    assert_eq!(status.locked, None);
+}
+
+#[test]
+fn migration_status_rejects_a_service_without_configuration() {
+    let h = harness();
+    assert!(matches!(
+        h.app.migration_status(&service("worker-svc")).unwrap_err(),
         ApplicationError::InvalidOperation { .. }
     ));
 }

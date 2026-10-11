@@ -72,8 +72,21 @@ start = "./mvnw spring-boot:run"
 
 [services.liquibase]
 enabled = true
-command = "./mvnw liquibase:update"
+provider = "liquibase"
+execution_mode = "maven"
 timeout_seconds = 300
+
+[services.liquibase.commands]
+status = "./mvnw liquibase:status"
+update = "./mvnw liquibase:update"
+preview = "./mvnw liquibase:updateSQL"
+
+[services.liquibase.database]
+environment = "local"
+database_type = "postgresql"
+name = "acme_auth"
+host = "localhost"
+schema = "public"
 
 [services.environment]
 SPRING_PROFILES_ACTIVE = "local"

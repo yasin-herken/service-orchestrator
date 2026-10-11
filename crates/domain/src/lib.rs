@@ -25,6 +25,10 @@
 //! - **Build vocabulary**: [`BuildSystem`] and [`BuildOperation`], the
 //!   build-system-neutral names shared by configuration, the application, and
 //!   the build adapter.
+//! - **Migration vocabulary**: [`MigrationProviderType`],
+//!   [`MigrationOperation`], [`LiquibaseExecutionMode`], and
+//!   [`MigrationTargetEnvironment`], the provider-neutral names shared by
+//!   configuration, the application, and the migration adapter.
 //! - **Runtime vocabulary**: [`Task`], [`TaskStatus`], [`Workflow`],
 //!   [`ProcessState`], [`GitState`], and [`Permission`].
 //! - **Errors**: the small, typed [`DomainError`].
@@ -51,6 +55,7 @@ pub mod group;
 pub mod health;
 pub mod ids;
 pub mod library;
+pub mod migration;
 pub mod paths;
 pub mod permission;
 pub mod port;
@@ -77,6 +82,9 @@ pub use group::ServiceGroup;
 pub use health::{HealthCheck, HealthCheckKind, HttpHealthCheck};
 pub use ids::{GroupId, LibraryId, ProfileId, ServiceId, StepId, TaskId, WorkflowId, WorkspaceId};
 pub use library::{ArtifactCoordinate, Library};
+pub use migration::{
+    LiquibaseExecutionMode, MigrationOperation, MigrationProviderType, MigrationTargetEnvironment,
+};
 pub use paths::{AbsolutePath, RelativePath};
 pub use permission::Permission;
 pub use port::Port;

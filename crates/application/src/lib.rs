@@ -58,17 +58,17 @@ pub use app::Application;
 pub use error::ApplicationError;
 pub use models::{
     AlignmentStatus, BulkOperationSummary, ConsumerAlignment, LibraryArtifactVerification,
-    LibraryDependent, LibraryPrepareOptions, LibraryStatus, OperationResult,
+    LibraryDependent, LibraryPrepareOptions, LibraryStatus, MigrationStatus, OperationResult,
     PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest, ServiceRuntimeStatus,
     ServiceStatus, VersionAlignmentPlan, WorkspaceStatus,
 };
 pub use ports::{
-    artifact_parameter, build_parameter, parameter, service_runtime_parameter,
+    artifact_parameter, build_parameter, migration_parameter, parameter, service_runtime_parameter,
     ArtifactInspectionError, ArtifactInspector, ArtifactPresence, BuildError,
     DependencyVersionInspection, DiffOptions, GitError, GitManager, GitOptions, HealthState,
     InMemoryRuntimeStateStore, LogEntry, LogLevel, LogRequest, LogService, LogServiceError,
-    NullArtifactInspector, NullGitManager, NullLogService, NullServiceRuntimeIndex,
+    MigrationError, NullArtifactInspector, NullGitManager, NullLogService, NullServiceRuntimeIndex,
     ResolvedArtifact, ResolvedBuildCommand, ResolvedBuildTarget, ResolvedDependency,
-    ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore, ServiceProcessInfo,
-    ServiceRuntimeError, ServiceRuntimeIndex, ServiceRuntimeState,
+    ResolvedMigrationTarget, ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore,
+    ServiceProcessInfo, ServiceRuntimeError, ServiceRuntimeIndex, ServiceRuntimeState,
 };
