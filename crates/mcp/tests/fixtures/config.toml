@@ -1,0 +1,140 @@
+# Fixture configuration for the MCP adapter unit tests.
+#
+# It is deliberately generic — no real repository, credential, or host — and is
+# only parsed and normalized. Read-only tools never touch the filesystem, and a
+# scheduled task is never executed (the test harness registers no executors).
+
+config_version = 1
+
+[[workspaces]]
+id = "demo"
+name = "Demo Platform"
+root = "~/Projects/demo"
+
+[workspaces.environment]
+LOGGING_LEVEL = "INFO"
+
+[[libraries]]
+id = "shared-kit"
+name = "shared-kit"
+workspace = "demo"
+path = "libraries/shared-kit"
+type = "maven"
+build_system = "maven"
+
+[libraries.repository]
+url = "git@github.com:demo/shared-kit.git"
+default_branch = "main"
+
+[libraries.commands]
+build = "./mvnw clean install"
+
+[libraries.artifact]
+group_id = "com.demo"
+artifact_id = "shared-kit"
+version = "1.8.0-SNAPSHOT"
+
+[[services]]
+id = "orders-api"
+name = "orders-api"
+type = "backend"
+workspace = "demo"
+path = "backend/orders-api"
+default_branch = "main"
+build_system = "maven"
+
+[services.repository]
+url = "git@github.com:demo/orders-api.git"
+
+[services.runtime]
+type = "java"
+version = "21"
+
+[services.commands]
+install = "./mvnw dependency:resolve"
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+
+[services.liquibase]
+enabled = true
+provider = "liquibase"
+execution_mode = "maven"
+timeout_seconds = 300
+
+[services.liquibase.commands]
+status = "./mvnw liquibase:status"
+update = "./mvnw liquibase:update"
+preview = "./mvnw liquibase:updateSQL"
+
+[services.liquibase.database]
+environment = "local"
+database_type = "postgresql"
+name = "demo_orders"
+host = "localhost"
+schema = "public"
+
+[services.environment]
+SPRING_PROFILES_ACTIVE = "local"
+DB_PASSWORD = { value = "super-secret-value", secret = true }
+
+[services.dependencies]
+libraries = ["shared-kit"]
+
+[[services.ports]]
+port = 8081
+protocol = "tcp"
+
+[[services.health_checks]]
+type = "http"
+url = "http://localhost:8081/actuator/health"
+timeout_seconds = 10
+
+[[services]]
+id = "admin-ui"
+name = "admin-ui"
+type = "frontend"
+workspace = "demo"
+path = "frontend/admin-ui"
+default_branch = "main"
+build_system = "npm"
+
+[services.repository]
+url = "git@github.com:demo/admin-ui.git"
+
+[services.runtime]
+type = "node"
+version = "20.19.4"
+
+[services.commands]
+install = "npm install"
+build = "npm run build"
+start = "npm start"
+
+[services.environment]
+SERVER_PORT = "3000"
+
+[services.dependencies]
+services = ["orders-api"]
+
+[[services.ports]]
+port = 3000
+protocol = "tcp"
+
+[[services.health_checks]]
+type = "port"
+port = 3000
+
+[[groups]]
+id = "core"
+name = "Core"
+services = ["orders-api", "admin-ui"]
+
+[[profiles]]
+id = "full-stack"
+name = "Full Stack"
+workspace = "demo"
+services = ["orders-api", "admin-ui"]
+
+[execution]
+max_parallel_tasks = 4
+default_timeout_seconds = 1800

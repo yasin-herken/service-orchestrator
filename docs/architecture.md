@@ -131,7 +131,7 @@ domain. Nothing inner knows about anything outer.
 | `liquibase` | Infrastructure | Migration adapter. A provider-based Migration Manager selects a `MigrationProvider` (Liquibase) that emits a structured `MigrationPlan`, which is run in the process manager. Applies the database-target environment safety policy and serializes migrations against the same configured database. |
 | `health` | Infrastructure | Health adapter. A `HealthManager` selects a `HealthChecker` (process, TCP, HTTP/actuator) through a small registry, runs each configured probe under its own timeout, aggregates the outcomes deterministically, records bounded history and events, mirrors the aggregate into the runtime state store, and implements the read-only `HealthIndex` port. A `HealthMonitor` optionally polls watched services. |
 | `logging` | Infrastructure | Observability adapter. A `LogHub` unifies managed-process output, task-engine events, and application messages into one structured, bounded, filterable store, answers stable cursor queries, and streams realtime entries to multiple backpressure-tolerant subscribers. Thin ingestors correlate existing event sources; messages are redacted before storage. Implements the `LogService`/`LogSubscription` ports. |
-| `mcp` | Interface | MCP stdio adapter over the application core. |
+| `mcp` | Interface | MCP stdio adapter over the application core, built on the official `rmcp` SDK: strict tool schemas and structured envelopes, read-only resources, workflow prompts, and standard-authorization policy enforcement. |
 | `tui` | Interface | Ratatui adapter over the application core. |
 | `service-orchestrator` (root) | Composition root | Wires infrastructure into the core and dispatches to an interface. |
 
@@ -816,7 +816,52 @@ The `tui` crate is the human-facing interface (`docs/tui.md`,
   normal exit, error, Ctrl+C, and panic; terminals below 60×14 render an
   informative minimum-size notice instead of a broken layout.
 
-## 22. Related documents
+## 22. The MCP adapter
+
+The `mcp` crate is the agent-facing interface (`docs/mcp.md`,
+`docs/adr/014-mcp-integration.md`). It is launched as `service-orchestrator mcp`
+and speaks the Model Context Protocol over **stdio**, built on the official Rust
+SDK `rmcp` 3.5.1.
+
+- **Adapter, not an implementation.** It validates tool input, applies policy,
+  and forwards calls to application use cases. It never runs Git, Maven, npm,
+  Liquibase, or an operating-system process, and it never duplicates application
+  logic. The crate depends on `application` (and the domain and execution event
+  types) but not on any infrastructure crate, so the boundary is enforced by the
+  dependency graph.
+- **stdout is protocol-only.** Every diagnostic the adapter emits goes to stderr
+  as a single-line JSON record (lifecycle events and one record per tool
+  invocation, carrying the tool name, outcome, duration, and error code — never
+  an argument value). A stray `println!` would corrupt the transport.
+- **Shared core.** `bootstrap()` in the composition root builds one application
+  core, one task engine, and one runtime state store, and hands the same core to
+  the TUI or to MCP. `Application::new` defaults to standard authorization, so
+  both interfaces observe identical behavior, policies, and errors.
+- **Tools.** Each tool is a thin, named projection of exactly one application use
+  case, with a strict typed input schema derived from a `params.rs` struct
+  (`deny_unknown_fields`, so an unmodelled option is rejected). Tools are
+  advertised only where a use case exists; gaps (`install_dependencies`,
+  `test_service`, a combined bulk build) are documented, not faked. There is no
+  arbitrary shell tool.
+- **Structured envelopes.** Every result is `{success, data}` or
+  `{success: false, error}`. A malformed request (unknown tool, wrong JSON
+  shape) is a JSON-RPC protocol error; a valid request that the application
+  refuses or that fails — including a policy denial — is a tool result with
+  `isError: true` and a structured, coded error.
+- **Policy.** The server always runs with standard authorization. A destructive
+  tool (for example `git_reset_hard`) is denied with `CONFIRMATION_REQUIRED`;
+  there is no `confirmed` flag for an agent to self-authorize, so a human must
+  approve destructive work interactively.
+- **Long-running work.** Every mutation returns the task or workflow identifier
+  the application core produced. `get_task` / `task://{taskId}` expose status,
+  progress, and structured failure; a bounded `TaskMonitor` boundary is the only
+  extra surface the adapter needs. State is per-process.
+- **Resources and prompts.** Read-only resources (`workspace://`, `service://`,
+  `task://`) are backed by existing application queries, with templates so the
+  list stays bounded. Prompts are guidance only and reference only tools that
+  exist.
+
+## 23. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -842,6 +887,9 @@ The `tui` crate is the human-facing interface (`docs/tui.md`,
   Manager, its providers and aggregation, and the observability layer.
 - `docs/adr/013-ratatui-tui.md` — the decision record for the Ratatui TUI, its
   state machine, async event loop, and policy-driven confirmation flow.
+- `docs/adr/014-mcp-integration.md` — the decision record for the MCP server: the
+  `rmcp` SDK choice, the thin adapter, structured envelopes, policy enforcement,
+  resources and prompts, and the documented gaps.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
@@ -868,5 +916,8 @@ The `tui` crate is the human-facing interface (`docs/tui.md`,
   backpressure, and redaction.
 - `docs/tui.md` — the Ratatui TUI: screens, keyboard model, multi-selection,
   policy-driven confirmations, async event loop, and terminal lifecycle.
+- `docs/mcp.md` — the MCP server: stdio connection model, tools, resources,
+  prompts, permissions, observability, long-running work, example workflows,
+  testing, and limitations.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

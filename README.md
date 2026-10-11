@@ -18,10 +18,24 @@ remote backend.
 
 ## Status
 
-This repository currently contains the **architectural foundation**: the Cargo
-workspace, crate boundaries, design documentation, the pure domain model, and
-the versioned configuration system. Execution, infrastructure, and interfaces
-are not implemented yet.
+This repository contains the full local orchestration platform: the Cargo
+workspace and crate boundaries, the pure domain model, the versioned
+configuration system, the task engine, the infrastructure adapters (Git, process,
+build, library, service runtime, migration, health, and logging), the shared
+application core, and two interface adapters — the Ratatui terminal UI and the
+MCP stdio server.
+
+## Usage
+
+```bash
+service-orchestrator tui                  # the terminal interface (default)
+service-orchestrator mcp                  # the MCP server on stdin/stdout
+service-orchestrator mcp --config <path>  # either interface accepts --config
+```
+
+Both interfaces share one application core, so they observe identical behavior,
+policies, and errors. The TUI is fully usable offline; no LLM or MCP client is
+required. See [docs/tui.md](docs/tui.md) and [docs/mcp.md](docs/mcp.md).
 
 Configuration is external and versioned. See
 [docs/configuration.md](docs/configuration.md) for the schema and

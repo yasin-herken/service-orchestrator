@@ -13,3 +13,15 @@ workspace = true
 
 [dependencies]
 service-orchestrator-application.workspace = true
+service-orchestrator-domain.workspace = true
+service-orchestrator-execution.workspace = true
+rmcp.workspace = true
+schemars.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+service-orchestrator-config.workspace = true
+service-orchestrator-policy.workspace = true

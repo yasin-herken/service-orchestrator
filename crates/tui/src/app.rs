@@ -1203,7 +1203,7 @@ impl App {
             self.state.toast = None;
         }
 
-        if self.ticks % REFRESH_EVERY_TICKS == 0 {
+        if self.ticks.is_multiple_of(REFRESH_EVERY_TICKS) {
             let _ = self.refresh();
         } else {
             self.refresh_tasks();
