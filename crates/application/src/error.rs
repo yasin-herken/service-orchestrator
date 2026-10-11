@@ -14,6 +14,7 @@
 //! - **boundary** — a port (task engine, log service) failed, with its context
 //!   preserved but no low-level leak.
 
+use serde::{Deserialize, Serialize};
 use service_orchestrator_domain::Permission;
 use service_orchestrator_domain::{
     GroupId, LibraryId, ProfileId, ServiceId, TaskId, WorkflowId, WorkspaceId,
@@ -21,7 +22,12 @@ use service_orchestrator_domain::{
 use thiserror::Error;
 
 /// Errors produced by application use cases.
-#[derive(Debug, Clone, PartialEq, Eq, Error)]
+///
+/// The type derives `serde` because a client-side [`Application`] may be a thin
+/// proxy over a local daemon: a structured error crosses the IPC boundary as-is
+/// rather than being flattened into a string
+/// ([`Application`]: crate::Application).
+#[derive(Debug, Clone, PartialEq, Eq, Error, Serialize, Deserialize)]
 pub enum ApplicationError {
     /// The requested workspace does not exist.
     #[error("workspace '{0}' was not found")]
@@ -237,6 +243,19 @@ pub enum ApplicationError {
     #[error("invalid log query: {message}")]
     LogQueryInvalid {
         /// What is wrong with the query.
+        message: String,
+    },
+
+    /// The shared application runtime is unavailable.
+    ///
+    /// A client-side proxy produces this when it cannot reach the local daemon,
+    /// when the connection drops, or when the two speak incompatible protocol
+    /// versions. It never originates inside the application core itself.
+    #[error("{message}")]
+    RuntimeUnavailable {
+        /// A stable, machine-readable code such as `DAEMON_UNAVAILABLE`.
+        code: String,
+        /// A human-readable, actionable summary.
         message: String,
     },
 }

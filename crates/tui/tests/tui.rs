@@ -40,7 +40,8 @@ fn harness() -> Harness {
         Arc::new(NullLogService),
     );
     let observer: Arc<dyn TaskObserver> = tasks.clone();
-    let mut app = App::new(application, observer, CONFIG_PATH);
+    let client: Arc<dyn service_orchestrator_client::OrchestratorClient> = Arc::new(application);
+    let mut app = App::new(client, observer, CONFIG_PATH);
     app.refresh().expect("the fixture workspace reads cleanly");
     Harness { app, tasks }
 }

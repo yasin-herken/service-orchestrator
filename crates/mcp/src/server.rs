@@ -42,9 +42,10 @@ use rmcp::ErrorData;
 use serde::Serialize;
 use serde_json::Value;
 use service_orchestrator_application::{
-    Application, ApplicationError, DiffOptions, LogRequest, PrepareEnvironmentRequest,
+    ApplicationError, DiffOptions, LogRequest, PrepareEnvironmentRequest,
     PrepareSelectedLibrariesRequest,
 };
+use service_orchestrator_client::OrchestratorClient;
 
 use crate::{
     catalog, logging, params, parse_branch, parse_group_id, parse_library_id, parse_profile_id,
@@ -68,28 +69,28 @@ structured `CONFIRMATION_REQUIRED` error: an agent cannot self-confirm, and a \
 human must approve the action interactively. Treat every failure envelope as \
 authoritative rather than retrying blindly.";
 
-/// The MCP adapter over the application core.
+/// The MCP adapter over the shared application client.
 pub(crate) struct OrchestratorServer {
-    application: Application,
+    client: Arc<dyn OrchestratorClient>,
     monitor: Arc<dyn TaskMonitor>,
     tools: Vec<Tool>,
 }
 
 impl OrchestratorServer {
     /// Builds the server and its frozen tool catalog.
-    pub(crate) fn new(application: Application, monitor: Arc<dyn TaskMonitor>) -> Self {
+    pub(crate) fn new(client: Arc<dyn OrchestratorClient>, monitor: Arc<dyn TaskMonitor>) -> Self {
         Self {
-            application,
+            client,
             monitor,
             tools: catalog::tools(),
         }
     }
 
-    /// Returns the application core, for in-crate tests that read resources
+    /// Returns the application client, for in-crate tests that read resources
     /// directly.
     #[cfg(test)]
-    pub(crate) fn application_for_test(&self) -> Application {
-        self.application.clone()
+    pub(crate) fn client_for_test(&self) -> Arc<dyn OrchestratorClient> {
+        Arc::clone(&self.client)
     }
 
     /// Dispatches one tool call to the application core.
@@ -104,80 +105,74 @@ impl OrchestratorServer {
             // -- workspaces, groups, profiles -------------------------------
             "list_workspaces" => {
                 parse::<params::Empty>(arguments)?;
-                query(Ok(self.application.list_workspaces()))
+                query(self.client.list_workspaces())
             }
             "get_workspace" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .get_workspace(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
             "get_workspace_status" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .get_workspace_status(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
             "list_groups" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .list_groups(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
             "get_group" => {
                 let p = parse::<params::GroupRef>(arguments)?;
-                query(self.application.get_group(&parse_group_id(&p.group_id)?))
+                query(self.client.get_group(&parse_group_id(&p.group_id)?))
             }
             "list_profiles" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .list_profiles(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
             "get_profile" => {
                 let p = parse::<params::ProfileRef>(arguments)?;
-                query(
-                    self.application
-                        .get_profile(&parse_profile_id(&p.profile_id)?),
-                )
+                query(self.client.get_profile(&parse_profile_id(&p.profile_id)?))
             }
             // -- services ---------------------------------------------------
             "list_services" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .list_services(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
             "get_service" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
-                query(
-                    self.application
-                        .get_service(&parse_service_id(&p.service_id)?),
-                )
+                query(self.client.get_service(&parse_service_id(&p.service_id)?))
             }
             "get_service_status" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .get_service_status(&parse_service_id(&p.service_id)?),
                 )
             }
             "get_service_runtime_status" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .get_service_runtime_status(&parse_service_id(&p.service_id)?),
                 )
             }
             "list_running_services" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .list_running_services(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
@@ -185,21 +180,18 @@ impl OrchestratorServer {
             "list_libraries" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .list_libraries(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
             "get_library" => {
                 let p = parse::<params::LibraryRef>(arguments)?;
-                query(
-                    self.application
-                        .get_library(&parse_library_id(&p.library_id)?),
-                )
+                query(self.client.get_library(&parse_library_id(&p.library_id)?))
             }
             "get_library_status" => {
                 let p = parse::<params::LibraryRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .get_library_status(&parse_library_id(&p.library_id)?)
                         .await,
                 )
@@ -207,14 +199,14 @@ impl OrchestratorServer {
             "find_library_dependents" => {
                 let p = parse::<params::LibraryRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .find_library_dependents(&parse_library_id(&p.library_id)?),
                 )
             }
             "verify_library_artifact" => {
                 let p = parse::<params::LibraryRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .verify_library_artifact(&parse_library_id(&p.library_id)?)
                         .await,
                 )
@@ -222,7 +214,7 @@ impl OrchestratorServer {
             "inspect_library_version_alignment" => {
                 let p = parse::<params::LibraryRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .inspect_library_version_alignment(&parse_library_id(&p.library_id)?)
                         .await,
                 )
@@ -231,7 +223,7 @@ impl OrchestratorServer {
             "git_status" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .get_git_status(&parse_service_id(&p.service_id)?)
                         .await,
                 )
@@ -239,7 +231,7 @@ impl OrchestratorServer {
             "git_list_branches" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .list_branches(&parse_service_id(&p.service_id)?)
                         .await,
                 )
@@ -251,7 +243,7 @@ impl OrchestratorServer {
                     options = options.with_max_bytes(max_bytes);
                 }
                 query(
-                    self.application
+                    self.client
                         .get_repository_diff(&parse_service_id(&p.service_id)?, &options)
                         .await,
                 )
@@ -260,55 +252,52 @@ impl OrchestratorServer {
             "git_fetch" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .fetch_repository(&parse_service_id(&p.service_id)?),
                 )
             }
             "git_pull" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .pull_repository(&parse_service_id(&p.service_id)?),
                 )
             }
             "git_checkout" => {
                 let p = parse::<params::ServiceBranch>(arguments)?;
-                self.operation(self.application.checkout_repository(
+                self.operation(self.client.checkout_repository(
                     &parse_service_id(&p.service_id)?,
                     &parse_branch(&p.branch)?,
                 ))
             }
             "git_sync" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
-                self.operation(
-                    self.application
-                        .sync_service(&parse_service_id(&p.service_id)?),
-                )
+                self.operation(self.client.sync_service(&parse_service_id(&p.service_id)?))
             }
             "git_clone" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .clone_repository(&parse_service_id(&p.service_id)?),
                 )
             }
             "git_sync_repositories" => {
                 let p = parse::<params::WorkspaceServices>(arguments)?;
-                self.operation(self.application.sync_repositories(
+                self.operation(self.client.sync_repositories(
                     &parse_workspace_id(&p.workspace_id)?,
                     &service_ids(&p.service_ids)?,
                 ))
             }
             "git_fetch_repositories" => {
                 let p = parse::<params::WorkspaceServices>(arguments)?;
-                self.operation(self.application.fetch_repositories(
+                self.operation(self.client.fetch_repositories(
                     &parse_workspace_id(&p.workspace_id)?,
                     &service_ids(&p.service_ids)?,
                 ))
             }
             "git_checkout_repositories" => {
                 let p = parse::<params::WorkspaceServicesBranch>(arguments)?;
-                self.operation(self.application.checkout_repositories(
+                self.operation(self.client.checkout_repositories(
                     &parse_workspace_id(&p.workspace_id)?,
                     &service_ids(&p.service_ids)?,
                     &parse_branch(&p.branch)?,
@@ -318,57 +307,51 @@ impl OrchestratorServer {
             "git_reset_hard" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .reset_repository_hard(&parse_service_id(&p.service_id)?),
                 )
             }
             "git_clean" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .clean_repository(&parse_service_id(&p.service_id)?),
                 )
             }
             "git_discard_changes" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .discard_local_changes(&parse_service_id(&p.service_id)?),
                 )
             }
             // -- builds -----------------------------------------------------
             "build_service" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
-                self.operation(
-                    self.application
-                        .build_service(&parse_service_id(&p.service_id)?),
-                )
+                self.operation(self.client.build_service(&parse_service_id(&p.service_id)?))
             }
             "build_workspace" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .build_workspace(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
             "build_library" => {
                 let p = parse::<params::LibraryRef>(arguments)?;
-                self.operation(
-                    self.application
-                        .build_library(&parse_library_id(&p.library_id)?),
-                )
+                self.operation(self.client.build_library(&parse_library_id(&p.library_id)?))
             }
             "install_library" => {
                 let p = parse::<params::LibraryRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .install_library(&parse_library_id(&p.library_id)?),
                 )
             }
             "prepare_library" => {
                 let p = parse::<params::PrepareLibraryRequest>(arguments)?;
                 let (library_id, options) = p.into_parts()?;
-                self.operation(self.application.prepare_library(&library_id, &options))
+                self.operation(self.client.prepare_library(&library_id, &options))
             }
             "prepare_selected_libraries" => {
                 let p = parse::<params::PrepareSelectedLibrariesRequest>(arguments)?;
@@ -376,47 +359,41 @@ impl OrchestratorServer {
                 let request = PrepareSelectedLibrariesRequest::new(workspace_id)
                     .with_libraries(libraries)
                     .with_options(options);
-                self.operation(self.application.prepare_selected_libraries(request))
+                self.operation(self.client.prepare_selected_libraries(request))
             }
             // -- service runtime --------------------------------------------
             "start_service" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
-                self.operation(
-                    self.application
-                        .start_service(&parse_service_id(&p.service_id)?),
-                )
+                self.operation(self.client.start_service(&parse_service_id(&p.service_id)?))
             }
             "stop_service" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
-                self.operation(
-                    self.application
-                        .stop_service(&parse_service_id(&p.service_id)?),
-                )
+                self.operation(self.client.stop_service(&parse_service_id(&p.service_id)?))
             }
             "restart_service" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .restart_service(&parse_service_id(&p.service_id)?),
                 )
             }
             "start_services" => {
                 let p = parse::<params::WorkspaceServices>(arguments)?;
-                self.operation(self.application.start_services(
+                self.operation(self.client.start_services(
                     &parse_workspace_id(&p.workspace_id)?,
                     &service_ids(&p.service_ids)?,
                 ))
             }
             "stop_services" => {
                 let p = parse::<params::WorkspaceServices>(arguments)?;
-                self.operation(self.application.stop_services(
+                self.operation(self.client.stop_services(
                     &parse_workspace_id(&p.workspace_id)?,
                     &service_ids(&p.service_ids)?,
                 ))
             }
             "restart_services" => {
                 let p = parse::<params::WorkspaceServices>(arguments)?;
-                self.operation(self.application.restart_services(
+                self.operation(self.client.restart_services(
                     &parse_workspace_id(&p.workspace_id)?,
                     &service_ids(&p.service_ids)?,
                 ))
@@ -425,48 +402,48 @@ impl OrchestratorServer {
             "migration_status" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .migration_status(&parse_service_id(&p.service_id)?),
                 )
             }
             "validate_migration" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .validate_migration(&parse_service_id(&p.service_id)?),
                 )
             }
             "get_migration_status" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .get_migration_status(&parse_service_id(&p.service_id)?),
                 )
             }
             "inspect_migration_pending" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .inspect_migration_pending(&parse_service_id(&p.service_id)?),
                 )
             }
             "preview_migration" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .preview_migration(&parse_service_id(&p.service_id)?),
                 )
             }
             "apply_migration" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .apply_migration(&parse_service_id(&p.service_id)?),
                 )
             }
             "apply_selected_migrations" => {
                 let p = parse::<params::WorkspaceServices>(arguments)?;
-                self.operation(self.application.apply_selected_migrations(
+                self.operation(self.client.apply_selected_migrations(
                     &parse_workspace_id(&p.workspace_id)?,
                     &service_ids(&p.service_ids)?,
                 ))
@@ -475,35 +452,35 @@ impl OrchestratorServer {
             "check_service_health" => {
                 let p = parse::<params::HealthCheckRequest>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .check_service_health(&parse_service_id(&p.service_id)?, p.scope.into()),
                 )
             }
             "check_service_readiness" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .check_service_readiness(&parse_service_id(&p.service_id)?),
                 )
             }
             "get_service_health" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .get_service_health(&parse_service_id(&p.service_id)?),
                 )
             }
             "list_service_health" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .list_service_health(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
             "get_service_diagnostics" => {
                 let p = parse::<params::ServiceRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .get_service_diagnostics(&parse_service_id(&p.service_id)?),
                 )
             }
@@ -514,7 +491,7 @@ impl OrchestratorServer {
                 let request =
                     log_request(p.workspace_id, p.level, p.source, p.text, p.after, p.limit)?;
                 let page = self
-                    .application
+                    .client
                     .get_service_logs(&service_id, &request)
                     .map_err(ToolError::from)?;
                 Ok(response::log_page(&page))
@@ -525,7 +502,7 @@ impl OrchestratorServer {
                 let request =
                     log_request(p.workspace_id, p.level, p.source, p.text, p.after, p.limit)?;
                 let page = self
-                    .application
+                    .client
                     .get_task_logs(&task_id, &request)
                     .map_err(ToolError::from)?;
                 Ok(response::log_page(&page))
@@ -537,17 +514,14 @@ impl OrchestratorServer {
                 if let Some(task_id) = p.task_id {
                     request = request.for_task(parse_task_id(&task_id)?);
                 }
-                let entries = self
-                    .application
-                    .get_logs(&request)
-                    .map_err(ToolError::from)?;
+                let entries = self.client.get_logs(&request).map_err(ToolError::from)?;
                 Ok(response::log_entries(&entries))
             }
             // -- tasks ------------------------------------------------------
             "get_task" => {
                 let p = parse::<params::TaskRef>(arguments)?;
                 let task = self
-                    .application
+                    .client
                     .get_task(&parse_task_id(&p.task_id)?)
                     .map_err(ToolError::from)?;
                 Ok(response::task(&task))
@@ -563,9 +537,7 @@ impl OrchestratorServer {
             "cancel_task" => {
                 let p = parse::<params::TaskRef>(arguments)?;
                 let task_id = parse_task_id(&p.task_id)?;
-                self.application
-                    .cancel_task(&task_id)
-                    .map_err(ToolError::from)?;
+                self.client.cancel_task(&task_id).map_err(ToolError::from)?;
                 Ok(serde_json::json!({
                     "taskId": task_id.to_string(),
                     "cancellation": "requested",
@@ -574,7 +546,7 @@ impl OrchestratorServer {
             "summarize_workflow" => {
                 let p = parse::<params::WorkflowRef>(arguments)?;
                 query(
-                    self.application
+                    self.client
                         .summarize_workflow(&parse_workflow_id(&p.workflow_id)?),
                 )
             }
@@ -582,7 +554,7 @@ impl OrchestratorServer {
             "sync_workspace" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 self.operation(
-                    self.application
+                    self.client
                         .sync_workspace(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
@@ -603,32 +575,32 @@ impl OrchestratorServer {
                 if p.start {
                     request = request.start();
                 }
-                self.operation(self.application.prepare_environment(request))
+                self.operation(self.client.prepare_environment(request))
             }
             "start_group" => {
                 let p = parse::<params::GroupAction>(arguments)?;
-                self.operation(self.application.start_group(
+                self.operation(self.client.start_group(
                     &parse_workspace_id(&p.workspace_id)?,
                     &parse_group_id(&p.group_id)?,
                 ))
             }
             "stop_group" => {
                 let p = parse::<params::GroupAction>(arguments)?;
-                self.operation(self.application.stop_group(
+                self.operation(self.client.stop_group(
                     &parse_workspace_id(&p.workspace_id)?,
                     &parse_group_id(&p.group_id)?,
                 ))
             }
             "start_profile" => {
                 let p = parse::<params::ProfileAction>(arguments)?;
-                self.operation(self.application.start_profile(
+                self.operation(self.client.start_profile(
                     &parse_workspace_id(&p.workspace_id)?,
                     &parse_profile_id(&p.profile_id)?,
                 ))
             }
             "stop_profile" => {
                 let p = parse::<params::ProfileAction>(arguments)?;
-                self.operation(self.application.stop_profile(
+                self.operation(self.client.stop_profile(
                     &parse_workspace_id(&p.workspace_id)?,
                     &parse_profile_id(&p.profile_id)?,
                 ))
@@ -650,7 +622,7 @@ impl OrchestratorServer {
         let result = result.map_err(ToolError::from)?;
         let status = result
             .task_id()
-            .and_then(|task_id| self.application.get_task(task_id).ok())
+            .and_then(|task_id| self.client.get_task(task_id).ok())
             .map(|task| task.status.label().to_owned());
         Ok(response::operation_result(&result, status.as_deref()))
     }
@@ -753,7 +725,7 @@ impl rmcp::ServerHandler for OrchestratorServer {
         _context: RequestContext<RoleServer>,
     ) -> Result<ListResourcesResult, ErrorData> {
         Ok(ListResourcesResult::with_all_items(resources::list(
-            &self.application,
+            self.client.as_ref(),
         )))
     }
 
@@ -772,7 +744,7 @@ impl rmcp::ServerHandler for OrchestratorServer {
         request: ReadResourceRequestParams,
         _context: RequestContext<RoleServer>,
     ) -> Result<ReadResourceResponse, ErrorData> {
-        let contents = resources::read(&self.application, &request.uri).await?;
+        let contents = resources::read(self.client.as_ref(), &request.uri).await?;
         Ok(ReadResourceResult::new(vec![contents]).into())
     }
 

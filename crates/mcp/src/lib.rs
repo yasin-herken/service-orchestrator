@@ -3,8 +3,9 @@
 //! MCP interface adapter (stdio transport).
 //!
 //! A thin adapter that validates input, applies policy, and forwards calls to
-//! application use cases. It must not implement business logic or call
-//! infrastructure directly. It depends only on the application core.
+//! application use cases through the shared-runtime client. It must not
+//! implement business logic or call infrastructure directly. It depends only on
+//! the application-client boundary (`tasks/015.md` §13, §21).
 //!
 //! # What this crate is
 //!
@@ -43,7 +44,8 @@
 use std::sync::Arc;
 
 use rmcp::ErrorData;
-use service_orchestrator_application::{Application, ApplicationError};
+use service_orchestrator_application::ApplicationError;
+use service_orchestrator_client::OrchestratorClient;
 use service_orchestrator_domain::{
     Branch, DomainError, GroupId, LibraryId, ProfileId, ServiceId, TaskId, WorkflowId, WorkspaceId,
 };
@@ -60,7 +62,7 @@ mod server;
 #[cfg(test)]
 mod tests;
 
-pub use monitor::TaskMonitor;
+pub use monitor::{RemoteTaskMonitor, TaskMonitor};
 
 /// The static `initialize`/metadata resource URI.
 pub(crate) const SERVER_URI: &str = "orchestrator://server";
@@ -91,21 +93,20 @@ impl From<rmcp::service::ServerInitializeError> for ServeError {
 
 /// Serves the MCP protocol on stdin/stdout until the client disconnects.
 ///
-/// The application core is shared with whatever else the composition root wired
-/// (the same task engine, runtime state, and log service), so an MCP-driven
-/// operation observes and is observed by the same state a human would see. The
-/// `monitor` is the read-only task-engine view backing `list_tasks`
-/// (`tasks/014.md` §3, §17).
+/// The `client` is the shared-runtime boundary: it talks to the local daemon
+/// over IPC, so an MCP-driven operation observes and is observed by the same
+/// state a human sees through the TUI. The `monitor` is the read-only task
+/// view backing `list_tasks` (`tasks/014.md` §3, §17; `tasks/015.md` §13).
 ///
 /// # Errors
 ///
 /// Returns [`ServeError`] when the transport cannot be initialized or when the
 /// serving task fails. A normal client disconnect is not an error.
 pub async fn serve_stdio(
-    application: Application,
+    client: Arc<dyn OrchestratorClient>,
     monitor: Arc<dyn TaskMonitor>,
 ) -> Result<(), ServeError> {
-    let handler = server::OrchestratorServer::new(application, monitor);
+    let handler = server::OrchestratorServer::new(client, monitor);
     let running = rmcp::serve_server(handler, rmcp::transport::stdio()).await?;
     let reason = running.waiting().await?;
     logging::server_stopped(&format!("{reason:?}"));

@@ -10,11 +10,12 @@
 //! only: there is no external broker, and a subscriber that falls behind simply
 //! observes a `Lagged` error and resynchronises from the task store.
 
+use serde::{Deserialize, Serialize};
 use service_orchestrator_domain::{Task, TaskFailure, TaskId, TaskKind, TaskProgress, Workflow};
 use tokio::sync::broadcast;
 
 /// A single observable change in the engine.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TaskEvent {
     /// A task was created and entered its initial state.
     TaskCreated {

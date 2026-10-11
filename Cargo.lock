@@ -797,7 +797,9 @@ dependencies = [
  "serde_json",
  "service-orchestrator-application",
  "service-orchestrator-build",
+ "service-orchestrator-client",
  "service-orchestrator-config",
+ "service-orchestrator-daemon",
  "service-orchestrator-domain",
  "service-orchestrator-execution",
  "service-orchestrator-git",
@@ -839,6 +841,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "service-orchestrator-client"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "service-orchestrator-application",
+ "service-orchestrator-config",
+ "service-orchestrator-domain",
+ "service-orchestrator-execution",
+ "thiserror",
+ "tokio",
+]
+
+[[package]]
 name = "service-orchestrator-config"
 version = "0.1.0"
 dependencies = [
@@ -846,6 +863,23 @@ dependencies = [
  "service-orchestrator-domain",
  "thiserror",
  "toml",
+]
+
+[[package]]
+name = "service-orchestrator-daemon"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "serde",
+ "serde_json",
+ "service-orchestrator-application",
+ "service-orchestrator-client",
+ "service-orchestrator-config",
+ "service-orchestrator-domain",
+ "service-orchestrator-execution",
+ "service-orchestrator-policy",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]
@@ -863,6 +897,7 @@ name = "service-orchestrator-execution"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "serde",
  "service-orchestrator-domain",
  "thiserror",
  "tokio",
@@ -932,6 +967,7 @@ dependencies = [
  "serde",
  "serde_json",
  "service-orchestrator-application",
+ "service-orchestrator-client",
  "service-orchestrator-config",
  "service-orchestrator-domain",
  "service-orchestrator-execution",
@@ -979,6 +1015,7 @@ version = "0.1.0"
 dependencies = [
  "ratatui",
  "service-orchestrator-application",
+ "service-orchestrator-client",
  "service-orchestrator-config",
  "service-orchestrator-domain",
  "service-orchestrator-execution",

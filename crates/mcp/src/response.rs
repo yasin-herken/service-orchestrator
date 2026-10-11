@@ -171,6 +171,9 @@ pub(crate) fn error_body(error: &ApplicationError) -> ErrorBody {
         ApplicationError::LogQueryInvalid { message } => {
             ErrorBody::new("INVALID_LOG_QUERY", message.clone())
         }
+        ApplicationError::RuntimeUnavailable { code, message } => {
+            ErrorBody::new(code.clone(), message.clone())
+        }
     }
 }
 

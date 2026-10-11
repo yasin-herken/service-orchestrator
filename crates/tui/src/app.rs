@@ -14,9 +14,9 @@
 use std::sync::Arc;
 
 use service_orchestrator_application::{
-    Application, ApplicationError, Authorization, HealthCheckScope, LibraryPrepareOptions,
-    OperationResult,
+    ApplicationError, Authorization, HealthCheckScope, LibraryPrepareOptions, OperationResult,
 };
+use service_orchestrator_client::OrchestratorClient;
 use service_orchestrator_domain::{
     Branch, LibraryId, Permission, ServiceId, Task, TaskId, WorkspaceId,
 };
@@ -41,8 +41,8 @@ const REFRESH_EVERY_TICKS: u64 = 4;
 
 /// The interface's application state machine.
 pub struct App {
-    /// The application core this interface drives.
-    application: Application,
+    /// The shared-runtime client this interface drives.
+    application: Arc<dyn OrchestratorClient>,
     /// The read-only view of the task engine.
     observer: Arc<dyn TaskObserver>,
     /// All presentation state.
@@ -58,10 +58,10 @@ pub struct App {
 }
 
 impl App {
-    /// Creates an interface bound to an application core and a task observer.
+    /// Creates an interface bound to an application client and a task observer.
     #[must_use]
     pub fn new(
-        application: Application,
+        application: Arc<dyn OrchestratorClient>,
         observer: Arc<dyn TaskObserver>,
         config_path: impl Into<String>,
     ) -> Self {
@@ -111,15 +111,13 @@ impl App {
     ///
     /// Returns the application's error when the active workspace cannot be read.
     pub fn refresh(&mut self) -> Result<(), ApplicationError> {
-        let (config_version, max_parallel_tasks, default_timeout_seconds) = {
-            let config = self.application.config();
-            (
-                config.version,
-                config.execution.max_parallel_tasks,
-                config.execution.default_timeout_seconds,
-            )
-        };
-        let workspaces = self.application.list_workspaces();
+        let summary = self.application.config_summary();
+        let (config_version, max_parallel_tasks, default_timeout_seconds) = (
+            summary.version,
+            summary.max_parallel_tasks,
+            summary.default_timeout_seconds,
+        );
+        let workspaces = self.application.list_workspaces()?;
         let active = self
             .state
             .active_workspace
@@ -840,11 +838,13 @@ impl App {
         match &action {
             Action::CheckHealthSelected => {
                 let ids = self.target_services();
-                return self.run_per_service("health check", &ids, Application::health_check);
+                return self.run_per_service("health check", &ids, |client, id| {
+                    client.check_service_health(id, HealthCheckScope::All)
+                });
             }
             Action::BuildSelected => {
                 let ids = self.target_services();
-                return self.run_per_service("build", &ids, Application::build_service);
+                return self.run_per_service("build", &ids, |client, id| client.build_service(id));
             }
             _ => {}
         }
@@ -863,7 +863,7 @@ impl App {
         action: &Action,
         authorization: Authorization,
     ) -> Result<OperationResult, ApplicationError> {
-        let app = self.application.clone().with_authorization(authorization);
+        let app = self.application.with_authorization(authorization);
         match action {
             Action::StartService(id) => app.start_service(id),
             Action::StopService(id) => app.stop_service(id),
@@ -959,17 +959,15 @@ impl App {
         }
     }
 
-    fn run_per_service(
-        &mut self,
-        label: &str,
-        ids: &[ServiceId],
-        operation: fn(&Application, &ServiceId) -> Result<OperationResult, ApplicationError>,
-    ) {
+    fn run_per_service<F>(&mut self, label: &str, ids: &[ServiceId], operation: F)
+    where
+        F: Fn(&dyn OrchestratorClient, &ServiceId) -> Result<OperationResult, ApplicationError>,
+    {
         let app = self.application.clone();
         let mut scheduled = 0usize;
         let mut failures = 0usize;
         for id in ids {
-            match operation(&app, id) {
+            match operation(app.as_ref(), id) {
                 Ok(result) if result.is_scheduled() => scheduled += 1,
                 Ok(_) => {}
                 Err(_) => failures += 1,

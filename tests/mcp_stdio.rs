@@ -13,6 +13,8 @@
 //! carries only MCP protocol messages.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::net::UnixStream;
+use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
@@ -29,17 +31,26 @@ const PROTOCOL_VERSION: &str = "2025-11-25";
 /// How long any single interaction may take before the test fails.
 const DEADLINE: Duration = Duration::from_secs(30);
 
-/// A running `service-orchestrator mcp` child spoken to over stdio.
+/// The environment variable that pins the daemon socket for the test.
+const SOCKET_ENV: &str = "SERVICE_ORCHESTRATOR_SOCKET";
+
+/// A running `service-orchestrator mcp` child (and the daemon it talks to)
+/// spoken to over stdio.
 struct Server {
     child: Child,
     stdin: Option<ChildStdin>,
     stdout: Receiver<String>,
     stderr: Arc<Mutex<String>>,
+    daemon: Child,
+    config_path: PathBuf,
+    socket: PathBuf,
+    root: PathBuf,
     next_id: u64,
 }
 
 impl Server {
-    /// Launches the binary against an isolated, generated configuration.
+    /// Launches an isolated daemon and the MCP binary against a generated
+    /// configuration.
     fn launch() -> Self {
         let root = std::env::temp_dir().join(format!(
             "so-mcp-e2e-{}-{}",
@@ -55,15 +66,34 @@ impl Server {
         std::fs::create_dir_all(root.join("backend/orders-api")).expect("create workspace dir");
         std::fs::create_dir_all(root.join("frontend/admin-ui")).expect("create workspace dir");
 
-        let root = root.to_str().expect("the temporary path is valid UTF-8");
-        let config = FIXTURE.replace("~/Projects/demo", root);
-        let config_path = std::path::Path::new(root).join("config.toml");
+        let root_str = root.to_str().expect("the temporary path is valid UTF-8");
+        let config = FIXTURE.replace("~/Projects/demo", root_str);
+        let config_path = root.join("config.toml");
         std::fs::write(&config_path, config).expect("write the fixture configuration");
 
-        let mut child = Command::new(env!("CARGO_BIN_EXE_service-orchestrator"))
+        // Pin the socket so the test never touches a developer's real daemon.
+        let socket = root.join("run/daemon.sock");
+        let exe = env!("CARGO_BIN_EXE_service-orchestrator");
+
+        // The daemon is a real child we own: the MCP client connects to it and
+        // never auto-starts a detached one.
+        let mut daemon = Command::new(exe)
+            .arg("daemon")
+            .arg("--config")
+            .arg(&config_path)
+            .env(SOCKET_ENV, &socket)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the daemon launches");
+        wait_for_socket(&socket, &mut daemon);
+
+        let mut child = Command::new(exe)
             .arg("mcp")
             .arg("--config")
             .arg(&config_path)
+            .env(SOCKET_ENV, &socket)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -99,6 +129,10 @@ impl Server {
             stdin: Some(stdin),
             stdout: lines,
             stderr: stderr_buffer,
+            daemon,
+            config_path,
+            socket,
+            root,
             next_id: 1,
         }
     }
@@ -165,28 +199,85 @@ impl Server {
         }
     }
 
-    /// Closes stdin, waits for a clean exit, and returns stderr and the code.
+    /// Closes stdin, waits for a clean exit, shuts the daemon down explicitly,
+    /// and returns the MCP stderr and exit code.
+    ///
+    /// It also verifies the daemon keeps running after the client exits and that
+    /// an explicit `daemon stop` shuts it down (`tasks/015.md` §29, §30).
     fn shutdown(mut self) -> (String, Option<i32>) {
         drop(self.stdin.take());
-        let deadline = Instant::now() + DEADLINE;
-        loop {
-            match self.child.try_wait().expect("the child is waitable") {
-                Some(status) => {
-                    let stderr = self
-                        .stderr
-                        .lock()
-                        .map(|guard| guard.clone())
-                        .unwrap_or_default();
-                    return (stderr, status.code());
-                }
-                None if Instant::now() < deadline => {
-                    std::thread::sleep(Duration::from_millis(25));
-                }
-                None => {
-                    let _ = self.child.kill();
-                    let _ = self.child.wait();
-                    panic!("the server did not exit after stdin was closed");
-                }
+        let code = wait_for_exit(&mut self.child, "mcp server");
+        let stderr = self
+            .stderr
+            .lock()
+            .map(|guard| guard.clone())
+            .unwrap_or_default();
+
+        assert!(
+            self.daemon
+                .try_wait()
+                .expect("the daemon is waitable")
+                .is_none(),
+            "the daemon keeps running after the MCP client exits"
+        );
+
+        let stop = Command::new(env!("CARGO_BIN_EXE_service-orchestrator"))
+            .arg("daemon")
+            .arg("stop")
+            .arg("--config")
+            .arg(&self.config_path)
+            .env(SOCKET_ENV, &self.socket)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .expect("daemon stop launches");
+        assert!(stop.success(), "daemon stop exits cleanly");
+        let _ = wait_for_exit(&mut self.daemon, "daemon");
+
+        let _ = std::fs::remove_dir_all(&self.root);
+        (stderr, code)
+    }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        // Never leak the daemon if the test panics mid-flow.
+        let _ = self.daemon.kill();
+        let _ = self.daemon.wait();
+    }
+}
+
+/// Waits for `socket` to accept a connection, or fails if `child` exits first.
+fn wait_for_socket(socket: &Path, child: &mut Child) {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        if UnixStream::connect(socket).is_ok() {
+            return;
+        }
+        if let Some(status) = child.try_wait().expect("the daemon is waitable") {
+            panic!("the daemon exited during startup with {status}");
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the daemon did not become reachable in time"
+        );
+        std::thread::sleep(Duration::from_millis(25));
+    }
+}
+
+/// Waits for a child to exit, returning its exit code.
+fn wait_for_exit(child: &mut Child, label: &str) -> Option<i32> {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        match child.try_wait().expect("the child is waitable") {
+            Some(status) => return status.code(),
+            None if Instant::now() < deadline => {
+                std::thread::sleep(Duration::from_millis(25));
+            }
+            None => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("the {label} did not exit in time");
             }
         }
     }

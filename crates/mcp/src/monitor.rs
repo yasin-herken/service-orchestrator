@@ -13,6 +13,9 @@
 //! request open and without reaching past the application core
 //! (`tasks/014.md` §17, §30).
 
+use std::sync::Arc;
+
+use service_orchestrator_client::OrchestratorClient;
 use service_orchestrator_domain::Task;
 use service_orchestrator_execution::TaskEngine;
 
@@ -32,5 +35,32 @@ impl TaskMonitor for TaskEngine {
 
     fn recent_tasks(&self, limit: usize) -> Vec<Task> {
         Self::list_recent_tasks(self, limit)
+    }
+}
+
+/// A [`TaskMonitor`] backed by the shared-runtime client.
+///
+/// The daemon owns the task engine, so an MCP client cannot reach it directly.
+/// This adapter forwards the two read-only list queries over IPC, keeping the
+/// adapter unaware of transport (`tasks/015.md` §13, §19).
+pub struct RemoteTaskMonitor {
+    client: Arc<dyn OrchestratorClient>,
+}
+
+impl RemoteTaskMonitor {
+    /// Builds a monitor over a shared-runtime client.
+    #[must_use]
+    pub fn new(client: Arc<dyn OrchestratorClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl TaskMonitor for RemoteTaskMonitor {
+    fn tasks(&self) -> Vec<Task> {
+        self.client.list_tasks()
+    }
+
+    fn recent_tasks(&self, limit: usize) -> Vec<Task> {
+        self.client.list_recent_tasks(limit)
     }
 }

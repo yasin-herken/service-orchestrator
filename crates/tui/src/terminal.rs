@@ -34,7 +34,8 @@ use ratatui::crossterm::terminal::{
     disable_raw_mode, enable_raw_mode, EnterAlternateScreen, LeaveAlternateScreen,
 };
 use ratatui::Terminal;
-use service_orchestrator_application::{Application, LogStreamError};
+use service_orchestrator_application::LogStreamError;
+use service_orchestrator_client::OrchestratorClient;
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
@@ -59,7 +60,7 @@ const INPUT_POLL: Duration = Duration::from_millis(50);
 ///
 /// Returns [`TuiError`] when the terminal cannot be initialized, read, or drawn.
 pub async fn run(
-    application: Application,
+    application: Arc<dyn OrchestratorClient>,
     observer: Arc<dyn TaskObserver>,
     config_path: impl Into<String>,
 ) -> Result<(), TuiError> {
@@ -101,7 +102,7 @@ pub async fn run(
 async fn event_loop(
     terminal: &mut Terminal<CrosstermBackend<Stdout>>,
     app: &mut App,
-    application: &Application,
+    application: &Arc<dyn OrchestratorClient>,
     events: &mut EventBus,
     log_task: &mut Option<JoinHandle<()>>,
 ) -> Result<(), TuiError> {
@@ -130,7 +131,7 @@ async fn event_loop(
 /// Runs one effect.
 fn dispatch_effect(
     effect: Effect,
-    application: &Application,
+    application: &Arc<dyn OrchestratorClient>,
     sender: &mpsc::UnboundedSender<AppEvent>,
     log_task: &mut Option<JoinHandle<()>>,
     app: &mut App,

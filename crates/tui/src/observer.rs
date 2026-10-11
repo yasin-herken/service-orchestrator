@@ -9,6 +9,9 @@
 //!
 //! [`TaskEngine`]: service_orchestrator_execution::TaskEngine
 
+use std::sync::Arc;
+
+use service_orchestrator_client::OrchestratorClient;
 use service_orchestrator_domain::Task;
 use service_orchestrator_execution::{TaskEngine, TaskEvent};
 use tokio::sync::broadcast;
@@ -43,5 +46,40 @@ impl TaskObserver for TaskEngine {
 
     fn subscribe(&self) -> broadcast::Receiver<TaskEvent> {
         TaskEngine::subscribe(self)
+    }
+}
+
+/// A [`TaskObserver`] backed by the shared-runtime client.
+///
+/// The daemon owns the task engine, so a remote interface observes tasks by
+/// asking the client for the running and recent lists and subscribing to the
+/// overlay events the client republishes (`tasks/015.md` §19, §20).
+pub struct RemoteTaskObserver {
+    client: Arc<dyn OrchestratorClient>,
+}
+
+impl RemoteTaskObserver {
+    /// Builds an observer over a shared-runtime client.
+    #[must_use]
+    pub fn new(client: Arc<dyn OrchestratorClient>) -> Self {
+        Self { client }
+    }
+}
+
+impl TaskObserver for RemoteTaskObserver {
+    fn tasks(&self) -> Vec<Task> {
+        self.client.list_tasks()
+    }
+
+    fn running_tasks(&self) -> Vec<Task> {
+        self.client.list_running_tasks()
+    }
+
+    fn recent_tasks(&self, limit: usize) -> Vec<Task> {
+        self.client.list_recent_tasks(limit)
+    }
+
+    fn subscribe(&self) -> broadcast::Receiver<TaskEvent> {
+        self.client.subscribe_task_events()
     }
 }

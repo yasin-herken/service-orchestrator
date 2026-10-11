@@ -18,6 +18,13 @@ is the same rule the MCP server follows, so both interfaces observe identical
 behavior, policies, and error semantics (`AGENTS.md` §1, §21, §33;
 `docs/adr/001-core-architecture.md`).
 
+In production the TUI is a **client of the shared local daemon**: it connects
+over a Unix domain socket and drives the one application core, task engine, and
+process registry the daemon owns. A second TUI, or the MCP server, sees exactly
+the same state. Launching `tui` connects to a running daemon or starts one, and
+closing the TUI never stops the daemon or the developer's services
+(`docs/local-daemon.md`, `docs/adr/015-shared-local-runtime.md`).
+
 ---
 
 ## 1. Architecture
@@ -32,7 +39,7 @@ crates/tui/src/
 ├── app.rs            the state machine: Action -> state change | application call
 ├── event.rs          AppEvent, Effect, AsyncOutcome
 ├── input.rs          Key / InputEvent and the crossterm translation
-├── observer.rs       the read-only TaskObserver boundary over the task engine
+├── observer.rs       the TaskObserver boundary (engine or shared-runtime client)
 ├── state.rs          UiState (presentation) and Snapshot (application cache)
 ├── router.rs         composes the whole frame
 ├── theme.rs          the colour system
@@ -51,7 +58,7 @@ key / task event / async result / tick
         ▼
     App::handle_event            (state machine)
         │            │
-        │            └── Effect ──► terminal event loop ──► Application query
+        │            └── Effect ──► terminal event loop ──► OrchestratorClient call
         ▼
    UiState change
         │
@@ -60,8 +67,10 @@ key / task event / async result / tick
 ```
 
 - **`App`** is the only place where an `Action` becomes either a change of
-  interface state or an application-core call. It is pure enough to drive from
-  a test without a terminal.
+  interface state or an application-core call. It holds an
+  `Arc<dyn OrchestratorClient>` — the shared client boundary — and is pure enough
+  to drive from a test without a terminal. In tests the client is a real
+  `Application`; in production it is a daemon-backed `RemoteClient`.
 - **`Effect`** values are *descriptions* of asynchronous queries (Git status,
   branch listing, artifact inspection, realtime log streaming). The state
   machine emits them; only `terminal.rs` runs them.
@@ -243,6 +252,14 @@ The interface holds no operation logic of its own. It maps a key to an `Action`,
 and `App` maps the `Action` to a use case, presenting the structured
 `OperationResult` or `ApplicationError`.
 
+Every call in the table is a method on `OrchestratorClient`. In production that
+means the request travels to the daemon, which executes it against the shared
+core; the TUI's snapshot is a refreshable cache and never a competing source of
+truth. Because the daemon owns the task engine, an operation the developer starts
+here is immediately visible to any other connected interface, and an operation
+another interface started is visible and controllable here
+(`docs/local-daemon.md`).
+
 ### Git safety
 
 Fetch, pull, sync, and checkout are safe writes. Hard reset, clean, and discard
@@ -295,6 +312,28 @@ history — including id, kind, service, status, progress, duration, and the las
 message. The logs screen pages historical entries and follows realtime ones,
 with a severity filter, a text filter, follow/pause, and a bounded buffer. The
 interface never keeps a task registry of its own.
+
+### The shared-runtime connection
+
+In production the events above do not come from a local engine: they arrive over
+the daemon connection. The `RemoteClient` republishes the daemon's task-event
+and log-event streams, and the `RemoteTaskObserver` answers the task lists over
+IPC, so the event loop is unchanged from the in-process case
+(`docs/local-daemon.md`).
+
+- **Reconnection is transparent.** If the daemon connection drops, the client
+  reconnects and re-establishes its event subscriptions; the interface keeps its
+  last snapshot and refreshes on the next tick. The developer does not have to
+  restart the TUI.
+- **An unavailable daemon is a structured error, not a crash.** A request that
+  cannot reach the daemon fails with `DAEMON_UNAVAILABLE`, which the interface
+  renders through the same error path as any other application error (§7):
+  foreground operations open an actionable dialog, background queries surface a
+  footer toast. There is no panic and no hung renderer.
+- **Shutdown is explicit.** Quitting the TUI never stops the daemon; the
+  processes and tasks the developer started keep running and remain visible to
+  any other interface. Stopping the runtime is a deliberate
+  `service-orchestrator daemon stop`.
 
 ---
 
@@ -350,3 +389,8 @@ See `docs/adr/013-ratatui-tui.md` for the design rationale.
 - Bulk `build` and `health check` run per service rather than as one workflow,
   because the application exposes no combined use case; their summary is
   reported as scheduled/failed counts.
+- The TUI consumes the daemon connection but shows no **dedicated persistent
+  connection indicator**. A dropped or unavailable daemon surfaces through the
+  normal error dialogs and footer toasts (§6, §7) rather than a status badge, so
+  a developer notices an outage when they next act. A future task may add an
+  explicit health/connection indicator to the status line.
