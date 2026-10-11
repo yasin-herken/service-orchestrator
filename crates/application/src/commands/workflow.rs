@@ -10,8 +10,8 @@ use std::collections::BTreeMap;
 
 use service_orchestrator_config::ConfiguredWorkspace;
 use service_orchestrator_domain::{
-    CommandKind, DependencyTarget, GroupId, Permission, ProcessState, ProfileId, ServiceCapability,
-    ServiceId, StepId, TaskKind, WorkflowKind, WorkspaceId,
+    BuildOperation, CommandKind, DependencyTarget, GroupId, Permission, ProcessState, ProfileId,
+    ServiceCapability, ServiceId, StepId, TaskKind, WorkflowKind, WorkspaceId,
 };
 
 use crate::app::Application;
@@ -74,19 +74,25 @@ impl Application {
         let mut library_steps: Vec<StepId> = Vec::new();
         for library in &workspace.workspace.libraries {
             if library.commands.contains(&CommandKind::Build) {
-                library_steps.push(builder.add(
+                let target =
+                    self.library_build_target(workspace, library, BuildOperation::Build)?;
+                library_steps.push(builder.add_with_parameters(
                     TaskKind::BuildLibrary,
                     Vec::new(),
                     Some(format!("build {}", library.id)),
+                    target.to_parameters(),
                 ));
             }
         }
         for service in &workspace.workspace.services {
             if service.supports(ServiceCapability::Build) && service.has_build_command() {
-                builder.add(
+                let target =
+                    self.service_build_target(workspace, service, BuildOperation::Build)?;
+                builder.add_with_parameters(
                     TaskKind::BuildService,
                     library_steps.clone(),
                     Some(format!("build {}", service.id)),
+                    target.to_parameters(),
                 );
             }
         }
@@ -180,10 +186,13 @@ impl Application {
         if request.build {
             for library in &workspace.workspace.libraries {
                 if library.commands.contains(&CommandKind::Build) {
-                    library_steps.push(builder.add(
+                    let target =
+                        self.library_build_target(workspace, library, BuildOperation::Build)?;
+                    library_steps.push(builder.add_with_parameters(
                         TaskKind::BuildLibrary,
                         Vec::new(),
                         Some(format!("build {}", library.id)),
+                        target.to_parameters(),
                     ));
                 }
             }
@@ -198,10 +207,13 @@ impl Application {
                     .service(id)
                     .expect("selected services are validated to exist");
                 if service.has_build_command() {
-                    let step = builder.add(
+                    let target =
+                        self.service_build_target(workspace, service, BuildOperation::Build)?;
+                    let step = builder.add_with_parameters(
                         TaskKind::BuildService,
                         library_steps.clone(),
                         Some(format!("build {id}")),
+                        target.to_parameters(),
                     );
                     build_steps.insert(id.clone(), step);
                 }

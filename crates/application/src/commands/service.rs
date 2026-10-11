@@ -1,7 +1,7 @@
 //! Service commands.
 
 use service_orchestrator_domain::{
-    CommandKind, Permission, ProcessState, ServiceCapability, ServiceId, TaskKind,
+    BuildOperation, CommandKind, Permission, ProcessState, ServiceCapability, ServiceId, TaskKind,
 };
 use service_orchestrator_execution::TaskDefinition;
 
@@ -61,14 +61,11 @@ impl Application {
                 "service '{service_id}' has no build command configured"
             )));
         }
-        if service.path.is_none() {
-            return Err(ApplicationError::invalid_operation(format!(
-                "service '{service_id}' has no workspace path configured"
-            )));
-        }
+        let target = self.service_build_target(workspace, service, BuildOperation::Build)?;
         self.schedule(
             TaskDefinition::new(TaskKind::BuildService)
                 .for_service(service_id.clone())
+                .with_parameters(target.to_parameters())
                 .with_timeout(self.default_timeout_seconds()),
         )
     }

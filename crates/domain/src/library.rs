@@ -12,6 +12,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::build::BuildSystem;
 use crate::command::CommandSet;
 use crate::dependency::{Dependency, DependencyTarget};
 use crate::environment::Environment;
@@ -91,6 +92,14 @@ pub struct Library {
     pub runtimes: Vec<Runtime>,
     /// The configured commands for the library.
     pub commands: CommandSet,
+    /// The build system used to build the library, if known.
+    ///
+    /// Selection is configuration-driven; when omitted, configuration
+    /// normalization infers it from the library's runtimes and commands. The
+    /// domain only names the system: how a build runs belongs to the build
+    /// adapter.
+    #[serde(default)]
+    pub build_system: Option<BuildSystem>,
     /// The library's dependencies. These must target other libraries.
     pub dependencies: Vec<Dependency>,
     /// The environment variables passed to the library's commands.
@@ -119,6 +128,7 @@ impl Library {
             artifact: None,
             runtimes: Vec::new(),
             commands: CommandSet::new(),
+            build_system: None,
             dependencies: Vec::new(),
             environment: Environment::new(),
         })
@@ -156,6 +166,13 @@ impl Library {
     #[must_use]
     pub fn with_commands(mut self, commands: CommandSet) -> Self {
         self.commands = commands;
+        self
+    }
+
+    /// Sets the build system.
+    #[must_use]
+    pub fn with_build_system(mut self, build_system: BuildSystem) -> Self {
+        self.build_system = Some(build_system);
         self
     }
 

@@ -22,6 +22,9 @@
 //! - **Configuration vocabulary**: [`Workspace`], [`Service`], [`Library`],
 //!   [`Repository`], [`Runtime`], [`CommandSet`], [`Profile`], [`ServiceGroup`],
 //!   [`Dependency`], and [`HealthCheck`].
+//! - **Build vocabulary**: [`BuildSystem`] and [`BuildOperation`], the
+//!   build-system-neutral names shared by configuration, the application, and
+//!   the build adapter.
 //! - **Runtime vocabulary**: [`Task`], [`TaskStatus`], [`Workflow`],
 //!   [`ProcessState`], [`GitState`], and [`Permission`].
 //! - **Errors**: the small, typed [`DomainError`].
@@ -38,6 +41,7 @@
 
 mod graph;
 
+pub mod build;
 pub mod command;
 pub mod dependency;
 pub mod environment;
@@ -60,6 +64,7 @@ pub mod timestamp;
 pub mod workflow;
 pub mod workspace;
 
+pub use build::{BuildOperation, BuildSystem};
 pub use command::{CommandEntry, CommandKind, CommandSet, CommandSpec};
 pub use dependency::{Dependency, DependencyKind, DependencyTarget};
 pub use environment::{Environment, EnvironmentVariable, REDACTED};

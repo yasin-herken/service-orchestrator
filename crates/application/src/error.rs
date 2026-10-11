@@ -112,6 +112,15 @@ pub enum ApplicationError {
         /// A human-readable summary.
         message: String,
     },
+
+    /// A build operation failed with a structured error.
+    #[error("build error ({code}): {message}")]
+    Build {
+        /// A stable, machine-readable code such as `BUILD_PATH_OUTSIDE_WORKSPACE`.
+        code: String,
+        /// A human-readable summary.
+        message: String,
+    },
 }
 
 impl ApplicationError {
