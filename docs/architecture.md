@@ -12,7 +12,10 @@ It exposes the same capabilities through two interfaces:
 - a Ratatui terminal UI for human developers, and
 - an MCP server for AI agents.
 
-Both interfaces are adapters over one shared application core.
+Both interfaces are adapters over one shared application core. That core runs
+inside a single local **daemon**; the TUI and MCP are clients of it over a Unix
+domain socket, so they share one task engine, one process registry, and one log
+store (`docs/local-daemon.md`, `docs/adr/015-shared-local-runtime.md`).
 
 ---
 
@@ -57,9 +60,13 @@ From innermost to outermost:
    validated `Config` produced by the configuration system.
 4. **Infrastructure** — concrete adapters: Git, process management, build
    tooling, Liquibase, health checks, logging, and configuration loading.
-5. **Interfaces** — TUI and MCP adapters.
-6. **Composition root** — the `service-orchestrator` binary. It wires concrete
-   infrastructure into the application core and hands the core to an interface.
+5. **Client / local runtime** — the `client` crate (the `OrchestratorClient`
+   boundary and its IPC transport) and the `daemon` crate (the local IPC server
+   that owns the application core). Neither contains business logic.
+6. **Interfaces** — TUI and MCP adapters, both clients of the daemon.
+7. **Composition root** — the `service-orchestrator` binary. It wires concrete
+   infrastructure into the application core, hands the core to the daemon for the
+   `daemon` subcommand, and hands a client to an interface for `tui`/`mcp`.
 
 ### Architecture diagram
 
@@ -72,10 +79,16 @@ From innermost to outermost:
                         +-------+-------+      +-------+-------+
                                 |                      |
                                 +----------+-----------+
-                                           |
+                                           |  OrchestratorClient
                                            v
+                        +-------------------------------+
+   Client / runtime     |    local daemon (IPC)         |
+                        |  routes requests + fans events|
+                        +---------------+---------------+
+                                        |  application use cases
+                                        v
                         +-------------------------------+       future:
-   Application          |          application          |<----- cli, api
+   Application          |          application          |<----- cli, gui
    (use cases + ports)  |  use cases / orchestration    |
                         +---+-----------+-----------+---+
                             |           |           |
@@ -111,7 +124,9 @@ From innermost to outermost:
 ```
 
 The important property of this diagram is that arrows point *inward* toward the
-domain. Nothing inner knows about anything outer.
+domain. Nothing inner knows about anything outer. The daemon sits between the
+interfaces and the application: it owns the application core and exposes it to
+clients over IPC, but it adds no business logic of its own.
 
 ---
 
@@ -131,9 +146,11 @@ domain. Nothing inner knows about anything outer.
 | `liquibase` | Infrastructure | Migration adapter. A provider-based Migration Manager selects a `MigrationProvider` (Liquibase) that emits a structured `MigrationPlan`, which is run in the process manager. Applies the database-target environment safety policy and serializes migrations against the same configured database. |
 | `health` | Infrastructure | Health adapter. A `HealthManager` selects a `HealthChecker` (process, TCP, HTTP/actuator) through a small registry, runs each configured probe under its own timeout, aggregates the outcomes deterministically, records bounded history and events, mirrors the aggregate into the runtime state store, and implements the read-only `HealthIndex` port. A `HealthMonitor` optionally polls watched services. |
 | `logging` | Infrastructure | Observability adapter. A `LogHub` unifies managed-process output, task-engine events, and application messages into one structured, bounded, filterable store, answers stable cursor queries, and streams realtime entries to multiple backpressure-tolerant subscribers. Thin ingestors correlate existing event sources; messages are redacted before storage. Implements the `LogService`/`LogSubscription` ports. |
-| `mcp` | Interface | MCP stdio adapter over the application core, built on the official `rmcp` SDK: strict tool schemas and structured envelopes, read-only resources, workflow prompts, and standard-authorization policy enforcement. |
-| `tui` | Interface | Ratatui adapter over the application core. |
-| `service-orchestrator` (root) | Composition root | Wires infrastructure into the core and dispatches to an interface. |
+| `client` | Client / runtime | The shared `OrchestratorClient` boundary every interface talks to, the versioned length-prefixed JSON IPC protocol, socket-path resolution, daemon auto-start and readiness waiting, and `RemoteClient` — the daemon-backed client. Also implements the trait for `Application` so in-process tests need no daemon. |
+| `daemon` | Client / runtime | The local shared runtime: binds the Unix domain socket, validates protocol versions, routes each request to the shared `Application`, fans task/log events out to clients over bounded channels, and manages single-instance locking and graceful shutdown. Contains no business logic. |
+| `mcp` | Interface | MCP stdio adapter over the shared runtime client: strict tool schemas and structured envelopes, read-only resources, workflow prompts, and standard-authorization policy enforcement. |
+| `tui` | Interface | Ratatui adapter over the shared runtime client. |
+| `service-orchestrator` (root) | Composition root | Wires infrastructure into the core, runs the daemon for `daemon`, and hands a client to an interface for `tui`/`mcp`. |
 
 ---
 
@@ -143,11 +160,12 @@ The intended direction, expressed as allowed Cargo dependencies:
 
 ```text
 tui  ─────────┐
-              │
-mcp  ─────────┼──> application ──> execution ──> domain
-              │            │    ├──> policy  ──> domain
-future cli ───┘            │    └──> config  ──> domain
-                           └──> domain
+              │   (client)          application ──> execution ──> domain
+mcp  ─────────┼──> client ──> ...            │    ├──> policy  ──> domain
+              │                              │    └──> config  ──> domain
+future cli ───┘                              └──> domain
+
+daemon ──> client + application + execution + domain   (local runtime host)
 
 git, process, build, liquibase, health, logging
     ────────────────────────> application + domain   (implement ports)
@@ -182,18 +200,24 @@ service-orchestrator (root) ──> everything         (composition root)
   Maven-resolution and host seam, and the `health` adapter reads the validated
   `config` to resolve a service's checks. No other infrastructure crate may take
   such an edge without an ADR.
-- `tui` and `mcp` depend only on `application`.
+- `tui` and `mcp` depend only on `client` (which re-exports the shared boundary),
+  plus the `domain` and `execution` event/value types. They never depend on the
+  daemon, the transport, or any infrastructure crate.
+- `daemon` depends on `client` (for the wire protocol, framing, and socket
+  helpers), `application` (the core it hosts), `execution` (the task engine it
+  fans events from), and `domain`; it never depends on `tui` or `mcp`.
 - The root binary is the only crate allowed to depend on both infrastructure
-  and interfaces; it is the composition root.
+  and interfaces/the daemon; it is the composition root.
 
 ### Forbidden edges
 
 ```text
-domain      -> tui / mcp / any infrastructure
-application -> ratatui / mcp / concrete infrastructure
-tui         -> infrastructure (git, process, build, ...)
-mcp         -> infrastructure (git, process, build, ...)
-git         -> tui / mcp
+domain      -> tui / mcp / client / daemon / any infrastructure
+application -> ratatui / mcp / client / daemon / concrete infrastructure
+tui         -> infrastructure / daemon (git, process, build, ...)
+mcp         -> infrastructure / daemon (git, process, build, ...)
+daemon      -> tui / mcp
+git         -> tui / mcp / daemon
 ```
 
 These edges are not merely documentation: because every dependency is an
@@ -217,6 +241,12 @@ Instead:
 - The MCP server validates tool input, applies policy, and forwards calls to
   application use cases. It contains no business logic and never shells out
   directly.
+
+Both speak to the application core through the same `OrchestratorClient` boundary
+and, in production, through the same local daemon. The TUI and MCP are therefore
+not only logically but *operationally* identical: they observe one shared task
+engine, process registry, and log store, so a change made through one is
+immediately visible to the other (`docs/local-daemon.md`).
 
 Both therefore see identical behavior, identical policies, and identical error
 semantics. This is also why the permission model lives in `policy` and is applied
@@ -679,7 +709,68 @@ are in `docs/observability.md`.
 
 ---
 
-## 18. Enforcement and validation
+## 18. Where the shared local runtime belongs
+
+Three interfaces over three private application cores cannot share one developer
+environment. The **shared local runtime** gives them one owner of mutable state:
+a local **daemon** that hosts the application core, with the TUI and MCP as
+clients over a Unix domain socket (`docs/local-daemon.md`,
+`docs/adr/015-shared-local-runtime.md`).
+
+- **A single binary, three subcommands.** `service-orchestrator daemon` runs the
+  runtime in the foreground; `tui` and `mcp` connect to it. There is no separate
+  daemon executable and no external backend.
+- **One owner of mutable state.** The daemon owns the task engine, the process
+  registry, per-service runtime state, health, log subscriptions, and the
+  validated configuration snapshot (read-only to clients). Clients hold only
+  refreshable caches, so a task submitted by MCP is immediately visible in the
+  TUI and a service started from the TUI is manageable from MCP.
+- **The `client` crate is the boundary.** `OrchestratorClient` mirrors the
+  application's use cases one-to-one; `Application` implements it in-process (so
+  interface tests run on the real core with no daemon) and `RemoteClient`
+  implements it as the socket proxy. `client` also owns the versioned protocol,
+  socket-path resolution, auto-start, and readiness waiting.
+- **The `daemon` crate is a router, not a business layer.** It validates the
+  protocol version, decodes each request's parameters, calls the shared
+  `Application`, and encodes the structured result. It contains no business
+  logic, so an operation behaves identically in-process and over IPC. Requests
+  are routed to explicit, versioned operations — the daemon does not proxy the
+  application's Rust port surface generically.
+- **IPC, not a shell.** The transport is a Unix domain socket carrying
+  length-prefixed JSON frames capped at 8 MiB. There is no arbitrary command
+  execution and no public TCP port. The protocol is versioned; an incompatible
+  request is refused with an actionable `PROTOCOL_INCOMPATIBLE` error rather than
+  silently misinterpreted.
+- **Automatic startup and one instance.** `tui`/`mcp` connect to a running
+  daemon or start one, wait for readiness, and connect. Single-instance
+  coordination uses an advisory `flock` on a lock file beside the socket, so two
+  clients racing to start a daemon still produce exactly one authoritative
+  engine; a stale socket file is removed safely once the lock is held.
+- **Events and reconnection.** The daemon fans task and log events out to
+  clients over bounded, per-connection channels, so a slow client never blocks
+  the daemon. A client reconnects transparently only when a request was never
+  written; a request written but unanswered is never retried, because the
+  mutation may have been applied.
+- **Authorization is unchanged and centralized.** A request carries an
+  `allow_destructive` intent and the caller's `ClientKind`; the daemon honors the
+  intent only for an interactive (`tui`) peer and always runs the shared policy
+  engine. A non-interactive client can never self-confirm, and no client-supplied
+  boolean is sufficient.
+- **Shutdown is explicit.** Client exit never stops the daemon or the developer's
+  services; `service-orchestrator daemon stop` requests a graceful shutdown, and
+  `daemon status` reports the runtime without starting one.
+- **Process ownership.** The daemon owns managed service processes; a fresh
+  daemon adopts nothing and never signals a process by PID or port, so a reused
+  PID cannot harm an unrelated process. Managed-process recovery after a crash is
+  deliberately deferred and documented as a limitation.
+
+The full lifecycle, protocol, security, and limitations are in
+`docs/local-daemon.md`; the decision and its trade-offs are in
+`docs/adr/015-shared-local-runtime.md`.
+
+---
+
+## 19. Enforcement and validation
 
 - Dependencies are declared exclusively through `[workspace.dependencies]` so
   boundaries are visible in one place.
@@ -698,7 +789,7 @@ are in `docs/observability.md`.
 
 ---
 
-## 19. Domain model
+## 20. Domain model
 
 The domain layer defines the vocabulary every other layer speaks. It lives in
 the `service-orchestrator-domain` crate and depends on no other workspace crate
@@ -737,7 +828,7 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 20. The application core
+## 21. The application core
 
 The `application` crate is the shared application core (`docs/application-core.md`).
 It is the one API the TUI, MCP, and any future interface call, so business
@@ -779,7 +870,7 @@ behavior lives in exactly one place.
   Bulk commands submit one independent workflow step per repository;
   `summarize_workflow` aggregates the per-repository outcomes.
 
-## 21. The Ratatui TUI adapter
+## 22. The Ratatui TUI adapter
 
 The `tui` crate is the human-facing interface (`docs/tui.md`,
 `docs/adr/013-ratatui-tui.md`). It is launched as `service-orchestrator tui`
@@ -788,9 +879,15 @@ The `tui` crate is the human-facing interface (`docs/tui.md`,
 - **Adapter, not an implementation.** It reads application state, renders it,
   and turns keyboard input into application use cases. It never runs Git, Maven,
   npm, Liquibase, or an operating-system process, and it never duplicates
-  application logic. The crate depends on `application` (and the domain and the
-  execution event types) but not on any infrastructure crate, so the boundary is
-  enforced by the dependency graph rather than by convention.
+  application logic. The crate depends on the `client` boundary (plus the domain
+  and execution event types) but not on the daemon, the transport, or any
+  infrastructure crate, so the boundary is enforced by the dependency graph
+  rather than by convention.
+- **A client of the shared runtime.** In production the TUI holds an
+  `Arc<dyn OrchestratorClient>` backed by `RemoteClient`, so every action it
+  performs is a request to the one daemon (`docs/local-daemon.md`). Its caches are
+  refreshable and never authoritative. The same code runs against an in-process
+  `Application` in tests.
 - **State machine.** `App` turns an `Action` into either a change of interface
   state or an application-core call. It owns `UiState` (presentation: screen,
   cursor, typed selection, dialogs, search, scroll) and a read-only `Snapshot`
@@ -816,7 +913,7 @@ The `tui` crate is the human-facing interface (`docs/tui.md`,
   normal exit, error, Ctrl+C, and panic; terminals below 60×14 render an
   informative minimum-size notice instead of a broken layout.
 
-## 22. The MCP adapter
+## 23. The MCP adapter
 
 The `mcp` crate is the agent-facing interface (`docs/mcp.md`,
 `docs/adr/014-mcp-integration.md`). It is launched as `service-orchestrator mcp`
@@ -826,17 +923,24 @@ SDK `rmcp` 3.5.1.
 - **Adapter, not an implementation.** It validates tool input, applies policy,
   and forwards calls to application use cases. It never runs Git, Maven, npm,
   Liquibase, or an operating-system process, and it never duplicates application
-  logic. The crate depends on `application` (and the domain and execution event
-  types) but not on any infrastructure crate, so the boundary is enforced by the
-  dependency graph.
+  logic. The crate depends on the `client` boundary (plus the domain and execution
+  event types) but not on the daemon, the transport, or any infrastructure crate,
+  so the boundary is enforced by the dependency graph. The raw IPC protocol is
+  never exposed to an agent.
+- **A client of the shared runtime.** In production MCP holds an
+  `Arc<dyn OrchestratorClient>` backed by `RemoteClient`; `serve_stdio` receives
+  the client and never learns it is talking to a daemon. This is what makes an MCP
+  session share state with the TUI: a task submitted by an agent is visible in the
+  TUI and vice versa (`docs/local-daemon.md`).
 - **stdout is protocol-only.** Every diagnostic the adapter emits goes to stderr
   as a single-line JSON record (lifecycle events and one record per tool
   invocation, carrying the tool name, outcome, duration, and error code — never
   an argument value). A stray `println!` would corrupt the transport.
-- **Shared core.** `bootstrap()` in the composition root builds one application
-  core, one task engine, and one runtime state store, and hands the same core to
-  the TUI or to MCP. `Application::new` defaults to standard authorization, so
-  both interfaces observe identical behavior, policies, and errors.
+- **One shared core, now one shared runtime.** The composition root builds one
+  application core and one task engine and hands them to the daemon; the TUI and
+  MCP connect to that daemon as clients. `Application::new` defaults to standard
+  authorization, and the daemon enforces it for every request, so both interfaces
+  observe identical behavior, policies, and errors.
 - **Tools.** Each tool is a thin, named projection of exactly one application use
   case, with a strict typed input schema derived from a `params.rs` struct
   (`deny_unknown_fields`, so an unmodelled option is rejected). Tools are
@@ -848,20 +952,24 @@ SDK `rmcp` 3.5.1.
   shape) is a JSON-RPC protocol error; a valid request that the application
   refuses or that fails — including a policy denial — is a tool result with
   `isError: true` and a structured, coded error.
-- **Policy.** The server always runs with standard authorization. A destructive
-  tool (for example `git_reset_hard`) is denied with `CONFIRMATION_REQUIRED`;
-  there is no `confirmed` flag for an agent to self-authorize, so a human must
-  approve destructive work interactively.
+- **Policy.** The adapter presents itself to the daemon as a non-interactive
+  (`mcp`) client and never requests destructive authorization. A destructive tool
+  (for example `git_reset_hard`) is denied by the shared policy engine with
+  `CONFIRMATION_REQUIRED` — the daemon ignores an `allow_destructive` intent from
+  a non-interactive peer. There is no `confirmed` flag for an agent to
+  self-authorize, so a human must approve destructive work interactively.
 - **Long-running work.** Every mutation returns the task or workflow identifier
   the application core produced. `get_task` / `task://{taskId}` expose status,
   progress, and structured failure; a bounded `TaskMonitor` boundary is the only
-  extra surface the adapter needs. State is per-process.
+  extra surface the adapter needs. The task itself lives in the daemon's single
+  engine, so it is shared with every other interface rather than being
+  per-process.
 - **Resources and prompts.** Read-only resources (`workspace://`, `service://`,
   `task://`) are backed by existing application queries, with templates so the
   list stays bounded. Prompts are guidance only and reference only tools that
   exist.
 
-## 23. Related documents
+## 24. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -890,8 +998,15 @@ SDK `rmcp` 3.5.1.
 - `docs/adr/014-mcp-integration.md` — the decision record for the MCP server: the
   `rmcp` SDK choice, the thin adapter, structured envelopes, policy enforcement,
   resources and prompts, and the documented gaps.
+- `docs/adr/015-shared-local-runtime.md` — the decision record for the shared
+  local runtime: why a local daemon, why Unix domain sockets, the preserved
+  single-binary model, shared state, process ownership, authorization, and the
+  trade-offs.
 - `docs/application-core.md` — use cases, ports, request/response models, and
   the runtime-state approach.
+- `docs/local-daemon.md` — the shared local runtime: architecture, IPC protocol,
+  daemon lifecycle, client connection and auto-start, process ownership, task
+  state, event streaming, reconnection, security, shutdown, and limitations.
 - `docs/task-engine.md` — the task/workflow engine: state machine, scheduler,
   dependencies, concurrency, cancellation, retry, timeout, events, shutdown.
 - `docs/process-manager.md` — the process manager: specification, lifecycle,

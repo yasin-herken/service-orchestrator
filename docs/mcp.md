@@ -7,12 +7,14 @@ the Model Context Protocol:
 service-orchestrator mcp
 ```
 
-`mcp` is an **interface adapter**, not a second implementation. It reads the same
-application core the Ratatui TUI uses, so an agent and a human driving the TUI
-see identical behavior, identical policies, and identical error semantics
-(`AGENTS.md` §1, §21; `docs/adr/001-core-architecture.md`). It is entirely
-optional: the TUI remains fully functional with no LLM and no MCP client
-(`AGENTS.md` §2).
+`mcp` is an **interface adapter**, not a second implementation. It reaches the
+same application core the Ratatui TUI reaches — in production both are clients
+of one shared local daemon — so an agent and a human driving the TUI see
+identical behavior, identical policies, and identical error semantics, and an
+operation either starts is immediately visible to the other (`AGENTS.md` §1,
+§21; `docs/adr/001-core-architecture.md`, `docs/local-daemon.md`). It is
+entirely optional: the TUI remains fully functional with no LLM and no MCP
+client (`AGENTS.md` §2).
 
 ---
 
@@ -25,7 +27,10 @@ MCP:
 MCP client (Claude, an IDE, an agent framework, ...)
         │  stdin / stdout
         ▼
-service-orchestrator mcp ──► Application use case ──► policy ──► task engine
+service-orchestrator mcp ──► OrchestratorClient ──► (IPC) ──► daemon
+                                                              ──► application
+                                                              ──► policy
+                                                              ──► task engine
 ```
 
 - The client launches the process and speaks newline-delimited JSON-RPC over its
@@ -33,8 +38,14 @@ service-orchestrator mcp ──► Application use case ──► policy ──�
 - **stdout carries protocol messages only.** Every diagnostic the adapter emits
   goes to **stderr** as a single-line JSON record (§7). A stray `println!` would
   corrupt the stream, so none exists (`tasks/014.md` §6).
-- There is no HTTP server, no daemon, and no custom JSON-RPC layer; the protocol
-  is implemented by the official Rust SDK.
+- There is no HTTP server and no custom JSON-RPC layer; the protocol is
+  implemented by the official Rust SDK.
+- The adapter is a **client of the shared local daemon** over a Unix domain
+  socket. Starting `mcp` connects to a running daemon or starts one if needed;
+  because the daemon owns the one task engine and process registry, a task an
+  agent starts here is visible and controllable from the TUI (and vice versa).
+  Closing the MCP session never stops the daemon
+  (`docs/local-daemon.md`, `docs/adr/015-shared-local-runtime.md`).
 
 ### Launching it
 
@@ -46,11 +57,14 @@ service-orchestrator mcp --config=/path/to/config.toml
 
 Configuration resolution is the same as the TUI: the command line wins, then the
 `SERVICE_ORCHESTRATOR_CONFIG` environment variable, then
-`~/.service-orchestrator/config.toml`. Both interfaces share one composition
-root (`src/main.rs`): `bootstrap()` loads and validates configuration, builds the
-infrastructure adapters, registers their task executors, builds the task engine,
-spawns the log ingestors, and wires the application core. `run_tui` and `run_mcp`
-differ only in which adapter they hand that core to.
+`~/.service-orchestrator/config.toml`. The binary has one composition root
+(`src/main.rs`). The **daemon** owns the wired core: `bootstrap()` loads and
+validates configuration, builds the infrastructure adapters, registers their task
+executors, builds the task engine, spawns the log ingestors, and wires the
+application core. The `tui` and `mcp` commands do not build a core of their own;
+they resolve the same config path, derive the socket location from it, connect a
+`RemoteClient` to the daemon (starting one if necessary), and hand that client to
+their adapter (`tasks/015.md` §4, §5).
 
 A typical client registration is a stdio server whose command is the binary with
 the `mcp` subcommand:
@@ -88,9 +102,12 @@ schemars = "1.0"
 
 The `service-orchestrator-mcp` crate is a leaf: it depends only on `rmcp`,
 `schemars`, `serde`/`serde_json`, `thiserror`, `tokio`, and the `application`,
-`domain`, and `execution` crates. It never depends on an infrastructure crate
-(`git`, `build`, `process`, `liquibase`, `health`, `logging`), so the adapter
-boundary is enforced by the manifest rather than by convention.
+`client`, `domain`, and `execution` crates. It never depends on an
+infrastructure crate (`git`, `build`, `process`, `liquibase`, `health`,
+`logging`), so the adapter boundary is enforced by the manifest rather than by
+convention. It reaches the core through the `client` boundary, so it does not
+know whether that core is local or behind the daemon socket
+(`tasks/015.md` §13, §21).
 
 ---
 
@@ -319,15 +336,19 @@ application capabilities that already exist (`AGENTS.md` §26).
 MCP input is untrusted and is treated as such. The adapter cannot bypass any
 safety rule the application enforces (`AGENTS.md` §14, §29, §30, §31):
 
-- **The policy engine is the authority.** `Application::new` wires the
-  `PolicyEngine` with standard `Authorization`. The MCP server always runs with
-  `Authorization::standard`, so it can read and stage but cannot perform a
-  destructive operation.
+- **The policy engine is the authority.** The daemon wires the `PolicyEngine`
+  and runs it for every request. The MCP client is a **non-interactive** peer,
+  so the daemon never grants it destructive authorization: MCP can read and stage
+  but cannot perform a destructive operation. A caller-supplied confirmation is
+  not part of the protocol and would be ignored — only an interactive TUI peer
+  can carry the `allow_destructive` flag, and even then the policy engine still
+  decides.
 - **A destructive tool is denied, not confirmed.** `git_reset_hard`, `git_clean`,
   and `git_discard_changes` return a structured `CONFIRMATION_REQUIRED` error.
   There is **no `confirmed` flag** for an agent to set: accepting a
   caller-supplied `confirmed: true` would let an agent self-authorize, which the
-  policy model forbids. A human must approve destructive work interactively.
+  policy model forbids. A human must approve destructive work interactively
+  (`tasks/015.md` §23).
 - **Every input is validated.** Identifiers are parsed into strongly typed domain
   values; a value with an illegal character is a structured `INVALID_ARGUMENT`,
   and an unmodelled option is rejected by `deny_unknown_fields`.
@@ -392,13 +413,20 @@ The task view is `camelCase` and reports `status`, `progress.current`/`total`/
 `fraction`/`message`, `durationMs`, and a structured `error { code, message,
 detail }`.
 
-### State is per-process
+### State is shared through the daemon
 
-The task engine and runtime state live **in the process**. A client that starts
-`service-orchestrator mcp` and an agent that later starts another `mcp` instance
-see two independent engines: a task id created in one is not visible in the
-other. Run a single long-lived MCP session for a workspace. (This mirrors the
-TUI, which also observes only its own process's state.)
+The task engine and runtime state live in the **daemon**, not in the MCP
+process. Every `mcp` and `tui` client connects to the same daemon over a Unix
+domain socket, so a task id created through one session is visible and
+controllable through another, and through the TUI
+(`docs/local-daemon.md`, `docs/adr/015-shared-local-runtime.md`). Starting a
+second MCP session does not create a second engine; if it cannot reach the
+daemon it fails with a structured `DAEMON_UNAVAILABLE`, never a silent private
+engine.
+
+The daemon owns the state for its own lifetime. It is shut down explicitly with
+`service-orchestrator daemon stop`; closing an MCP client disconnects only that
+client and leaves the daemon and the developer's services running.
 
 ### `migration_status` vs `get_migration_status`
 
@@ -455,14 +483,16 @@ resulting task.
   cancellation, resource templates and reads, prompt rendering and required
   arguments, the envelope shape, and **secret redaction**.
 - **End-to-end stdio test** (`tests/mcp_stdio.rs`) launches the **real binary**
-  as a child process and speaks newline-delimited JSON-RPC over its stdin/stdout
-  against an isolated, generated configuration. It performs the `initialize`
-  handshake, capability discovery, `tools/list`, `resources/templates/list`,
-  `prompts/list`, a read-only call, a mutating call that returns a real task id,
-  a task query, a structured application error, a protocol error for a malformed
-  request, a `CONFIRMATION_REQUIRED` denial, and a clean shutdown — asserting
-  that **every line on stdout is valid JSON** and that the startup record is on
-  stderr.
+  as a child process against an isolated daemon it also owns, and speaks
+  newline-delimited JSON-RPC over the client's stdin/stdout against an isolated,
+  generated configuration. It performs the `initialize` handshake, capability
+  discovery, `tools/list`, `resources/templates/list`, `prompts/list`, a
+  read-only call, a mutating call that returns a real task id, a task query, a
+  structured application error, a protocol error for a malformed request, a
+  `CONFIRMATION_REQUIRED` denial, and a clean shutdown — asserting that **every
+  line on stdout is valid JSON**, that the startup record is on stderr, that the
+  **daemon keeps running after the MCP client exits**, and that an explicit
+  `daemon stop` shuts it down (`tasks/015.md` §29, §30).
 
 No test starts a real Git, Maven, npm, or Liquibase process, and no test touches
 a real repository.
@@ -476,8 +506,10 @@ a real repository.
   migration files.
 - The documented gaps above (`install_dependencies`, `test_service`, a combined
   bulk build) are intentional: no business logic is added to the adapter.
-- Task and runtime state are per-process (§8). Kubernetes and Docker remain out
-  of scope for this interface; the adapter adds no runtime of its own.
+- Task and runtime state are shared through the daemon (§8); the adapter keeps no
+  engine of its own. If the daemon cannot be reached, an operation fails with the
+  structured `DAEMON_UNAVAILABLE` rather than silently running against a private
+  engine. Kubernetes and Docker remain out of scope for this interface.
 - Simple resource snapshots (workspace, service, task) are serialized with the
   application's native field names, while the envelope, task, and log views are
   `camelCase`. A client should read the field names the schema advertises rather

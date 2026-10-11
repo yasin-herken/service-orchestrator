@@ -1,0 +1,23 @@
+[package]
+name = "service-orchestrator-client"
+description = "Shared orchestrator client abstraction and local IPC transport for the daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[dependencies]
+service-orchestrator-application.workspace = true
+service-orchestrator-config.workspace = true
+service-orchestrator-domain.workspace = true
+service-orchestrator-execution.workspace = true
+async-trait.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio.workspace = true

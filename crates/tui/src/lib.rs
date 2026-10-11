@@ -42,7 +42,7 @@ pub use app::App;
 pub use error::TuiError;
 pub use event::{AppEvent, AsyncOutcome, Effect};
 pub use input::{InputEvent, Key};
-pub use observer::TaskObserver;
+pub use observer::{RemoteTaskObserver, TaskObserver};
 pub use state::{
     ConfirmDialog, Dialog, Focus, InputDialog, InputPurpose, LogTarget, LogView, MessageDialog,
     Screen, SearchState, SelectDialog, SelectOption, ServiceFilter, Snapshot, TaskFilter, Toast,

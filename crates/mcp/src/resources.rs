@@ -23,7 +23,8 @@
 
 use rmcp::model::{ErrorData, Resource, ResourceContents, ResourceTemplate};
 use serde_json::{json, Value};
-use service_orchestrator_application::{Application, ApplicationError};
+use service_orchestrator_application::ApplicationError;
+use service_orchestrator_client::OrchestratorClient;
 
 use crate::{
     parse_service_id, parse_task_id, parse_workspace_id, response, ToolError, MIME_JSON, SERVER_URI,
@@ -33,12 +34,12 @@ use crate::{
 ///
 /// This is bounded: one static resource plus the (small, configuration-driven)
 /// set of workspaces.
-pub(crate) fn list(application: &Application) -> Vec<Resource> {
+pub(crate) fn list(client: &dyn OrchestratorClient) -> Vec<Resource> {
     let mut resources = vec![Resource::new(SERVER_URI, "server")
         .with_description("Service Orchestrator MCP server metadata.")
         .with_mime_type(MIME_JSON)];
 
-    for workspace in application.list_workspaces() {
+    for workspace in client.list_workspaces().unwrap_or_default() {
         let id = workspace.id.to_string();
         resources.push(
             Resource::new(format!("workspace://{id}"), format!("workspace:{id}"))
@@ -79,10 +80,10 @@ pub(crate) fn templates() -> Vec<ResourceTemplate> {
 
 /// Builds the protocol contents for one resource URI.
 pub(crate) async fn read(
-    application: &Application,
+    client: &dyn OrchestratorClient,
     uri: &str,
 ) -> Result<ResourceContents, ErrorData> {
-    let value = read_value(application, uri).await?;
+    let value = read_value(client, uri).await?;
     let text = serde_json::to_string_pretty(&value).map_err(|error| {
         ErrorData::internal_error(format!("failed to encode resource: {error}"), None)
     })?;
@@ -90,7 +91,7 @@ pub(crate) async fn read(
 }
 
 /// Resolves a resource URI into its structured value.
-async fn read_value(application: &Application, uri: &str) -> Result<Value, ErrorData> {
+async fn read_value(client: &dyn OrchestratorClient, uri: &str) -> Result<Value, ErrorData> {
     if uri == SERVER_URI {
         return Ok(server_info());
     }
@@ -101,10 +102,10 @@ async fn read_value(application: &Application, uri: &str) -> Result<Value, Error
         let sub = parts.next();
         let workspace_id = parse_workspace_id(id).map_err(to_error_data)?;
         return match sub {
-            None => query(application.get_workspace(&workspace_id)),
-            Some("status") => query(application.get_workspace_status(&workspace_id)),
-            Some("services") => query(application.list_services(&workspace_id)),
-            Some("libraries") => query(application.list_libraries(&workspace_id)),
+            None => query(client.get_workspace(&workspace_id)),
+            Some("status") => query(client.get_workspace_status(&workspace_id)),
+            Some("services") => query(client.list_services(&workspace_id)),
+            Some("libraries") => query(client.list_libraries(&workspace_id)),
             Some(other) => Err(ErrorData::resource_not_found(
                 format!("unknown workspace sub-resource '{other}'"),
                 None,
@@ -118,8 +119,8 @@ async fn read_value(application: &Application, uri: &str) -> Result<Value, Error
         let sub = parts.next();
         let service_id = parse_service_id(id).map_err(to_error_data)?;
         return match sub {
-            None => query(application.get_service_status(&service_id)),
-            Some("diagnostics") => query(application.get_service_diagnostics(&service_id)),
+            None => query(client.get_service_status(&service_id)),
+            Some("diagnostics") => query(client.get_service_diagnostics(&service_id)),
             Some(other) => Err(ErrorData::resource_not_found(
                 format!("unknown service sub-resource '{other}'"),
                 None,
@@ -135,7 +136,7 @@ async fn read_value(application: &Application, uri: &str) -> Result<Value, Error
             ));
         }
         let task_id = parse_task_id(rest).map_err(to_error_data)?;
-        return query(application.get_task(&task_id));
+        return query(client.get_task(&task_id));
     }
 
     Err(ErrorData::resource_not_found(

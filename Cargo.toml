@@ -60,6 +60,8 @@ service-orchestrator-logging = { path = "crates/logging", version = "0.1.0" }
 service-orchestrator-policy = { path = "crates/policy", version = "0.1.0" }
 service-orchestrator-mcp = { path = "crates/mcp", version = "0.1.0" }
 service-orchestrator-tui = { path = "crates/tui", version = "0.1.0" }
+service-orchestrator-client = { path = "crates/client", version = "0.1.0" }
+service-orchestrator-daemon = { path = "crates/daemon", version = "0.1.0" }
 
 [package]
 name = "service-orchestrator"
@@ -77,7 +79,9 @@ workspace = true
 [dependencies]
 service-orchestrator-application.workspace = true
 service-orchestrator-build.workspace = true
+service-orchestrator-client.workspace = true
 service-orchestrator-config.workspace = true
+service-orchestrator-daemon.workspace = true
 service-orchestrator-domain.workspace = true
 service-orchestrator-execution.workspace = true
 service-orchestrator-git.workspace = true

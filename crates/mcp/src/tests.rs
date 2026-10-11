@@ -18,6 +18,7 @@ use serde_json::{json, Value};
 use service_orchestrator_application::{
     Application, ApplicationError, InMemoryRuntimeStateStore, NullLogService, OperationResult,
 };
+use service_orchestrator_client::OrchestratorClient;
 use service_orchestrator_config::load_from_str;
 use service_orchestrator_domain::{Permission, TaskId, TaskKind};
 use service_orchestrator_execution::TaskEngine;
@@ -51,8 +52,9 @@ impl Harness {
             Arc::new(NullLogService),
         );
         let monitor: Arc<dyn TaskMonitor> = engine.clone();
+        let client: Arc<dyn OrchestratorClient> = Arc::new(application);
         Self {
-            server: OrchestratorServer::new(application, monitor),
+            server: OrchestratorServer::new(client, monitor),
         }
     }
 
@@ -88,8 +90,8 @@ impl Harness {
 
     /// Reads one resource and returns its raw contents.
     async fn read_resource(&self, uri: &str) -> ResourceContents {
-        let application = self.server.application_for_test();
-        resources::read(&application, uri)
+        let client = self.server.client_for_test();
+        resources::read(client.as_ref(), uri)
             .await
             .unwrap_or_else(|error| panic!("reading '{uri}' failed: {error:?}"))
     }
@@ -432,8 +434,8 @@ fn resource_templates_are_advertised() {
 #[tokio::test]
 async fn concrete_resources_include_the_server_and_every_workspace() {
     let harness = Harness::new();
-    let application = harness.server.application_for_test();
-    let listed = resources::list(&application);
+    let client = harness.server.client_for_test();
+    let listed = resources::list(client.as_ref());
     let uris: HashSet<&str> = listed
         .iter()
         .map(|resource| resource.uri.as_str())
@@ -465,8 +467,8 @@ async fn reading_a_service_resource_returns_its_status() {
 #[tokio::test]
 async fn reading_an_unknown_resource_is_a_protocol_error() {
     let harness = Harness::new();
-    let application = harness.server.application_for_test();
-    match resources::read(&application, "workspace://demo/nope").await {
+    let client = harness.server.client_for_test();
+    match resources::read(client.as_ref(), "workspace://demo/nope").await {
         Err(error) => assert_eq!(error.code, ErrorCode::RESOURCE_NOT_FOUND),
         Ok(_) => panic!("an unknown sub-resource must not resolve"),
     }
