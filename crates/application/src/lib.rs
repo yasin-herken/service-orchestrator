@@ -62,6 +62,9 @@ pub use models::{
     MigrationStatus, OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
     ServiceDiagnostics, ServiceRuntimeStatus, ServiceStatus, VersionAlignmentPlan, WorkspaceStatus,
 };
+// The policy vocabulary an interface needs to *decide* whether to prompt for
+// confirmation. The application already owns the engine; re-exporting the
+// caller-facing authorization keeps every adapter on one import path.
 pub use ports::{
     artifact_parameter, build_parameter, migration_parameter, parameter, service_runtime_parameter,
     ArtifactInspectionError, ArtifactInspector, ArtifactPresence, BuildError,
@@ -74,3 +77,4 @@ pub use ports::{
     RuntimeStateStore, ServiceHealth, ServiceProcessInfo, ServiceRuntimeError, ServiceRuntimeIndex,
     ServiceRuntimeState, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
 };
+pub use service_orchestrator_policy::{Authorization, PolicyDecision, PolicyEngine};

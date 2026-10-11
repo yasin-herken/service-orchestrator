@@ -13,3 +13,11 @@ workspace = true
 
 [dependencies]
 service-orchestrator-application.workspace = true
+service-orchestrator-domain.workspace = true
+service-orchestrator-execution.workspace = true
+ratatui.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+
+[dev-dependencies]
+service-orchestrator-config.workspace = true
