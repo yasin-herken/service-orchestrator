@@ -22,7 +22,7 @@ export function AppShell() {
         <Header page={page} />
         <main className="app-shell__content">
           {page === 'dashboard' ? <DashboardPage /> : null}
-          {page === 'services' ? <ServicesPage /> : null}
+          {page === 'services' ? <ServicesPage onNavigate={setPage} /> : null}
           {page !== 'dashboard' && page !== 'services' ? (
             <PlaceholderPage page={page} />
           ) : null}

@@ -1,9 +1,8 @@
-//! The read-only Tauri commands exposed to the webview.
+//! The Tauri commands exposed to the webview.
 //!
-//! Every command is a thin adapter: validate input, delegate to a query over
-//! the shared [`OrchestratorClient`], and funnel failures through the
-//! connection tracker (`tasks/018.md` §7, §11). There is no start/stop or
-//! other mutating command until task 019.
+//! Every command is a thin adapter: validate input, delegate to a query or
+//! mutation over the shared [`OrchestratorClient`], and funnel failures through
+//! the connection tracker (`tasks/018.md` §7, §11; `tasks/019.md` §3, §10).
 //!
 //! The command set:
 //!
@@ -12,6 +11,10 @@
 //! - `list_services` — service rows for a workspace;
 //! - `get_workspace_status` — one workspace with all service statuses;
 //! - `get_service_status` — one service, validated against its workspace;
+//! - `get_service_detail` — configuration, observed state, and diagnostics;
+//! - `start_service` / `stop_service` / `restart_service` — one service;
+//! - `start_services` / `stop_services` / `restart_services` — bulk workflow;
+//! - `check_service_health` — run a service's configured health checks;
 //! - `get_connection_state` — the adapter's current connection snapshot.
 
 use std::sync::Arc;
@@ -20,10 +23,12 @@ use service_orchestrator_client::{DaemonStatus, RemoteClient};
 use tauri::State;
 
 use crate::connection::ConnectionSnapshot;
-use crate::dto::{ServiceSummary, WorkspaceStatus, WorkspaceSummary};
+use crate::dto::{
+    OperationOutcome, ServiceDetail, ServiceSummary, WorkspaceStatus, WorkspaceSummary,
+};
 use crate::error::CommandError;
-use crate::queries;
 use crate::state::AppState;
+use crate::{mutations, queries};
 
 /// Runs one blocking query against the shared client.
 ///
@@ -129,6 +134,142 @@ pub async fn get_service_status(
 ) -> Result<ServiceSummary, CommandError> {
     query(state.inner(), move |client| {
         queries::service_status(client.as_ref(), &workspace_id, &service_id)
+    })
+    .await
+}
+
+/// Returns a detailed view of one service, validated against its workspace.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected identifier, `NOT_FOUND` when the service
+/// belongs to a different workspace, otherwise a structured `{ code, message }`
+/// error.
+#[tauri::command]
+pub async fn get_service_detail(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    service_id: String,
+) -> Result<ServiceDetail, CommandError> {
+    query(state.inner(), move |client| {
+        queries::service_detail(client.as_ref(), &workspace_id, &service_id)
+    })
+    .await
+}
+
+/// Starts one service through the daemon.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected service id, otherwise a structured
+/// `{ code, message }` error (including a permission denial).
+#[tauri::command]
+pub async fn start_service(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        mutations::start_service(client.as_ref(), &service_id)
+    })
+    .await
+}
+
+/// Stops one service through the daemon.
+///
+/// # Errors
+///
+/// Same as [`start_service`].
+#[tauri::command]
+pub async fn stop_service(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        mutations::stop_service(client.as_ref(), &service_id)
+    })
+    .await
+}
+
+/// Restarts one service through the daemon.
+///
+/// # Errors
+///
+/// Same as [`start_service`].
+#[tauri::command]
+pub async fn restart_service(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        mutations::restart_service(client.as_ref(), &service_id)
+    })
+    .await
+}
+
+/// Starts the selected services of a workspace as one workflow.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected identifier or an empty selection, otherwise a
+/// structured `{ code, message }` error.
+#[tauri::command]
+pub async fn start_services(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    service_ids: Vec<String>,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        mutations::start_services(client.as_ref(), &workspace_id, &service_ids)
+    })
+    .await
+}
+
+/// Stops the selected services of a workspace as one workflow.
+///
+/// # Errors
+///
+/// Same as [`start_services`].
+#[tauri::command]
+pub async fn stop_services(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    service_ids: Vec<String>,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        mutations::stop_services(client.as_ref(), &workspace_id, &service_ids)
+    })
+    .await
+}
+
+/// Restarts the selected services of a workspace as one workflow.
+///
+/// # Errors
+///
+/// Same as [`start_services`].
+#[tauri::command]
+pub async fn restart_services(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    service_ids: Vec<String>,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        mutations::restart_services(client.as_ref(), &workspace_id, &service_ids)
+    })
+    .await
+}
+
+/// Runs every configured health check for one service.
+///
+/// # Errors
+///
+/// Same as [`start_service`].
+#[tauri::command]
+pub async fn check_service_health(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        mutations::check_service_health(client.as_ref(), &service_id)
     })
     .await
 }

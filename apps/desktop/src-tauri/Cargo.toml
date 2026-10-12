@@ -35,6 +35,9 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", 
 [dev-dependencies]
 # The adapter integration tests talk to a real daemon over the real socket.
 service-orchestrator-daemon = { path = "../../../crates/daemon" }
+# A test-only executor implementation needs the same object-safe async-trait
+# shim the production executors use.
+async-trait = "0.1"
 
 [lints.rust]
 missing_docs = "warn"

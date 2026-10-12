@@ -1,11 +1,12 @@
 //! The Tauri 2 desktop GUI adapter for Service Orchestrator.
 //!
-//! This crate is a **thin adapter**: it exposes a small set of read-only
-//! Tauri commands and pushes connection/task events into the React webview in
-//! `apps/desktop`. All real behaviour — configuration parsing, the task
-//! engine, process management, daemon transport — stays in the shared
-//! workspace crates and the single local daemon, exactly like the Ratatui TUI
-//! and MCP adapters (`tasks/018.md` §10; `AGENTS.md` §1, §21).
+//! This crate is a **thin adapter**: it exposes a small set of Tauri commands —
+//! service read and lifecycle operations — and pushes connection/task events
+//! into the React webview in `apps/desktop`. All real behaviour — configuration
+//! parsing, the task engine, process management, daemon transport — stays in the
+//! shared workspace crates and the single local daemon, exactly like the Ratatui
+//! TUI and MCP adapters (`tasks/018.md` §10; `tasks/019.md` §3; `AGENTS.md` §1,
+//! §21).
 //!
 //! ```text
 //! React webview  ──invoke──▶  Tauri commands  ──▶  OrchestratorClient  ──▶  daemon IPC
@@ -13,8 +14,8 @@
 //! ```
 //!
 //! The webview has no shell, filesystem, or process capabilities: the only
-//! things it can do are the six commands registered in [`run`] and the two
-//! events emitted by [`state::AppState`].
+//! things it can do are the commands registered in [`run`] and the two events
+//! emitted by [`state::AppState`].
 
 mod commands;
 pub mod connection;
@@ -22,8 +23,10 @@ mod daemon_bin;
 pub mod dto;
 mod error;
 mod events;
+pub mod mutations;
 pub mod queries;
 mod state;
+mod validation;
 
 use tauri::{Manager, Url};
 
@@ -89,6 +92,14 @@ pub fn run() {
             commands::list_services,
             commands::get_workspace_status,
             commands::get_service_status,
+            commands::get_service_detail,
+            commands::start_service,
+            commands::stop_service,
+            commands::restart_service,
+            commands::start_services,
+            commands::stop_services,
+            commands::restart_services,
+            commands::check_service_health,
             commands::get_connection_state,
         ])
         .build(tauri::generate_context!())

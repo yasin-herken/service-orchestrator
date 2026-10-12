@@ -2845,6 +2845,7 @@ dependencies = [
 name = "service-orchestrator-desktop"
 version = "0.1.0"
 dependencies = [
+ "async-trait",
  "serde",
  "serde_json",
  "service-orchestrator-application",

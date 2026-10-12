@@ -4,6 +4,8 @@ import App from '../App';
 import {
   makeConnected,
   makeDaemonStatus,
+  makeOperationOutcome,
+  makeServiceDetail,
   makeServices,
   makeWorkspace,
   makeWorkspaceStatus,
@@ -53,4 +55,39 @@ export function happyPathDefaults(): void {
   mockDesktopApi.listWorkspaces.mockResolvedValue([makeWorkspace()]);
   mockDesktopApi.listServices.mockResolvedValue(makeServices());
   mockDesktopApi.getWorkspaceStatus.mockResolvedValue(makeWorkspaceStatus(makeServices()));
+  mockDesktopApi.getServiceDetail.mockResolvedValue(makeServiceDetail());
+  mockDesktopApi.startService.mockResolvedValue(makeOperationOutcome());
+  mockDesktopApi.stopService.mockResolvedValue(
+    makeOperationOutcome({ kind: 'stop_service' }),
+  );
+  mockDesktopApi.restartService.mockResolvedValue(
+    makeOperationOutcome({ kind: 'restart_service' }),
+  );
+  mockDesktopApi.startServices.mockResolvedValue(
+    makeOperationOutcome({
+      status: 'workflow',
+      task_id: null,
+      workflow_id: 'wf-1',
+      kind: 'start_services',
+    }),
+  );
+  mockDesktopApi.stopServices.mockResolvedValue(
+    makeOperationOutcome({
+      status: 'workflow',
+      task_id: null,
+      workflow_id: 'wf-stop',
+      kind: 'stop_services',
+    }),
+  );
+  mockDesktopApi.restartServices.mockResolvedValue(
+    makeOperationOutcome({
+      status: 'workflow',
+      task_id: null,
+      workflow_id: 'wf-restart',
+      kind: 'restart_services',
+    }),
+  );
+  mockDesktopApi.checkServiceHealth.mockResolvedValue(
+    makeOperationOutcome({ kind: 'health_check' }),
+  );
 }

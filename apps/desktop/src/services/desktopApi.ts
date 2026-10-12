@@ -4,6 +4,8 @@ import { listen, type UnlistenFn } from '@tauri-apps/api/event';
 import type {
   ConnectionSnapshot,
   DaemonStatus,
+  OperationOutcome,
+  ServiceDetail,
   ServiceSummary,
   WorkspaceStatus,
   WorkspaceSummary,
@@ -15,8 +17,11 @@ import { toDesktopError } from './errors';
  * The typed desktop API consumed by React.
  *
  * Every method maps one-to-one onto a Tauri command that proxies an existing
- * IPC operation to the shared daemon (`tasks/018.md` §7, §12). React never
- * talks to the operating system directly.
+ * IPC operation to the shared daemon (`tasks/018.md` §7, §12; `tasks/019.md`
+ * §3, §10). React never talks to the operating system directly, and the mutating
+ * methods never start, stop, or restart anything themselves: they schedule the
+ * same application use cases the TUI and MCP use and return the daemon's
+ * normalized outcome.
  */
 export interface OrchestratorDesktopApi {
   /** Daemon diagnostic status (starts/connects the daemon on first use). */
@@ -29,6 +34,22 @@ export interface OrchestratorDesktopApi {
   getWorkspaceStatus(workspaceId: string): Promise<WorkspaceStatus>;
   /** One service's status, validated against its workspace. */
   getServiceStatus(workspaceId: string, serviceId: string): Promise<ServiceSummary>;
+  /** One service's configuration, observed state, and diagnostics. */
+  getServiceDetail(workspaceId: string, serviceId: string): Promise<ServiceDetail>;
+  /** Schedules a start for one service. */
+  startService(serviceId: string): Promise<OperationOutcome>;
+  /** Schedules a stop for one service. */
+  stopService(serviceId: string): Promise<OperationOutcome>;
+  /** Schedules the daemon-coordinated restart of one service. */
+  restartService(serviceId: string): Promise<OperationOutcome>;
+  /** Schedules a start workflow for the selected services of a workspace. */
+  startServices(workspaceId: string, serviceIds: string[]): Promise<OperationOutcome>;
+  /** Schedules a stop workflow for the selected services of a workspace. */
+  stopServices(workspaceId: string, serviceIds: string[]): Promise<OperationOutcome>;
+  /** Schedules a restart workflow for the selected services of a workspace. */
+  restartServices(workspaceId: string, serviceIds: string[]): Promise<OperationOutcome>;
+  /** Runs every configured health check for one service. */
+  checkServiceHealth(serviceId: string): Promise<OperationOutcome>;
   /** The adapter's current daemon connection state. */
   getConnectionState(): Promise<ConnectionSnapshot>;
   /** Subscribes to daemon connection changes; resolves to an unsubscriber. */
@@ -68,6 +89,20 @@ export const desktopApi: OrchestratorDesktopApi = {
     call<WorkspaceStatus>('get_workspace_status', { workspaceId }),
   getServiceStatus: (workspaceId, serviceId) =>
     call<ServiceSummary>('get_service_status', { workspaceId, serviceId }),
+  getServiceDetail: (workspaceId, serviceId) =>
+    call<ServiceDetail>('get_service_detail', { workspaceId, serviceId }),
+  startService: (serviceId) => call<OperationOutcome>('start_service', { serviceId }),
+  stopService: (serviceId) => call<OperationOutcome>('stop_service', { serviceId }),
+  restartService: (serviceId) =>
+    call<OperationOutcome>('restart_service', { serviceId }),
+  startServices: (workspaceId, serviceIds) =>
+    call<OperationOutcome>('start_services', { workspaceId, serviceIds }),
+  stopServices: (workspaceId, serviceIds) =>
+    call<OperationOutcome>('stop_services', { workspaceId, serviceIds }),
+  restartServices: (workspaceId, serviceIds) =>
+    call<OperationOutcome>('restart_services', { workspaceId, serviceIds }),
+  checkServiceHealth: (serviceId) =>
+    call<OperationOutcome>('check_service_health', { serviceId }),
   getConnectionState: () => call<ConnectionSnapshot>('get_connection_state'),
   onConnectionChanged: (handler) =>
     subscribe<ConnectionSnapshot>(DAEMON_CONNECTION_EVENT, handler),
