@@ -85,35 +85,59 @@ impl GitRunner {
         let mut truncated = false;
 
         loop {
-            match events.recv().await {
-                Ok(event) => {
-                    if event.process_id() != &id {
-                        continue;
-                    }
-                    match event {
-                        ProcessEvent::StdoutLine(line) => stdout.push(line.line),
-                        ProcessEvent::StderrLine(line) => stderr.push(line.line),
-                        ProcessEvent::Stopped { exit, .. }
-                        | ProcessEvent::Exited { exit, .. }
-                        | ProcessEvent::Failed { exit, .. }
-                        | ProcessEvent::Killed { exit, .. } => {
-                            return Ok(CommandOutput {
-                                code: exit.code,
-                                reason: exit.reason,
-                                stdout: stdout.join("\n"),
-                                stderr: stderr.join("\n"),
-                                truncated,
-                            });
+            // The event stream is a bounded broadcast: under extreme output
+            // the terminal event can be dropped by lag. Race the stream
+            // against the handle's own terminal state so the runner can never
+            // wait forever for an event that was lost (`tasks/017.md` §19,
+            // defect D5).
+            tokio::select! {
+                biased;
+                received = events.recv() => match received {
+                    Ok(event) => {
+                        if event.process_id() != &id {
+                            continue;
                         }
-                        _ => {}
+                        match event {
+                            ProcessEvent::StdoutLine(line) => stdout.push(line.line),
+                            ProcessEvent::StderrLine(line) => stderr.push(line.line),
+                            ProcessEvent::Stopped { exit, .. }
+                            | ProcessEvent::Exited { exit, .. }
+                            | ProcessEvent::Failed { exit, .. }
+                            | ProcessEvent::Killed { exit, .. } => {
+                                return Ok(CommandOutput {
+                                    code: exit.code,
+                                    reason: exit.reason,
+                                    stdout: stdout.join("\n"),
+                                    stderr: stderr.join("\n"),
+                                    truncated,
+                                });
+                            }
+                            _ => {}
+                        }
                     }
+                    Err(RecvError::Lagged(_)) => {
+                        // Output can no longer be reconstructed faithfully; the
+                        // select above still races the handle, so the terminal
+                        // state is never missed.
+                        truncated = true;
+                    }
+                    Err(RecvError::Closed) => break,
+                },
+                snapshot = handle.wait() => {
+                    // The process is terminal; use the exit snapshot even when
+                    // its terminal event was dropped from the broadcast.
+                    let snapshot = snapshot?;
+                    let (code, reason) = snapshot
+                        .exit
+                        .map_or((None, ExitReason::Failed), |exit| (exit.code, exit.reason));
+                    return Ok(CommandOutput {
+                        code,
+                        reason,
+                        stdout: stdout.join("\n"),
+                        stderr: stderr.join("\n"),
+                        truncated: true,
+                    });
                 }
-                Err(RecvError::Lagged(_)) => {
-                    // Output can no longer be reconstructed faithfully; keep
-                    // draining lifecycle events so the process is still reaped.
-                    truncated = true;
-                }
-                Err(RecvError::Closed) => break,
             }
         }
 

@@ -897,6 +897,7 @@ name = "service-orchestrator-execution"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "futures-util",
  "serde",
  "service-orchestrator-domain",
  "thiserror",

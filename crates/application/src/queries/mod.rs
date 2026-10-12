@@ -12,4 +12,5 @@ mod migration;
 mod runtime;
 mod service;
 mod task;
+mod validation;
 mod workspace;

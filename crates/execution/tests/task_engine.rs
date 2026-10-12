@@ -937,3 +937,136 @@ async fn empty_workflow_is_rejected() {
         .unwrap_err();
     assert!(matches!(error, TaskEngineError::InvalidWorkflow { .. }));
 }
+
+// ---------------------------------------------------------------------------
+// Regression tests — tasks/017.md reliability fixes
+// ---------------------------------------------------------------------------
+
+/// Panics inside `execute`; proves a panicking executor can no longer wedge
+/// its task in `Running` (`tasks/017.md` defect D2).
+struct PanickingExecutor;
+
+#[async_trait]
+impl TaskExecutor for PanickingExecutor {
+    async fn execute(&self, _context: TaskContext) -> Result<TaskOutcome, TaskExecutorError> {
+        panic!("executor bug");
+    }
+}
+
+#[tokio::test]
+async fn a_panicking_executor_fails_the_task_and_unblocks_dependents() {
+    let engine = TaskEngine::builder()
+        .max_parallel_tasks(1)
+        .executor(TaskKind::Validate, Arc::new(PanickingExecutor))
+        .executor(TaskKind::NpmInstall, Arc::new(RecordingExecutor::new()))
+        .build()
+        .unwrap();
+
+    let panicking = engine
+        .submit(TaskDefinition::new(TaskKind::Validate))
+        .unwrap();
+    let dependent = engine
+        .submit(TaskDefinition::new(TaskKind::MavenBuild).depends_on(panicking.clone()))
+        .unwrap();
+    let independent = engine
+        .submit(TaskDefinition::new(TaskKind::NpmInstall))
+        .unwrap();
+
+    let task = engine.wait_for(&panicking).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Failed);
+    assert_eq!(
+        task.error.expect("a failure is recorded").code,
+        "TASK_EXECUTOR_PANICKED"
+    );
+
+    let dependent = engine.wait_for(&dependent).await.unwrap();
+    assert_eq!(dependent.status, TaskStatus::Skipped);
+
+    let independent = engine.wait_for(&independent).await.unwrap();
+    assert_eq!(
+        independent.status,
+        TaskStatus::Succeeded,
+        "the engine must keep dispatching after an executor panic"
+    );
+}
+
+/// Spawns an external watcher on the task's cancellation token — mirroring how
+/// infrastructure adapters attach child-process watchers — then hangs. Used to
+/// prove a timed-out attempt signals cancellation (`tasks/017.md` defect D6).
+struct WatchedHangingExecutor {
+    cancelled: Arc<std::sync::atomic::AtomicBool>,
+}
+
+#[async_trait]
+impl TaskExecutor for WatchedHangingExecutor {
+    async fn execute(&self, context: TaskContext) -> Result<TaskOutcome, TaskExecutorError> {
+        let token = context.cancellation().clone();
+        let flag = Arc::clone(&self.cancelled);
+        tokio::spawn(async move {
+            token.cancelled().await;
+            flag.store(true, Ordering::SeqCst);
+        });
+        std::future::pending::<()>().await;
+        unreachable!("the executor never resolves on its own");
+    }
+}
+
+#[tokio::test]
+async fn a_timed_out_attempt_signals_its_cancellation_token() {
+    let cancelled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let engine = TaskEngine::builder()
+        .default_timeout(Duration::from_millis(50))
+        .executor(
+            TaskKind::MavenBuild,
+            Arc::new(WatchedHangingExecutor {
+                cancelled: Arc::clone(&cancelled),
+            }),
+        )
+        .build()
+        .unwrap();
+
+    let id = engine
+        .submit(TaskDefinition::new(TaskKind::MavenBuild))
+        .unwrap();
+    let task = engine.wait_for(&id).await.unwrap();
+    assert_eq!(task.status, TaskStatus::Failed);
+    assert_eq!(task.error.unwrap().code, "TASK_TIMEOUT");
+
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !cancelled.load(Ordering::SeqCst) {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "the timeout must signal cancellation so owned child processes can stop"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+#[tokio::test]
+async fn cancelling_a_blocked_task_settles_it_as_cancelled() {
+    let engine = TaskEngine::builder()
+        .executor(TaskKind::MavenBuild, Arc::new(HangingExecutor))
+        .build()
+        .unwrap();
+
+    let prerequisite = engine
+        .submit(TaskDefinition::new(TaskKind::MavenBuild))
+        .unwrap();
+    let blocked = engine
+        .submit(TaskDefinition::new(TaskKind::BuildService).depends_on(prerequisite.clone()))
+        .unwrap();
+
+    engine.cancel(&blocked).unwrap();
+
+    let task = tokio::time::timeout(Duration::from_secs(5), engine.wait_for(&blocked))
+        .await
+        .expect("a cancelled blocked task settles without its dependencies")
+        .unwrap();
+    assert_eq!(
+        task.status,
+        TaskStatus::Cancelled,
+        "cancelling blocked work must report Cancelled, not Skipped or Blocked"
+    );
+
+    engine.cancel(&prerequisite).unwrap();
+}

@@ -10,7 +10,6 @@
 //! local user cannot connect (`tasks/015.md` §24).
 
 use std::io;
-use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
@@ -66,18 +65,28 @@ pub fn log_path(socket_path: &Path) -> PathBuf {
 
 /// Creates the runtime directory with owner-only permissions if it is missing.
 ///
+/// The directory is created with `0700` atomically (the creation mode can only
+/// be narrowed by the umask), and a pre-existing directory is **never**
+/// re-chmodded: `SERVICE_ORCHESTRATOR_SOCKET` may point at a directory the
+/// daemon does not own, and tightening a shared directory such as `/tmp` would
+/// break the whole system (`tasks/017.md` §27, finding H-IPC-3).
+///
 /// # Errors
 ///
-/// Returns an [`io::Error`] when the directory cannot be created or its
-/// permissions cannot be tightened.
+/// Returns an [`io::Error`] when the directory cannot be created.
 pub fn ensure_run_dir(socket_path: &Path) -> io::Result<()> {
     let dir = socket_path
         .parent()
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."));
-    std::fs::create_dir_all(dir)?;
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))?;
-    Ok(())
+    let mut builder = std::fs::DirBuilder::new();
+    builder.recursive(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+        builder.mode(0o700);
+    }
+    builder.create(dir)
 }
 
 /// Returns `true` when a process is accepting connections at `socket_path`.
@@ -278,6 +287,30 @@ mod tests {
             .mode()
             & 0o777;
         assert_eq!(mode, 0o700, "the runtime directory is owner-only");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pre_existing_directory_is_never_rechmodded() {
+        // Regression test for `tasks/017.md` finding H-IPC-3: with
+        // SERVICE_ORCHESTRATOR_SOCKET pointing inside a shared directory,
+        // ensure_run_dir must not tighten that directory's permissions.
+        let root = std::env::temp_dir().join(format!("so-client-shared-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the shared directory is created");
+        std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755))
+            .expect("the shared directory is world-readable");
+        let socket = root.join("daemon.sock");
+        ensure_run_dir(&socket).expect("the shared directory is acceptable");
+        let mode = std::fs::metadata(&root)
+            .expect("the directory exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o755,
+            "a pre-existing directory keeps its permissions"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 

@@ -247,6 +247,53 @@ async fn get_workspace_status_is_structured() {
     assert!(data.get("services").is_some());
 }
 
+#[tokio::test]
+async fn validate_workspace_is_a_read_only_structured_report() {
+    let harness = Harness::new();
+    let data = harness
+        .call_ok("validate_workspace", json!({ "workspaceId": "demo" }))
+        .await;
+    assert_eq!(
+        data.get("workspace_id").and_then(Value::as_str),
+        Some("demo")
+    );
+
+    let totals = data
+        .get("totals")
+        .expect("the report carries aggregate totals");
+    assert_eq!(totals.get("services").and_then(Value::as_u64), Some(2));
+    assert_eq!(
+        totals.get("backend_services").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(
+        totals.get("frontend_services").and_then(Value::as_u64),
+        Some(1)
+    );
+    assert_eq!(totals.get("libraries").and_then(Value::as_u64), Some(1));
+
+    for field in [
+        "repositories",
+        "diagnostics",
+        "port_conflicts",
+        "occupied_ports",
+    ] {
+        assert!(
+            data.get(field).and_then(Value::as_array).is_some(),
+            "the report exposes '{field}'"
+        );
+    }
+}
+
+#[tokio::test]
+async fn validate_workspace_of_an_unknown_workspace_reports_not_found() {
+    let harness = Harness::new();
+    let body = harness
+        .call_app_error("validate_workspace", json!({ "workspaceId": "missing" }))
+        .await;
+    assert_eq!(body.code, "WORKSPACE_NOT_FOUND");
+}
+
 // -- structured errors -------------------------------------------------------
 
 #[tokio::test]

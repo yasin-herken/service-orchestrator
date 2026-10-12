@@ -23,7 +23,22 @@ use service_orchestrator_domain::{
 };
 use service_orchestrator_execution::TaskEngine;
 
+/// Returns whether a request may act as an interactive destructive confirmation.
+///
+/// Trust is threefold: the request must ask for it, must declare an
+/// interactive client kind, *and* the connection's kernel-verified peer UID
+/// must match the daemon's. The wire-declared `ClientKind` alone is never
+/// enough (`tasks/017.md` §27, finding H-IPC-1).
+pub(crate) const fn destructive_allowed(request: &RequestEnvelope, same_user: bool) -> bool {
+    request.allow_destructive && request.client.is_interactive() && same_user
+}
+
 /// Dispatches one application operation to the shared core.
+///
+/// `same_user` is the kernel-verified identity of the connecting peer: a
+/// destructive authorization request is honored only when the request asks for
+/// it, the peer declares itself an interactive client, *and* the peer runs as
+/// the same user as the daemon (`tasks/017.md` §27, finding H-IPC-1).
 ///
 /// # Errors
 ///
@@ -33,8 +48,9 @@ pub(crate) async fn route(
     application: &Application,
     engine: &Arc<TaskEngine>,
     request: &RequestEnvelope,
+    same_user: bool,
 ) -> Result<Value, ApplicationError> {
-    let allow_destructive = request.allow_destructive && request.client.is_interactive();
+    let allow_destructive = destructive_allowed(request, same_user);
     let authorization = if allow_destructive {
         Authorization::allow_destructive()
     } else {
@@ -69,6 +85,10 @@ pub(crate) async fn route(
         ops::GET_WORKSPACE_STATUS => {
             let (id,): (WorkspaceId,) = decode(params)?;
             encode(app.get_workspace_status(&id)?)
+        }
+        ops::VALIDATE_WORKSPACE => {
+            let (id,): (WorkspaceId,) = decode(params)?;
+            encode(app.validate_workspace(&id)?)
         }
         ops::LIST_GROUPS => {
             let (id,): (WorkspaceId,) = decode(params)?;
@@ -374,4 +394,41 @@ fn encode<T: Serialize>(value: T) -> Result<Value, ApplicationError> {
             format!("the operation's result could not be serialized: {error}"),
         )
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use service_orchestrator_client::ClientKind;
+
+    fn request(client: ClientKind, allow_destructive: bool) -> RequestEnvelope {
+        RequestEnvelope {
+            protocol: 1,
+            request_id: "req-1".to_owned(),
+            client,
+            allow_destructive,
+            method: "git_reset_hard".to_owned(),
+            params: serde_json::json!([]),
+        }
+    }
+
+    #[test]
+    fn destructive_authorization_requires_all_three_trust_signals() {
+        assert!(
+            destructive_allowed(&request(ClientKind::Tui, true), true),
+            "an interactive peer that asks for it is trusted"
+        );
+        assert!(
+            !destructive_allowed(&request(ClientKind::Tui, true), false),
+            "a peer whose UID does not match the daemon is never trusted"
+        );
+        assert!(
+            !destructive_allowed(&request(ClientKind::Mcp, true), true),
+            "a non-interactive client cannot self-confirm, even from the same user"
+        );
+        assert!(
+            !destructive_allowed(&request(ClientKind::Tui, false), true),
+            "an unconfirmed request stays non-destructive"
+        );
+    }
 }

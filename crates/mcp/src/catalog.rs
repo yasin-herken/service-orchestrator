@@ -55,6 +55,14 @@ pub(crate) fn tools() -> Vec<Tool> {
             read(),
         ),
         tool::<params::WorkspaceRef>(
+            "validate_workspace",
+            "Validate a workspace against this machine, read-only: configuration, \
+             repository checkouts, runtime and build-tool availability, dependency \
+             resolution, port conflicts, and port occupancy. Never checks out, pulls, \
+             builds, starts, or rewrites anything.",
+            read(),
+        ),
+        tool::<params::WorkspaceRef>(
             "list_groups",
             "List the service groups defined in a workspace.",
             read(),

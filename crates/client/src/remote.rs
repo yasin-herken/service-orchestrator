@@ -40,7 +40,7 @@ use service_orchestrator_application::{
     LibraryStatus, LogEntry, LogPage, LogRequest, LogStreamError, LogSubscription, MigrationStatus,
     OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
     ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus, ServiceStatus, WorkflowCancellation,
-    WorkflowStatus, WorkspaceStatus,
+    WorkflowStatus, WorkspaceStatus, WorkspaceValidationReport,
 };
 use service_orchestrator_domain::{
     Branch, BranchInfo, GroupId, Library, LibraryId, Profile, ProfileId, RepoDiff,
@@ -598,6 +598,13 @@ impl OrchestratorClient for RemoteClient {
         workspace_id: &WorkspaceId,
     ) -> Result<WorkspaceStatus, ApplicationError> {
         self.call(ops::GET_WORKSPACE_STATUS, (workspace_id,))
+    }
+
+    fn validate_workspace(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<WorkspaceValidationReport, ApplicationError> {
+        self.call(ops::VALIDATE_WORKSPACE, (workspace_id,))
     }
 
     fn list_groups(

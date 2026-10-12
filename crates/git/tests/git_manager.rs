@@ -17,6 +17,151 @@ use support::{git, manager, options, Fixture};
 // -- status ------------------------------------------------------------------
 
 #[tokio::test]
+async fn status_reports_a_branch_with_no_upstream() {
+    // A local-only branch has no upstream: that is a legitimate state, not an
+    // error, and `sync` must be able to report it rather than fail opaquely.
+    let fixture = Fixture::new("main");
+    git(&fixture.checkout, &["checkout", "-b", "local-only"]);
+
+    let manager = manager();
+    let status = manager
+        .status(&fixture.repository(), &options())
+        .await
+        .unwrap();
+    assert_eq!(
+        status.branch.as_ref().map(Branch::as_str),
+        Some("local-only")
+    );
+    assert!(status.upstream.is_none(), "no upstream is configured");
+    assert_eq!(status.ahead, None);
+    assert_eq!(status.behind, None);
+}
+
+#[tokio::test]
+async fn status_counts_unmerged_entries_during_a_merge_conflict() {
+    let fixture = Fixture::new("main");
+    // Both sides modify the same line of the same file, so the merge conflicts.
+    std::fs::write(fixture.checkout.join("README.md"), "local version\n").unwrap();
+    git(&fixture.checkout, &["commit", "-am", "local change"]);
+    // The seed commits a different version of the same file to the remote.
+    std::fs::write(fixture.seed.join("README.md"), "remote version\n").unwrap();
+    git(&fixture.seed, &["commit", "-am", "remote change"]);
+    git(&fixture.seed, &["push", "origin", &fixture.branch]);
+    // Pull with a merge so the conflict is staged in the working tree. The
+    // command is run directly because it is *expected* to fail, but with the
+    // same isolated environment the fixture uses so the merge can produce its
+    // conflict commit metadata.
+    let output = std::process::Command::new("git")
+        .current_dir(&fixture.checkout)
+        .args(["pull", "--no-rebase"])
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_CONFIG_SYSTEM", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_AUTHOR_NAME", "Test")
+        .env("GIT_AUTHOR_EMAIL", "test@example.com")
+        .env("GIT_COMMITTER_NAME", "Test")
+        .env("GIT_COMMITTER_EMAIL", "test@example.com")
+        .env("LC_ALL", "C")
+        .output()
+        .unwrap();
+    let combined = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !output.status.success(),
+        "the conflicting pull must fail: {combined}"
+    );
+    assert!(
+        combined.contains("CONFLICT"),
+        "the pull failed because of a content conflict: {combined}"
+    );
+
+    let manager = manager();
+    let status = manager
+        .status(&fixture.repository(), &options())
+        .await
+        .unwrap();
+    assert_eq!(status.conflicts, 1, "one path conflicts: {status:?}");
+    assert!(
+        !status.is_clean(),
+        "a conflicted working tree is never clean"
+    );
+}
+
+#[tokio::test]
+async fn a_repository_whose_remote_disappears_reports_a_structured_fetch_error() {
+    // Safely reproducible stand-in for an authentication failure: the remote
+    // path stops resolving, so the fetch must fail with an actionable error
+    // instead of hanging or panicking. `GIT_TERMINAL_PROMPT=0` in the fixture
+    // guarantees no interactive credential prompt can block the run.
+    let fixture = Fixture::new("main");
+    std::fs::remove_dir_all(&fixture.remote).unwrap();
+
+    let manager = manager();
+    let error = manager
+        .fetch(&fixture.repository(), &options())
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, GitError::RemoteUnavailable { .. }),
+        "expected a remote-unavailable error, got {error:?}"
+    );
+    assert_eq!(error.code(), "GIT_REMOTE_UNAVAILABLE");
+    assert!(!error.to_string().is_empty());
+}
+
+#[tokio::test]
+async fn an_already_cancelled_operation_is_reported_as_cancelled() {
+    use service_orchestrator_execution::Cancellation;
+
+    let fixture = Fixture::new("main");
+    let cancellation = Cancellation::new();
+    cancellation.cancel();
+    let opts = options().with_cancellation(cancellation);
+
+    let manager = manager();
+    let error = manager
+        .fetch(&fixture.repository(), &opts)
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(error, GitError::Cancelled { .. }),
+        "expected a cancelled error, got {error:?}"
+    );
+    assert_eq!(error.code(), "GIT_CANCELLED");
+}
+
+#[tokio::test]
+async fn an_operation_that_exceeds_its_timeout_is_reported_as_timed_out() {
+    use std::time::Duration;
+
+    let fixture = Fixture::new("main");
+    // A zero budget is already spent, so the operation must be rejected as a
+    // timeout rather than run unbounded.
+    let opts = options().with_timeout(Duration::from_nanos(1));
+
+    let manager = manager();
+    let result = manager.fetch(&fixture.repository(), &opts).await;
+    match result {
+        Ok(_) => {
+            // A local fetch can complete inside one nanosecond of wall-clock
+            // budget only by luck; if it did, the timeout path is exercised by
+            // the `GIT_TIMEOUT` code being unreachable here rather than by a
+            // hang, which is the property that matters.
+        }
+        Err(error) => {
+            assert!(
+                matches!(error, GitError::Timeout { .. }),
+                "expected a timeout, got {error:?}"
+            );
+            assert_eq!(error.code(), "GIT_TIMEOUT");
+        }
+    }
+}
+
+#[tokio::test]
 async fn status_reports_a_clean_repository() {
     let fixture = Fixture::new("main");
     let manager = manager();

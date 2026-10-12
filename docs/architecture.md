@@ -709,7 +709,32 @@ are in `docs/observability.md`.
 
 ---
 
-## 18. Where the shared local runtime belongs
+## 18. Where workspace validation belongs
+
+Validating a configured workspace — the root exists, the repositories are
+present and valid, the runtimes are installed, the dependency graph resolves,
+the declared ports do not collide — is an application-level concern, so every
+interface observes the same answer (`docs/adr/017-workspace-validation.md`).
+
+- **A read-only query.** `ValidateWorkspace` inspects and reports; it never
+  mutates a repository, a port, or the configuration. A configured port that
+  is occupied by an unrelated process is reported as a warning and the
+  occupying process is never signalled — the same rule the Service Runtime
+  follows (`AGENTS.md` §30).
+- **One read-only port.** System facts (path existence, executable on `PATH`,
+  Git working tree, loopback port occupancy) arrive through the
+  `WorkspaceProbe` port; `NullWorkspaceProbe` is the permissive default, and
+  the composition root supplies `SystemWorkspaceProbe` (`src/probe.rs`).
+- **Defence in depth.** The configuration loader already rejects unknown
+  dependencies, cycles, and undeclared health ports; the validator re-checks
+  them so a `Config` assembled by any other means is still diagnosed.
+- **Client boundary, not a special case.** The use case is reached through
+  `OrchestratorClient::validate_workspace` over the daemon's IPC, exposed as
+  the MCP `validate_workspace` tool with a strict schema.
+
+---
+
+## 19. Where the shared local runtime belongs
 
 Three interfaces over three private application cores cannot share one developer
 environment. The **shared local runtime** gives them one owner of mutable state:
@@ -770,7 +795,7 @@ The full lifecycle, protocol, security, and limitations are in
 
 ---
 
-## 19. Enforcement and validation
+## 20. Enforcement and validation
 
 - Dependencies are declared exclusively through `[workspace.dependencies]` so
   boundaries are visible in one place.
@@ -789,7 +814,7 @@ The full lifecycle, protocol, security, and limitations are in
 
 ---
 
-## 20. Domain model
+## 21. Domain model
 
 The domain layer defines the vocabulary every other layer speaks. It lives in
 the `service-orchestrator-domain` crate and depends on no other workspace crate
@@ -828,7 +853,7 @@ reference resolution, and acyclicity across the aggregate.
 The full entity list, invariants, relationship diagram, and the list of things
 intentionally not yet modelled are in `docs/domain-model.md`.
 
-## 21. The application core
+## 22. The application core
 
 The `application` crate is the shared application core (`docs/application-core.md`).
 It is the one API the TUI, MCP, and any future interface call, so business
@@ -881,7 +906,7 @@ behavior lives in exactly one place.
   Bulk commands submit one independent workflow step per repository;
   `summarize_workflow` aggregates the per-repository outcomes.
 
-## 22. The Ratatui TUI adapter
+## 23. The Ratatui TUI adapter
 
 The `tui` crate is the human-facing interface (`docs/tui.md`,
 `docs/adr/013-ratatui-tui.md`). It is launched as `service-orchestrator tui`
@@ -924,7 +949,7 @@ The `tui` crate is the human-facing interface (`docs/tui.md`,
   normal exit, error, Ctrl+C, and panic; terminals below 60×14 render an
   informative minimum-size notice instead of a broken layout.
 
-## 23. The MCP adapter
+## 24. The MCP adapter
 
 The `mcp` crate is the agent-facing interface (`docs/mcp.md`,
 `docs/adr/014-mcp-integration.md`). It is launched as `service-orchestrator mcp`
@@ -980,7 +1005,7 @@ SDK `rmcp` 3.5.1.
   list stays bounded. Prompts are guidance only and reference only tools that
   exist.
 
-## 24. Related documents
+## 25. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -1017,6 +1042,9 @@ SDK `rmcp` 3.5.1.
   environment workflows: why orchestration belongs in the application core, why
   the task engine is reused, dependency closure, planning versus execution,
   precondition revalidation, and the trade-offs.
+- `docs/adr/017-workspace-validation.md` — the decision record for read-only
+  workspace validation: the `WorkspaceProbe` port, defence-in-depth checks, and
+  the configuration-conflict versus port-occupancy distinction.
 - `docs/environment-workflows.md` — environment preparation: the request and its
   defaults, selection precedence, dependency closure, planning, the execution
   phases, cancellation and failure handling, aggregated results, and TUI and MCP
@@ -1054,4 +1082,10 @@ SDK `rmcp` 3.5.1.
   prompts, permissions, observability, long-running work, example workflows,
   testing, and limitations.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
+- `docs/workspace-validation.md` — workspace validation: scope, read-only
+  guarantees, the individual checks, diagnostic codes, and safe execution.
+- `docs/performance-report.md` — measured performance at the documented service
+  scales, methodology, and bottlenecks.
+- `docs/reliability-report.md` — the reliability audit, defects found and fixed,
+  regression tests, and remaining risks.
 - `AGENTS.md` — the full engineering guidance and product philosophy.

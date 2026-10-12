@@ -309,6 +309,26 @@ pub fn manager(config: Arc<Config>) -> ServiceManager {
     )
 }
 
+/// Builds a manager that shares its runtime-state store with the caller, so a
+/// test can seed the pre-task transition state an application records and
+/// observe how a failed transition is reconciled (`tasks/017.md` defect D1).
+pub fn manager_with_state(
+    config: Arc<Config>,
+    runtimes: RuntimeRegistry,
+    ports: Arc<dyn PortChecker>,
+    inspector: Arc<dyn RuntimeInspector>,
+    state: Arc<InMemoryRuntimeStateStore>,
+) -> ServiceManager {
+    ServiceManager::new(
+        ProcessManager::new().expect("the process manager builds inside a Tokio runtime"),
+        config,
+        state,
+    )
+    .with_runtimes(Arc::new(runtimes))
+    .with_port_checker(ports)
+    .with_inspector(inspector)
+}
+
 /// Convenience accessor for the fixture's service id.
 pub fn service_id() -> ServiceId {
     ServiceId::new(SERVICE).unwrap()

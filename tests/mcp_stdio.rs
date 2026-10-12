@@ -340,6 +340,7 @@ fn mcp_stdio_end_to_end() {
         "list_workspaces",
         "list_services",
         "get_service_status",
+        "validate_workspace",
         "git_status",
         "build_service",
         "apply_migration",
@@ -389,6 +390,61 @@ fn mcp_stdio_end_to_end() {
     );
     assert_eq!(workspaces["success"], json!(true));
     assert_eq!(workspaces["data"][0]["id"], json!("demo"));
+
+    // -- 3b. workspace validation runs read-only against the real machine ----
+    //
+    // This is the only tool here that reaches outside the process: the binary's
+    // composition root wires the real filesystem/`PATH`/loopback probe. The
+    // fixture materialises `backend/orders-api` and `frontend/admin-ui` but not
+    // `libraries/shared-kit`, and none of the directories are Git checkouts, so
+    // a correct report must find the workspace root, flag the missing library
+    // path, and classify every repository as existing without Git metadata.
+    let validation = envelope(
+        &server.request(
+            "tools/call",
+            json!({ "name": "validate_workspace", "arguments": { "workspaceId": "demo" } }),
+        )["result"],
+    );
+    assert_eq!(validation["success"], json!(true));
+    let totals = &validation["data"]["totals"];
+    assert_eq!(totals["services"], json!(2), "orders-api and admin-ui");
+    assert_eq!(totals["backend_services"], json!(1));
+    assert_eq!(totals["frontend_services"], json!(1));
+    assert_eq!(totals["libraries"], json!(1));
+    assert_eq!(
+        totals["repositories_invalid"],
+        json!(2),
+        "the two service checkouts exist but hold no .git metadata: {validation}"
+    );
+    assert_eq!(
+        totals["repositories_missing"],
+        json!(1),
+        "the library's checkout directory was never created: {validation}"
+    );
+    assert!(
+        validation["data"]["diagnostics"]
+            .as_array()
+            .expect("diagnostics are an array")
+            .iter()
+            .any(|d| d["code"] == json!("missing_library_path")),
+        "the absent library working directory is reported: {validation}"
+    );
+    assert_eq!(
+        validation["data"]["port_conflicts"],
+        json!([]),
+        "the fixture declares no conflicting port"
+    );
+    // Occupancy is a property of whatever happens to be running on this
+    // machine, so only its shape is asserted — never an empty value.
+    let occupied = validation["data"]["occupied_ports"]
+        .as_array()
+        .expect("occupied_ports is an array");
+    for entry in occupied {
+        assert!(
+            entry["services"].as_array().is_some_and(|s| !s.is_empty()),
+            "an occupied port names the services declaring it: {entry}"
+        );
+    }
 
     // -- 4. a mutating operation submits a real task -------------------------
     let fetch = envelope(

@@ -306,6 +306,53 @@ fn two_clients_observe_the_same_workspace_and_service_state() {
     );
 }
 
+/// Validation over IPC is read-only: it submits no task and reaches no
+/// infrastructure, because the daemon's probe is the permissive default in
+/// these tests (`tasks/017.md` §7).
+#[test]
+fn validate_workspace_is_available_over_ipc_and_submits_nothing() {
+    let harness = Harness::start();
+    let tui = harness.client(ClientKind::Tui);
+    let mcp = harness.client(ClientKind::Mcp);
+
+    let report = tui
+        .validate_workspace(&demo_workspace())
+        .expect("the report is produced");
+    assert_eq!(report.workspace_id, demo_workspace());
+    assert_eq!(report.totals.services, 2);
+    assert_eq!(report.totals.libraries, 1);
+    assert!(
+        report.totals.repositories_valid >= 3,
+        "every configured repository is checked: {:?}",
+        report.totals
+    );
+    assert_eq!(
+        report.totals.errors, 0,
+        "the permissive in-test probe reports no environment failures: {:#?}",
+        report.diagnostics
+    );
+
+    // The same report is visible from the MCP client, and neither client
+    // scheduled anything.
+    let from_mcp = mcp
+        .validate_workspace(&demo_workspace())
+        .expect("the MCP client gets the same report");
+    assert_eq!(from_mcp.totals, report.totals);
+    assert!(tui.list_tasks().is_empty(), "validation scheduled no task");
+}
+
+#[test]
+fn validate_workspace_of_an_unknown_workspace_is_reported_over_ipc() {
+    let harness = Harness::start();
+    let client = harness.client(ClientKind::Tui);
+    let missing = service_orchestrator_domain::WorkspaceId::new("missing").unwrap();
+    let error = client.validate_workspace(&missing).unwrap_err();
+    assert!(
+        matches!(error, ApplicationError::WorkspaceNotFound(_)),
+        "expected a workspace-not-found error, got {error:?}"
+    );
+}
+
 #[test]
 fn a_task_submitted_by_one_client_is_visible_to_another() {
     let harness = Harness::start();

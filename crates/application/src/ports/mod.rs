@@ -32,6 +32,7 @@ pub(crate) mod git;
 pub(crate) mod health;
 pub(crate) mod logs;
 pub(crate) mod migration;
+pub(crate) mod probe;
 pub(crate) mod runtime_state;
 pub(crate) mod service_runtime;
 
@@ -54,6 +55,8 @@ pub use logs::{
     LogStreamError, LogSubscription, NullLogService,
 };
 pub use migration::{parameter as migration_parameter, MigrationError, ResolvedMigrationTarget};
+pub(crate) use probe::NullWorkspaceProbe;
+pub use probe::WorkspaceProbe;
 pub use runtime_state::{
     HealthState, InMemoryRuntimeStateStore, RuntimeStateStore, ServiceRuntimeState,
 };

@@ -22,8 +22,8 @@ use service_orchestrator_policy::{Authorization, PolicyEngine};
 use crate::error::ApplicationError;
 use crate::ports::{
     ArtifactInspector, GitManager, HealthIndex, LogService, NullArtifactInspector, NullGitManager,
-    NullHealthIndex, NullServiceRuntimeIndex, ResolvedRepository, ResolvedServiceTarget,
-    RuntimeStateStore, ServiceRuntimeIndex,
+    NullHealthIndex, NullServiceRuntimeIndex, NullWorkspaceProbe, ResolvedRepository,
+    ResolvedServiceTarget, RuntimeStateStore, ServiceRuntimeIndex, WorkspaceProbe,
 };
 
 /// The shared application core.
@@ -37,6 +37,7 @@ pub struct Application {
     artifacts: Arc<dyn ArtifactInspector>,
     service_runtime: Arc<dyn ServiceRuntimeIndex>,
     health: Arc<dyn HealthIndex>,
+    probe: Arc<dyn WorkspaceProbe>,
     policy: PolicyEngine,
     authorization: Authorization,
 }
@@ -67,6 +68,7 @@ impl Application {
             artifacts: Arc::new(NullArtifactInspector),
             service_runtime: Arc::new(NullServiceRuntimeIndex),
             health: Arc::new(NullHealthIndex),
+            probe: Arc::new(NullWorkspaceProbe),
             policy: PolicyEngine::new(),
             authorization: Authorization::standard(),
         }
@@ -113,6 +115,18 @@ impl Application {
     #[must_use]
     pub fn with_health_index(mut self, health: Arc<dyn HealthIndex>) -> Self {
         self.health = health;
+        self
+    }
+
+    /// Replaces the workspace probe.
+    ///
+    /// The probe is provided by the composition root; it performs the
+    /// read-only environment observations behind
+    /// [`validate_workspace`](Self::validate_workspace). Without a real probe,
+    /// validation assumes every path and program is present.
+    #[must_use]
+    pub fn with_workspace_probe(mut self, probe: Arc<dyn WorkspaceProbe>) -> Self {
+        self.probe = probe;
         self
     }
 
@@ -194,6 +208,11 @@ impl Application {
     /// Returns the health index.
     pub(crate) fn health(&self) -> &dyn HealthIndex {
         self.health.as_ref()
+    }
+
+    /// Returns the workspace probe boundary.
+    pub(crate) fn probe(&self) -> &dyn WorkspaceProbe {
+        self.probe.as_ref()
     }
 
     /// Resolves an entity's workspace-relative directory into an absolute path.

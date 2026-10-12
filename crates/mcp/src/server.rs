@@ -120,6 +120,13 @@ impl OrchestratorServer {
                         .get_workspace_status(&parse_workspace_id(&p.workspace_id)?),
                 )
             }
+            "validate_workspace" => {
+                let p = parse::<params::WorkspaceRef>(arguments)?;
+                query(
+                    self.client
+                        .validate_workspace(&parse_workspace_id(&p.workspace_id)?),
+                )
+            }
             "list_groups" => {
                 let p = parse::<params::WorkspaceRef>(arguments)?;
                 query(

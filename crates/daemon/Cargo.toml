@@ -16,7 +16,7 @@ service-orchestrator-application.workspace = true
 service-orchestrator-client.workspace = true
 service-orchestrator-domain.workspace = true
 service-orchestrator-execution.workspace = true
-nix = { workspace = true, features = ["fs"] }
+nix = { workspace = true, features = ["fs", "user"] }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
