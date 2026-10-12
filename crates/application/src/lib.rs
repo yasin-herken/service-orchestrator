@@ -53,6 +53,7 @@ mod error;
 mod models;
 mod ports;
 mod queries;
+mod validation;
 
 pub use app::Application;
 pub use error::ApplicationError;
@@ -64,6 +65,11 @@ pub use models::{
     PrepareSelectedLibrariesRequest, ServiceDiagnostics, ServiceRuntimeStatus, ServiceStatus,
     VersionAlignmentPlan, WorkflowCancellation, WorkflowPhaseProgress, WorkflowStatus,
     WorkflowTaskFailure, WorkspaceStatus,
+};
+pub use validation::{
+    ConfiguredPortConflict, OccupiedPort, RepositoryCheckStatus, RepositoryOwner,
+    RepositoryValidation, ValidationCode, ValidationDiagnostic, ValidationScope,
+    ValidationSeverity, ValidationTotals, WorkspaceValidationReport,
 };
 // The policy vocabulary an interface needs to *decide* whether to prompt for
 // confirmation. The application already owns the engine; re-exporting the
@@ -78,6 +84,6 @@ pub use ports::{
     NullServiceRuntimeIndex, ResolvedArtifact, ResolvedBuildCommand, ResolvedBuildTarget,
     ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository, ResolvedServiceTarget,
     RuntimeStateStore, ServiceHealth, ServiceProcessInfo, ServiceRuntimeError, ServiceRuntimeIndex,
-    ServiceRuntimeState, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
+    ServiceRuntimeState, WorkspaceProbe, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
 };
 pub use service_orchestrator_policy::{Authorization, PolicyDecision, PolicyEngine};

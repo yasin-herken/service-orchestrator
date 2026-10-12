@@ -22,6 +22,7 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 use std::process::ExitCode;
 use std::sync::Arc;
+use std::time::Duration;
 
 use service_orchestrator_application::{Application, ArtifactInspector, InMemoryRuntimeStateStore};
 use service_orchestrator_build::{
@@ -39,6 +40,10 @@ use service_orchestrator_mcp::{RemoteTaskMonitor, TaskMonitor};
 use service_orchestrator_process::ProcessManager;
 use service_orchestrator_runtime::{register_service_executors, ServiceManager};
 use service_orchestrator_tui::{RemoteTaskObserver, TaskObserver};
+
+mod probe;
+
+use probe::SystemWorkspaceProbe;
 
 /// The environment variable that overrides the configuration file location.
 const CONFIG_ENV: &str = "SERVICE_ORCHESTRATOR_CONFIG";
@@ -311,9 +316,16 @@ async fn bootstrap(
     register_service_executors(&mut registry, Arc::clone(&services));
     register_health_executors(&mut registry, Arc::clone(&health));
 
+    // The engine's default timeout is the configured `execution` default; it
+    // covers tasks that carry no explicit timeout — most importantly workflow
+    // steps, which previously had none and could hang a branch forever
+    // (`tasks/017.md` §19, defects D3/D4).
     let engine = Arc::new(
         TaskEngine::builder()
             .max_parallel_tasks(config.execution.max_parallel_tasks)
+            .default_timeout(Duration::from_secs(
+                config.execution.default_timeout_seconds,
+            ))
             .registry(registry)
             .build()?,
     );
@@ -336,7 +348,11 @@ async fn bootstrap(
     .with_git_manager(git.clone())
     .with_artifact_inspector(Arc::clone(&artifacts))
     .with_service_runtime(services.clone())
-    .with_health_index(health.store());
+    .with_health_index(health.store())
+    // The real, read-only environment probe behind `validate_workspace`. The
+    // application core never reaches the filesystem, `PATH`, or the network on
+    // its own (`tasks/017.md` §7).
+    .with_workspace_probe(Arc::new(SystemWorkspaceProbe));
 
     Ok(Runtime {
         application,

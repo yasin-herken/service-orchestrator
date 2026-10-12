@@ -211,7 +211,11 @@ impl ServiceManager {
         cancellation: Option<Cancellation>,
     ) -> Result<StartOutcome, ServiceRuntimeError> {
         let _guard = self.coordinator.acquire(&target.service_id).await;
-        self.start_locked(target, cancellation.as_ref()).await
+        let result = self.start_locked(target, cancellation.as_ref()).await;
+        if let Err(error) = &result {
+            self.reconcile_failed_transition(&target.service_id, error);
+        }
+        result
     }
 
     /// Stops a service, serializing with other operations on the same service.
@@ -226,7 +230,11 @@ impl ServiceManager {
     /// manager refuses the stop.
     pub async fn stop(&self, service_id: &ServiceId) -> Result<StopOutcome, ServiceRuntimeError> {
         let _guard = self.coordinator.acquire(service_id).await;
-        self.stop_locked(service_id).await
+        let result = self.stop_locked(service_id).await;
+        if let Err(error) = &result {
+            self.reconcile_failed_transition(service_id, error);
+        }
+        result
     }
 
     /// Restarts a service: a stop followed by a start, under one lock.
@@ -243,14 +251,63 @@ impl ServiceManager {
         cancellation: Option<Cancellation>,
     ) -> Result<RestartOutcome, ServiceRuntimeError> {
         let _guard = self.coordinator.acquire(&target.service_id).await;
-        let stopped = self.stop_locked(&target.service_id).await?;
-        let started = self.start_locked(target, cancellation.as_ref()).await?;
-        Ok(RestartOutcome {
-            workspace_id: target.workspace_id.clone(),
-            service_id: target.service_id.clone(),
-            stopped,
-            started,
-        })
+        let result = async {
+            let stopped = self.stop_locked(&target.service_id).await?;
+            let started = self.start_locked(target, cancellation.as_ref()).await?;
+            Ok::<RestartOutcome, ServiceRuntimeError>(RestartOutcome {
+                workspace_id: target.workspace_id.clone(),
+                service_id: target.service_id.clone(),
+                stopped,
+                started,
+            })
+        }
+        .await;
+        if let Err(error) = &result {
+            self.reconcile_failed_transition(&target.service_id, error);
+        }
+        result
+    }
+
+    /// Reconciles the observed runtime state after a failed lifecycle
+    /// transition.
+    ///
+    /// The application marks a service `Starting`/`Stopping` *before* it
+    /// submits the task, so every failure path inside the manager must clear
+    /// that transition state — otherwise the service is reported as
+    /// transitioning forever and every future start is refused (`tasks/017.md`
+    /// §15, defect D1). Errors that belong to a *different* in-flight
+    /// operation or to an unknown service are left untouched: clearing the
+    /// state there would clobber a legitimate transition owned elsewhere.
+    fn reconcile_failed_transition(&self, service_id: &ServiceId, error: &ServiceRuntimeError) {
+        match error {
+            ServiceRuntimeError::ServiceAlreadyStarting { .. }
+            | ServiceRuntimeError::ServiceNotFound { .. }
+            | ServiceRuntimeError::WorkspaceNotFound { .. } => return,
+            _ => {}
+        }
+        let current = self
+            .runtime_state
+            .service_state(service_id)
+            .unwrap_or_default();
+        let next = match current.process {
+            ProcessState::Starting | ProcessState::Stopping => {
+                // A live managed process means the stop half failed and the
+                // process is (probably) still alive; otherwise the transition
+                // failed outright and the honest state is `Failed`.
+                let still_alive = self
+                    .managed
+                    .get(service_id)
+                    .is_some_and(|entry| entry.state() == ProcessState::Running);
+                if still_alive {
+                    ProcessState::Running
+                } else {
+                    ProcessState::Failed
+                }
+            }
+            _ => return,
+        };
+        self.runtime_state
+            .set_service_state(service_id, current.with_process(next));
     }
 
     /// Returns the configured workspace that owns a service, if any.
@@ -442,6 +499,18 @@ impl ServiceManager {
         let workspace_id = workspace.workspace.id.clone();
 
         let Some(record) = self.managed.get(service_id) else {
+            // The application marked the service `Stopping` before scheduling;
+            // clear that transition state so the service is not stuck
+            // (`tasks/017.md` §15, defect D1). The process is not ours, so the
+            // honest observed state is `Unknown` — not `Stopped`.
+            let current = self
+                .runtime_state
+                .service_state(service_id)
+                .unwrap_or_default();
+            if matches!(current.process, ProcessState::Stopping) {
+                self.runtime_state
+                    .set_service_state(service_id, current.with_process(ProcessState::Unknown));
+            }
             return Ok(StopOutcome {
                 workspace_id,
                 service_id: service_id.clone(),
@@ -456,6 +525,12 @@ impl ServiceManager {
         if record.handle.is_terminal() {
             let snapshot = record.handle.snapshot();
             self.managed.remove(service_id);
+            let current = self
+                .runtime_state
+                .service_state(service_id)
+                .unwrap_or_default();
+            self.runtime_state
+                .set_service_state(service_id, current.with_process(snapshot.domain_state()));
             return Ok(StopOutcome {
                 workspace_id,
                 service_id: service_id.clone(),

@@ -20,9 +20,11 @@
 //! churn.
 
 use std::future::Future;
+use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::FutureExt;
 use service_orchestrator_domain::{TaskFailure, TaskId, TaskKind, TaskStatus};
 use tokio::sync::OwnedSemaphorePermit;
 
@@ -72,7 +74,20 @@ fn pump(inner: &Arc<EngineInner>) {
         };
         match inner.store.transition(&id, TaskStatus::Running) {
             Ok(change) => inner.publish_status_change(&change),
-            Err(_) => break,
+            // The task left `Queued` between selection and the transition
+            // (e.g. it was cancelled); skip it and keep dispatching other
+            // ready tasks (`tasks/017.md` §19, defect D11). If it is somehow
+            // still queued, stop dispatching rather than spinning.
+            Err(_) => {
+                if inner
+                    .store
+                    .task(&id)
+                    .is_some_and(|task| task.status == TaskStatus::Queued)
+                {
+                    break;
+                }
+                continue;
+            }
         }
         inner.handle.spawn(run_task(inner.clone(), id, permit));
     }
@@ -95,11 +110,40 @@ enum Attempt {
 /// Executes a task to completion, applying retries, in the spawned task.
 async fn run_task(inner: Arc<EngineInner>, id: TaskId, permit: OwnedSemaphorePermit) {
     let Some(spec) = inner.store.execution_spec(&id) else {
+        // The task reached `Running` but its execution record is gone. Resolve
+        // it as failed instead of leaving it (and its dependents) stuck
+        // forever (`tasks/017.md` §19).
+        if let Ok(change) = inner.store.fail(
+            &id,
+            failure(
+                "EXECUTION_SPEC_MISSING",
+                "the task's execution record was missing; the task was failed",
+            ),
+        ) {
+            inner.publish_status_change(&change);
+        }
+        for change in inner.store.settle_dependents(&id) {
+            inner.publish_status_change(&change);
+        }
         drop(permit);
+        inner.notify.notify_one();
         return;
     };
 
-    let resolution = execute_with_retry(&inner, &spec).await;
+    // A panicking executor must not wedge the task in `Running`: the task would
+    // hold its semaphore permit forever and every dependent would stay
+    // `Blocked` (`tasks/017.md` §19, defect D2). Catch the panic and resolve
+    // the task as a structured failure so dependents settle normally.
+    let resolution = match AssertUnwindSafe(execute_with_retry(&inner, &spec))
+        .catch_unwind()
+        .await
+    {
+        Ok(resolution) => resolution,
+        Err(_) => Resolution::Failed(failure(
+            "TASK_EXECUTOR_PANICKED",
+            "the task executor panicked; the task was failed so dependents are not blocked forever",
+        )),
+    };
 
     let change = match resolution {
         Resolution::Succeeded => inner.store.transition(&id, TaskStatus::Succeeded),
@@ -153,7 +197,8 @@ async fn execute_with_retry(inner: &Arc<EngineInner>, spec: &ExecutionSpec) -> R
             ProgressReporter::new(inner.clone(), spec.id.clone()),
         );
 
-        let attempt_result = run_attempt(executor, context, spec.timeout).await;
+        let attempt_result =
+            run_attempt(executor, context, spec.timeout, spec.cancellation.clone()).await;
 
         let failure = match attempt_result {
             Attempt::Cancelled => return Resolution::Cancelled,
@@ -186,20 +231,25 @@ async fn execute_with_retry(inner: &Arc<EngineInner>, spec: &ExecutionSpec) -> R
 /// Cancellation is *cooperative*: the engine does not drop the executor future
 /// out from under it. The executor receives the task's [`Cancellation`] in its
 /// [`TaskContext`] and is responsible for observing it and returning
-/// [`TaskExecutorError::Cancelled`] after releasing resources. An executor that
-/// never observes cancellation runs to completion; the engine therefore relies
-/// on executors to cooperate.
+/// [`TaskExecutorError::Cancelled`] after releasing resources. On timeout the
+/// engine signals the task's cancellation *before* dropping the future, so an
+/// executor that owns a child process can terminate it instead of leaking it
+/// (`tasks/017.md` §21, defect D6).
 async fn run_attempt(
     executor: Arc<dyn TaskExecutor>,
     context: TaskContext,
     timeout: Option<Duration>,
+    cancellation: Cancellation,
 ) -> Attempt {
     let future = executor.execute(context);
     match with_timeout(future, timeout).await {
         Ok(Ok(outcome)) => Attempt::Outcome(outcome),
         Ok(Err(TaskExecutorError::Cancelled)) => Attempt::Cancelled,
         Ok(Err(error)) => Attempt::Failure(error.to_failure()),
-        Err(_elapsed) => Attempt::Failure(failure("TASK_TIMEOUT", "task timed out")),
+        Err(_elapsed) => {
+            cancellation.cancel();
+            Attempt::Failure(failure("TASK_TIMEOUT", "task timed out"))
+        }
     }
 }
 

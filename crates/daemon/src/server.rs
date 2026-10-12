@@ -40,6 +40,13 @@ const SHUTDOWN_GRACE: std::time::Duration = std::time::Duration::from_millis(150
 /// How long the accept loop pauses after a transient accept error.
 const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50);
 
+/// The per-connection outbound queue capacity.
+///
+/// Responses and pushed events share one bounded queue so a client that stops
+/// reading can never grow the daemon's memory without limit
+/// (`tasks/017.md` §18, defect D7).
+const OUTBOUND_CAPACITY: usize = 256;
+
 /// Configuration for a running daemon.
 #[derive(Clone, Debug)]
 pub struct DaemonOptions {
@@ -180,11 +187,20 @@ async fn accept_loop(
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _)) => {
+                        // The connecting peer's identity is taken from the
+                        // kernel, never from the request envelope: a connection
+                        // whose UID does not match the daemon's is never treated
+                        // as an interactive (TUI) peer, so it can never obtain
+                        // destructive authorization (`tasks/017.md` §27,
+                        // finding H-IPC-1).
+                        let same_user = stream
+                            .peer_cred()
+                            .is_ok_and(|cred| cred.uid() == nix::unistd::geteuid().as_raw());
                         shared.clients.fetch_add(1, Ordering::SeqCst);
                         let shared = Arc::clone(&shared);
                         let shutdown = shutdown.clone();
                         tokio::spawn(async move {
-                            handle_connection(stream, shared, shutdown).await;
+                            handle_connection(stream, shared, shutdown, same_user).await;
                         });
                     }
                     Err(_) => tokio::time::sleep(ACCEPT_BACKOFF).await,
@@ -199,9 +215,10 @@ async fn handle_connection(
     stream: tokio::net::UnixStream,
     shared: Arc<Shared>,
     mut shutdown: watch::Receiver<bool>,
+    same_user: bool,
 ) {
     let (mut reader, mut writer) = stream.into_split();
-    let (out, mut out_rx) = mpsc::unbounded_channel::<ServerMessage>();
+    let (out, mut out_rx) = mpsc::channel::<ServerMessage>(OUTBOUND_CAPACITY);
 
     // The writer task serializes every outgoing message so a response and a
     // pushed event can never interleave mid-frame.
@@ -222,6 +239,7 @@ async fn handle_connection(
                 Ok(event) => {
                     if event_out
                         .send(ServerMessage::Event(ServerEvent::Task { event }))
+                        .await
                         .is_err()
                     {
                         return;
@@ -240,15 +258,28 @@ async fn handle_connection(
             _ = shutdown.changed() => {
                 let _ = out.send(ServerMessage::Event(ServerEvent::Shutdown {
                     reason: "the daemon is shutting down".to_owned(),
-                }));
+                })).await;
                 break;
             }
             frame = read_frame_async::<_, RequestEnvelope>(&mut reader) => {
                 match frame {
                     Ok(Some(request)) => {
-                        handle_request(&shared, &out, request, &mut subscriptions).await;
+                        handle_request(&shared, &out, request, &mut subscriptions, same_user).await;
                     }
-                    Ok(None) | Err(_) => break,
+                    Ok(None) => break,
+                    Err(error) => {
+                        // Malformed input never crashes the daemon, but the
+                        // peer now receives a structured error instead of a
+                        // bare disconnect (`tasks/017.md` §18, finding G3).
+                        let _ = out.send(ServerMessage::Response(ResponseEnvelope {
+                            request_id: "unknown".to_owned(),
+                            result: Err(unavailable(
+                                codes::INVALID_REQUEST,
+                                format!("the request frame could not be read: {error}"),
+                            )),
+                        })).await;
+                        break;
+                    }
                 }
             }
         }
@@ -266,9 +297,10 @@ async fn handle_connection(
 /// Handles a single decoded request.
 async fn handle_request(
     shared: &Arc<Shared>,
-    out: &mpsc::UnboundedSender<ServerMessage>,
+    out: &mpsc::Sender<ServerMessage>,
     request: RequestEnvelope,
     subscriptions: &mut HashMap<ServiceId, JoinHandle<()>>,
+    same_user: bool,
 ) {
     // Enforce protocol compatibility before interpreting anything
     // (`tasks/015.md` §25).
@@ -284,24 +316,25 @@ async fn handle_request(
                     request.protocol, PROTOCOL_VERSION
                 ),
             )),
-        );
+        )
+        .await;
         return;
     }
 
     match request.method.as_str() {
         service_orchestrator_client::ops::DAEMON_STATUS => {
-            respond(out, &request, encode(shared.status()));
+            respond(out, &request, encode(shared.status())).await;
         }
         service_orchestrator_client::ops::DAEMON_SHUTDOWN => {
             shared.request_shutdown();
-            respond(out, &request, encode(()));
+            respond(out, &request, encode(())).await;
         }
         service_orchestrator_client::ops::SUBSCRIBE_SERVICE_LOGS => {
             let decoded: Result<(ServiceId,), _> = serde_json::from_value(request.params.clone());
             match decoded {
                 Ok((service_id,)) => match subscriptions.entry(service_id.clone()) {
                     std::collections::hash_map::Entry::Occupied(_) => {
-                        respond(out, &request, encode(()));
+                        respond(out, &request, encode(())).await;
                     }
                     std::collections::hash_map::Entry::Vacant(entry) => {
                         match shared.application.subscribe_service_logs(&service_id) {
@@ -309,20 +342,23 @@ async fn handle_request(
                                 let handle =
                                     spawn_log_pump(service_id.clone(), subscription, out.clone());
                                 entry.insert(handle);
-                                respond(out, &request, encode(()));
+                                respond(out, &request, encode(())).await;
                             }
-                            Err(error) => respond(out, &request, Err(error)),
+                            Err(error) => respond(out, &request, Err(error)).await,
                         }
                     }
                 },
-                Err(error) => respond(
-                    out,
-                    &request,
-                    Err(unavailable(
-                        codes::INVALID_REQUEST,
-                        format!("invalid subscribe parameters: {error}"),
-                    )),
-                ),
+                Err(error) => {
+                    respond(
+                        out,
+                        &request,
+                        Err(unavailable(
+                            codes::INVALID_REQUEST,
+                            format!("invalid subscribe parameters: {error}"),
+                        )),
+                    )
+                    .await
+                }
             }
         }
         service_orchestrator_client::ops::UNSUBSCRIBE_SERVICE_LOGS => {
@@ -333,11 +369,12 @@ async fn handle_request(
                     handle.abort();
                 }
             }
-            respond(out, &request, encode(()));
+            respond(out, &request, encode(())).await;
         }
         _ => {
-            let result = dispatch::route(&shared.application, &shared.engine, &request).await;
-            respond(out, &request, result);
+            let result =
+                dispatch::route(&shared.application, &shared.engine, &request, same_user).await;
+            respond(out, &request, result).await;
         }
     }
 }
@@ -346,7 +383,7 @@ async fn handle_request(
 fn spawn_log_pump(
     service_id: ServiceId,
     mut subscription: Box<dyn LogSubscription>,
-    out: mpsc::UnboundedSender<ServerMessage>,
+    out: mpsc::Sender<ServerMessage>,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         loop {
@@ -357,6 +394,7 @@ fn spawn_log_pump(
                             service_id: service_id.clone(),
                             entry,
                         }))
+                        .await
                         .is_err()
                     {
                         return;
@@ -370,15 +408,17 @@ fn spawn_log_pump(
 }
 
 /// Sends a response envelope.
-fn respond(
-    out: &mpsc::UnboundedSender<ServerMessage>,
+async fn respond(
+    out: &mpsc::Sender<ServerMessage>,
     request: &RequestEnvelope,
     result: Result<Value, ApplicationError>,
 ) {
-    let _ = out.send(ServerMessage::Response(ResponseEnvelope {
-        request_id: request.request_id.clone(),
-        result,
-    }));
+    let _ = out
+        .send(ServerMessage::Response(ResponseEnvelope {
+            request_id: request.request_id.clone(),
+            result,
+        }))
+        .await;
 }
 
 /// Serializes an operation result into a JSON value.

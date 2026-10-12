@@ -369,11 +369,15 @@ impl TaskStore {
         Ok(())
     }
 
-    /// Cancels every queued task whose cancellation has been signalled.
+    /// Cancels every queued or blocked task whose cancellation has been
+    /// signalled.
     ///
     /// A cancellation request is honoured before a queued task ever starts: the
     /// task transitions `queued -> cancelled` without occupying an execution
-    /// slot, and dependent tasks settle as skipped through
+    /// slot. A `blocked` task carrying a cancellation signal is settled as
+    /// `cancelled` too — waiting for its dependencies first would report the
+    /// wrong terminal state for work the user explicitly cancelled
+    /// (`tasks/017.md` §21, defect D9). Dependents settle as skipped through
     /// [`settle_dependents`](Self::settle_dependents). Returns the transitions
     /// applied so the engine can publish events and settle dependents
     /// (`tasks/016.md` §25).
@@ -384,7 +388,8 @@ impl TaskStore {
             .values()
             .filter(|id| {
                 inner.tasks.get(id).is_some_and(|record| {
-                    record.task.status == TaskStatus::Queued && record.cancellation.is_cancelled()
+                    matches!(record.task.status, TaskStatus::Queued | TaskStatus::Blocked)
+                        && record.cancellation.is_cancelled()
                 })
             })
             .cloned()

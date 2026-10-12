@@ -13,6 +13,7 @@ workspace = true
 
 [dependencies]
 async-trait.workspace = true
+futures-util.workspace = true
 serde.workspace = true
 service-orchestrator-domain.workspace = true
 thiserror.workspace = true

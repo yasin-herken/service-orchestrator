@@ -176,6 +176,7 @@ agent never has to construct a shell command: there is deliberately **no
 | `list_workspaces` | read | every configured workspace |
 | `get_workspace` | read | one workspace |
 | `get_workspace_status` | read | a workspace status snapshot (services + state) |
+| `validate_workspace` | read | a read-only validation report (repositories, runtimes, dependencies, ports) |
 | `list_groups` / `get_group` | read | service groups |
 | `list_profiles` / `get_profile` | read | developer profiles |
 

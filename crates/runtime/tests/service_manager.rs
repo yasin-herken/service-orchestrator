@@ -128,6 +128,56 @@ async fn a_busy_port_prevents_a_start() {
 
 #[tokio::test]
 #[cfg(unix)]
+async fn a_failed_start_clears_the_starting_state_so_the_service_is_recoverable() {
+    // Regression test for `tasks/017.md` defect D1: the application marks a
+    // service `Starting` before it submits the start task, so a failed start
+    // must reconcile that state — otherwise every future start is refused
+    // with "currently starting" until the daemon restarts.
+    use service_orchestrator_application::{InMemoryRuntimeStateStore, RuntimeStateStore};
+
+    let fixture = fixture(&[8081], Some(java_runtime()));
+    let state = Arc::new(InMemoryRuntimeStateStore::new());
+    let manager = support::manager_with_state(
+        Arc::clone(&fixture.config),
+        support::sleep_registry(),
+        Arc::new(BusyPort(8081)),
+        Arc::new(NullRuntimeInspector),
+        Arc::clone(&state),
+    );
+
+    // The application's pre-task bookkeeping.
+    let current = state.service_state(&service_id()).unwrap_or_default();
+    state.set_service_state(&service_id(), current.with_process(ProcessState::Starting));
+
+    let error = manager.start(&fixture.target, None).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ServiceRuntimeError::PortAlreadyInUse { .. }
+    ));
+
+    let reconciled = state
+        .service_state(&service_id())
+        .expect("the transition state is recorded");
+    assert_eq!(
+        reconciled.process,
+        ProcessState::Failed,
+        "a failed start must not leave the service stuck in Starting"
+    );
+
+    // The service is recoverable: with the port free, the next start succeeds.
+    let recovered = support::manager_with_state(
+        Arc::clone(&fixture.config),
+        support::sleep_registry(),
+        Arc::new(FreePortChecker),
+        Arc::new(NullRuntimeInspector),
+        state,
+    );
+    recovered.start(&fixture.target, None).await.unwrap();
+    recovered.stop(&service_id()).await.unwrap();
+}
+
+#[tokio::test]
+#[cfg(unix)]
 async fn a_version_mismatch_prevents_a_start() {
     let pinned = Version::new("27").unwrap();
     let fixture = fixture(

@@ -35,7 +35,7 @@ use service_orchestrator_application::{
     LibraryStatus, LogEntry, LogPage, LogRequest, LogSubscription, MigrationStatus,
     OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
     ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus, ServiceStatus, WorkflowCancellation,
-    WorkflowStatus, WorkspaceStatus,
+    WorkflowStatus, WorkspaceStatus, WorkspaceValidationReport,
 };
 use service_orchestrator_application::{DiffOptions, HealthState};
 use service_orchestrator_domain::{
@@ -116,6 +116,17 @@ pub trait OrchestratorClient: Send + Sync {
         &self,
         workspace_id: &WorkspaceId,
     ) -> Result<WorkspaceStatus, ApplicationError>;
+
+    /// Validates a workspace against this machine, read-only.
+    ///
+    /// The report describes configuration, repository checkouts, runtime and
+    /// build-tool availability, dependency resolution, port conflicts, and
+    /// actual port occupancy. Nothing is checked out, pulled, built, started,
+    /// or rewritten (`tasks/017.md` §7).
+    fn validate_workspace(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<WorkspaceValidationReport, ApplicationError>;
 
     /// Lists a workspace's service groups.
     fn list_groups(
@@ -509,6 +520,13 @@ impl OrchestratorClient for Application {
         workspace_id: &WorkspaceId,
     ) -> Result<WorkspaceStatus, ApplicationError> {
         Application::get_workspace_status(self, workspace_id)
+    }
+
+    fn validate_workspace(
+        &self,
+        workspace_id: &WorkspaceId,
+    ) -> Result<WorkspaceValidationReport, ApplicationError> {
+        Application::validate_workspace(self, workspace_id)
     }
 
     fn list_groups(

@@ -113,15 +113,23 @@ impl Application {
         }
 
         let target = self.service_runtime_target(workspace, service)?;
+        // Mark the service as transitioning *before* scheduling so the task can
+        // never complete (or fail) before the state is recorded, and revert if
+        // scheduling itself fails (`tasks/017.md` §15, defect D1).
+        let previous = current.clone();
+        self.runtime()
+            .set_service_state(service_id, current.with_process(ProcessState::Starting));
         let result = self.schedule(
             TaskDefinition::new(TaskKind::StartService)
                 .for_service(service_id.clone())
                 .with_parameters(target.to_parameters())
                 .with_timeout(self.default_timeout_seconds()),
-        )?;
-        self.runtime()
-            .set_service_state(service_id, current.with_process(ProcessState::Starting));
-        Ok(result)
+        );
+        if result.is_err() {
+            self.runtime()
+                .set_service_state(service_id, previous.with_process(ProcessState::Unknown));
+        }
+        result
     }
 
     /// Stops a service.
@@ -150,15 +158,22 @@ impl Application {
         match current.process {
             ProcessState::Running | ProcessState::Starting | ProcessState::Unknown => {
                 let target = self.service_runtime_target(workspace, service)?;
+                let previous = current.clone();
+                self.runtime()
+                    .set_service_state(service_id, current.with_process(ProcessState::Stopping));
                 let result = self.schedule(
                     TaskDefinition::new(TaskKind::StopService)
                         .for_service(service_id.clone())
                         .with_parameters(target.to_parameters())
                         .with_timeout(self.default_timeout_seconds()),
-                )?;
-                self.runtime()
-                    .set_service_state(service_id, current.with_process(ProcessState::Stopping));
-                Ok(result)
+                );
+                if result.is_err() {
+                    self.runtime().set_service_state(
+                        service_id,
+                        previous.with_process(ProcessState::Unknown),
+                    );
+                }
+                result
             }
             ProcessState::Stopping
             | ProcessState::Stopped
@@ -198,15 +213,20 @@ impl Application {
 
         let target = self.service_runtime_target(workspace, service)?;
         let current = self.runtime().service_state(service_id).unwrap_or_default();
+        let previous = current.clone();
+        self.runtime()
+            .set_service_state(service_id, current.with_process(ProcessState::Starting));
         let result = self.schedule(
             TaskDefinition::new(TaskKind::RestartService)
                 .for_service(service_id.clone())
                 .with_parameters(target.to_parameters())
                 .with_timeout(self.default_timeout_seconds()),
-        )?;
-        self.runtime()
-            .set_service_state(service_id, current.with_process(ProcessState::Starting));
-        Ok(result)
+        );
+        if result.is_err() {
+            self.runtime()
+                .set_service_state(service_id, previous.with_process(ProcessState::Unknown));
+        }
+        result
     }
 
     /// Runs Liquibase migrations for a service.

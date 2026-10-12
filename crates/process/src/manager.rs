@@ -210,8 +210,15 @@ impl ProcessManager {
         let handle = self.spawn(spec)?;
         let watcher = handle.clone();
         self.inner.handle.spawn(async move {
-            cancellation.await;
-            let _ = watcher.cancel();
+            // End the watcher when either side resolves: the cancellation
+            // future (stop the process) or the process reaching a terminal
+            // state (nothing to do). Without the second arm the watcher task
+            // would linger for every completed process (`tasks/017.md` §22,
+            // defect D10).
+            tokio::select! {
+                _ = cancellation => { let _ = watcher.cancel(); }
+                _ = watcher.wait() => {}
+            }
         });
         Ok(handle)
     }

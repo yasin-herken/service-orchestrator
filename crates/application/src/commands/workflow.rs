@@ -1200,15 +1200,12 @@ impl Application {
             );
         }
 
-        let workflow_id = self
-            .tasks()
-            .submit_workflow(builder.build())
-            .map_err(super::map_submit_error)?;
-        for id in &to_restart {
-            let current = self.runtime().service_state(id).unwrap_or_default();
-            self.runtime()
-                .set_service_state(id, current.with_process(ProcessState::Starting));
-        }
+        let workflow_id =
+            self.submit_lifecycle_workflow(&to_restart, ProcessState::Starting, || {
+                self.tasks()
+                    .submit_workflow(builder.build())
+                    .map_err(super::map_submit_error)
+            })?;
         Ok(OperationResult::WorkflowScheduled { workflow_id, kind })
     }
 
@@ -1285,16 +1282,44 @@ impl Application {
             }
         }
 
-        let workflow_id = self
-            .tasks()
-            .submit_workflow(builder.build())
-            .map_err(super::map_submit_error)?;
-        for id in &to_start {
-            let current = self.runtime().service_state(id).unwrap_or_default();
-            self.runtime()
-                .set_service_state(id, current.with_process(ProcessState::Starting));
-        }
+        let workflow_id =
+            self.submit_lifecycle_workflow(&to_start, ProcessState::Starting, || {
+                self.tasks()
+                    .submit_workflow(builder.build())
+                    .map_err(super::map_submit_error)
+            })?;
         Ok(OperationResult::WorkflowScheduled { workflow_id, kind })
+    }
+
+    /// Marks services as transitioning before a lifecycle workflow is
+    /// submitted, restoring their previous state if submission fails.
+    ///
+    /// The marks are applied *before* the workflow reaches the engine so a task
+    /// can never settle before its transition state is recorded, and a failed
+    /// submission never leaves a service permanently marked as transitioning
+    /// (`tasks/017.md` §15, defect D1).
+    fn submit_lifecycle_workflow(
+        &self,
+        service_ids: &[ServiceId],
+        state: ProcessState,
+        submit: impl FnOnce() -> Result<WorkflowId, ApplicationError>,
+    ) -> Result<WorkflowId, ApplicationError> {
+        let mut previous: BTreeMap<ServiceId, crate::ports::ServiceRuntimeState> = BTreeMap::new();
+        for id in service_ids {
+            let current = self.runtime().service_state(id).unwrap_or_default();
+            previous.insert(id.clone(), current.clone());
+            self.runtime()
+                .set_service_state(id, current.with_process(state));
+        }
+        match submit() {
+            Ok(workflow_id) => Ok(workflow_id),
+            Err(error) => {
+                for (id, state) in previous {
+                    self.runtime().set_service_state(&id, state);
+                }
+                Err(error)
+            }
+        }
     }
 
     /// Builds and submits a stop workflow for the given services.
@@ -1368,15 +1393,12 @@ impl Application {
             }
         }
 
-        let workflow_id = self
-            .tasks()
-            .submit_workflow(builder.build())
-            .map_err(super::map_submit_error)?;
-        for id in &to_stop {
-            let current = self.runtime().service_state(id).unwrap_or_default();
-            self.runtime()
-                .set_service_state(id, current.with_process(ProcessState::Stopping));
-        }
+        let workflow_id =
+            self.submit_lifecycle_workflow(&to_stop, ProcessState::Stopping, || {
+                self.tasks()
+                    .submit_workflow(builder.build())
+                    .map_err(super::map_submit_error)
+            })?;
         Ok(OperationResult::WorkflowScheduled { workflow_id, kind })
     }
 }

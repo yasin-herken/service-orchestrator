@@ -41,6 +41,8 @@ pub const LIST_WORKSPACES: &str = "list_workspaces";
 pub const GET_WORKSPACE: &str = "get_workspace";
 /// Returns a workspace status snapshot.
 pub const GET_WORKSPACE_STATUS: &str = "get_workspace_status";
+/// Validates a workspace against this machine, read-only.
+pub const VALIDATE_WORKSPACE: &str = "validate_workspace";
 /// Lists a workspace's service groups.
 pub const LIST_GROUPS: &str = "list_groups";
 /// Returns a service group by id.
