@@ -7,6 +7,11 @@
 [workspace]
 resolver = "2"
 members = ["crates/*"]
+# The Tauri desktop app carries its own toolchain-facing workspace (Tauri 2,
+# `wry`, `tao`) and is developed with `npm run tauri dev`; it consumes the
+# workspace crates as path dependencies but is not a member of this workspace
+# (`tasks/018.md` §5).
+exclude = ["apps/desktop/src-tauri"]
 
 [workspace.package]
 version = "0.1.0"

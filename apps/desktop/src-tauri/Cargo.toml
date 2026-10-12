@@ -1,0 +1,40 @@
+[package]
+name = "service-orchestrator-desktop"
+version = "0.1.0"
+description = "Tauri 2 desktop GUI for Service Orchestrator — a thin adapter over the shared local daemon"
+edition = "2021"
+rust-version = "1.88"
+publish = false
+
+# This package is intentionally its own workspace: the Tauri/wry toolchain is
+# developed with `npm run tauri dev` inside apps/desktop and is excluded from
+# the root Cargo workspace (see the root Cargo.toml `exclude`). It consumes the
+# workspace crates as path dependencies.
+[workspace]
+
+[lib]
+name = "service_orchestrator_desktop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# The GUI never renders, parses, or executes core data itself: everything goes
+# through these shared crates, exactly like the TUI and MCP adapters.
+service-orchestrator-application = { path = "../../../crates/application" }
+service-orchestrator-client = { path = "../../../crates/client" }
+service-orchestrator-config = { path = "../../../crates/config" }
+service-orchestrator-domain = { path = "../../../crates/domain" }
+service-orchestrator-execution = { path = "../../../crates/execution" }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tauri = { version = "2", features = [] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", "sync", "net", "io-util"] }
+
+[dev-dependencies]
+# The adapter integration tests talk to a real daemon over the real socket.
+service-orchestrator-daemon = { path = "../../../crates/daemon" }
+
+[lints.rust]
+missing_docs = "warn"

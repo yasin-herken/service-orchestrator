@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "Minimal permissions for the main window: core application and event primitives only. No shell, filesystem, HTTP, or process plugin is granted to the frontend; every orchestrator operation goes through the explicit read-only commands (tasks/018.md §12).",
+  "windows": ["main"],
+  "permissions": ["core:default"]
+}

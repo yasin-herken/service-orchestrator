@@ -7,15 +7,17 @@ out branches, building shared libraries, running Liquibase migrations, building
 and starting applications, inspecting logs, running health checks, and
 executing dependency-aware workflows.
 
-It exposes the same capabilities through two interfaces:
+It exposes the same capabilities through three interfaces:
 
-- a Ratatui terminal UI for human developers, and
-- an MCP server for AI agents.
+- a Ratatui terminal UI for human developers,
+- an MCP server for AI agents, and
+- a Tauri 2 desktop GUI for human developers (`apps/desktop`).
 
-Both interfaces are adapters over one shared application core. That core runs
-inside a single local **daemon**; the TUI and MCP are clients of it over a Unix
-domain socket, so they share one task engine, one process registry, and one log
-store (`docs/local-daemon.md`, `docs/adr/015-shared-local-runtime.md`).
+All interfaces are adapters over one shared application core. That core runs
+inside a single local **daemon**; the TUI, MCP, and GUI are clients of it over a
+Unix domain socket, so they share one task engine, one process registry, and one
+log store (`docs/local-daemon.md`, `docs/adr/015-shared-local-runtime.md`,
+`docs/adr/018-tauri-desktop-gui.md`).
 
 ---
 
@@ -34,14 +36,15 @@ application. AI is an optional interface.
 
 ## 2. The core architectural rule
 
-> The application core must not depend on Ratatui or MCP. Both are interface
-> adapters over the same application core.
+> The application core must not depend on Ratatui, Tauri, or MCP. All are
+> interface adapters over the same application core.
 
 There is exactly one source of truth for behavior:
 
 ```text
 TUI -> application use case -> task engine -> infrastructure
 MCP -> application use case -> task engine -> infrastructure
+GUI -> application use case -> task engine -> infrastructure
 ```
 
 Business logic is never duplicated per interface.
@@ -63,7 +66,7 @@ From innermost to outermost:
 5. **Client / local runtime** — the `client` crate (the `OrchestratorClient`
    boundary and its IPC transport) and the `daemon` crate (the local IPC server
    that owns the application core). Neither contains business logic.
-6. **Interfaces** — TUI and MCP adapters, both clients of the daemon.
+6. **Interfaces** — TUI, MCP, and desktop GUI adapters, all clients of the daemon.
 7. **Composition root** — the `service-orchestrator` binary. It wires concrete
    infrastructure into the application core, hands the core to the daemon for the
    `daemon` subcommand, and hands a client to an interface for `tui`/`mcp`.
@@ -227,12 +230,12 @@ rejected by Cargo at build time.
 
 ---
 
-## 6. Why TUI and MCP are adapters
+## 6. Why the interfaces are adapters
 
-The TUI and the MCP server answer the same questions ("what services exist?",
-"build this service", "start this profile") over different transports. If each
-implemented its own version of those operations, behavior would drift and every
-new capability would have to be built twice.
+The TUI, the MCP server, and the desktop GUI answer the same questions ("what
+services exist?", "build this service", "start this profile") over different
+transports. If each implemented its own version of those operations, behavior
+would drift and every new capability would have to be built three times.
 
 Instead:
 
@@ -241,14 +244,17 @@ Instead:
 - The MCP server validates tool input, applies policy, and forwards calls to
   application use cases. It contains no business logic and never shells out
   directly.
+- The desktop GUI wraps the same use cases in a small read-only command set and
+  renders the answers; it holds no second client, task engine, or process
+  manager.
 
-Both speak to the application core through the same `OrchestratorClient` boundary
-and, in production, through the same local daemon. The TUI and MCP are therefore
-not only logically but *operationally* identical: they observe one shared task
-engine, process registry, and log store, so a change made through one is
-immediately visible to the other (`docs/local-daemon.md`).
+All speak to the application core through the same `OrchestratorClient` boundary
+and, in production, through the same local daemon. They are therefore not only
+logically but *operationally* identical: they observe one shared task engine,
+process registry, and log store, so a change made through one is immediately
+visible to the others (`docs/local-daemon.md`).
 
-Both therefore see identical behavior, identical policies, and identical error
+They therefore see identical behavior, identical policies, and identical error
 semantics. This is also why the permission model lives in `policy` and is applied
 by the application and interfaces rather than inside a specific UI.
 
@@ -1005,7 +1011,58 @@ SDK `rmcp` 3.5.1.
   list stays bounded. Prompts are guidance only and reference only tools that
   exist.
 
-## 25. Related documents
+## 25. The Tauri desktop GUI adapter
+
+The `apps/desktop` application is the graphical interface (`docs/desktop-gui.md`,
+`docs/adr/018-tauri-desktop-gui.md`). It is launched with
+`npm run tauri dev` during development; the Tauri crate is deliberately its own
+Cargo workspace, excluded from the root one, so the `wry`/`tao`/`objc`
+dependency tree is compiled only for the GUI.
+
+- **Adapter, not an implementation.** The Rust crate behind the webview
+  validates input, applies policy, and forwards calls to application use cases.
+  It never runs Git, Maven, npm, Liquibase, or an operating-system process, and
+  it never duplicates application logic. It depends on the `client` boundary
+  (plus the domain, application, execution, and config types) but not on the
+  daemon, the transport, or any infrastructure crate, so the boundary is
+  enforced by the dependency graph rather than by convention.
+- **A client of the shared runtime.** The adapter holds the same
+  `Arc<RemoteClient>` the TUI and MCP use, so a task visible in one interface is
+  visible in all of them and the GUI holds no competing state
+  (`docs/local-daemon.md`).
+- **Read-only command set.** Six Tauri commands exist — `get_daemon_status`,
+  `list_workspaces`, `list_services`, `get_workspace_status`,
+  `get_service_status`, and `get_connection_state`. Nothing starts, stops, or
+  edits anything; service control and destructive confirmation are a later
+  task, and when they arrive they must pass through the same policy engine as
+  every other interface.
+- **One connection, one client.** A shared `AppState` owns a single client
+  behind a connect lock, so a burst of commands cannot start several daemons.
+  The adapter resolves the real `service-orchestrator` binary (explicit
+  override, `PATH`, sibling, `target/{debug,release}` walk-up) and exports it
+  through `SERVICE_ORCHESTRATOR_DAEMON_BIN`, so the GUI's own executable is
+  never re-executed as a daemon.
+- **Connection state machine.** The adapter — not the frontend — tracks
+  `Connecting`/`Connected`/`Reconnecting`/`Disconnected`/`Error`, classifies
+  probe and command outcomes, and pushes only transitions as
+  `daemon://connection` events. Passive probing is guarded by a reachability
+  check, so an idle GUI does not issue probes against a stopped daemon; a
+  daemon is started only by an explicit action or by the shared client's single
+  reconnect-retry, exactly as the TUI and MCP behave while attached.
+- **Forwarded events.** The adapter subscribes to the daemon's task-event
+  stream and re-emits events verbatim as `daemon://task`, plus a synthetic
+  `Lagged` payload when the subscription falls behind; the frontend never polls
+  for task state.
+- **Minimal capabilities.** The webview is granted `core:default` only — no
+  shell, filesystem, HTTP, or process plugin — behind a strict CSP and a
+  navigation filter that accepts the `tauri:` scheme plus the Vite dev server in
+  debug builds only.
+- **Typed frontend.** A single typed API module wraps `invoke`/`listen`; React
+  contexts hold connection, workspace, and task-event state; presentation
+  components contain no business rules; the TypeScript build is strict with no
+  `any`.
+
+## 26. Related documents
 
 - `docs/adr/001-core-architecture.md` — the decision record for the core-first
   architecture.
@@ -1045,6 +1102,11 @@ SDK `rmcp` 3.5.1.
 - `docs/adr/017-workspace-validation.md` — the decision record for read-only
   workspace validation: the `WorkspaceProbe` port, defence-in-depth checks, and
   the configuration-conflict versus port-occupancy distinction.
+- `docs/adr/018-tauri-desktop-gui.md` — the decision record for the Tauri 2
+  desktop GUI: the thin adapter over the client boundary, the separate Cargo
+  workspace, the read-only command set, the connection state machine, the
+  daemon-binary resolution that keeps the GUI from being re-executed as a
+  daemon, and the minimal capabilities.
 - `docs/environment-workflows.md` — environment preparation: the request and its
   defaults, selection precedence, dependency closure, planning, the execution
   phases, cancellation and failure handling, aggregated results, and TUI and MCP
@@ -1081,6 +1143,10 @@ SDK `rmcp` 3.5.1.
 - `docs/mcp.md` — the MCP server: stdio connection model, tools, resources,
   prompts, permissions, observability, long-running work, example workflows,
   testing, and limitations.
+- `docs/desktop-gui.md` — the Tauri 2 desktop GUI: the shell and read-only
+  screens, the six commands, the two event streams, the connection model, the
+  daemon-binary resolution, security controls, development workflow, testing,
+  and limitations.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `docs/workspace-validation.md` — workspace validation: scope, read-only
   guarantees, the individual checks, diagnostic codes, and safe execution.

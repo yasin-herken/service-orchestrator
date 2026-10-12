@@ -24,6 +24,20 @@ pub const SOCKET_ENV: &str = "SERVICE_ORCHESTRATOR_SOCKET";
 /// a truthy value (`1`, `true`, `yes`).
 pub const NO_AUTOSTART_ENV: &str = "SERVICE_ORCHESTRATOR_NO_AUTOSTART";
 
+/// The environment variable that overrides the executable spawned as the
+/// daemon.
+///
+/// Automatic startup re-executes the current program (`daemon --config …`),
+/// which is correct for the single `service-orchestrator` binary but not for a
+/// host process that embeds the client without a `daemon` subcommand — the
+/// Tauri desktop app, for example (`tasks/018.md` §8). Setting this variable
+/// points the spawn at the real `service-orchestrator` executable while the
+/// rest of the Task 015 auto-start mechanism (process group, log redirect,
+/// readiness poll, advisory-lock race resolution) stays shared and unchanged.
+///
+/// An unset or invalid value falls back to the previous behaviour.
+pub const DAEMON_BIN_ENV: &str = "SERVICE_ORCHESTRATOR_DAEMON_BIN";
+
 /// How long a client waits for a freshly started daemon to accept connections.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
@@ -106,6 +120,30 @@ pub fn autostart_disabled() -> bool {
     })
 }
 
+/// Returns the executable that automatic startup will spawn as the daemon.
+///
+/// [`DAEMON_BIN_ENV`] wins when it names an existing file; otherwise the
+/// current program is re-executed, which is the correct behaviour for the
+/// single `service-orchestrator` binary.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] when the override is set but does not name an
+/// existing file, or when the current executable cannot be determined.
+pub fn daemon_executable() -> io::Result<PathBuf> {
+    if let Some(override_path) = std::env::var_os(DAEMON_BIN_ENV) {
+        let path = PathBuf::from(override_path);
+        if path.is_file() {
+            return Ok(path);
+        }
+        return Err(io::Error::other(format!(
+            "{DAEMON_BIN_ENV} points at {}, which is not an existing file",
+            path.display()
+        )));
+    }
+    std::env::current_exe()
+}
+
 /// Starts a detached daemon for `config_path` and waits until it is reachable.
 ///
 /// The child runs in its own process group so a terminal hang-up on the parent
@@ -118,7 +156,7 @@ pub fn autostart_disabled() -> bool {
 /// reachable before the timeout.
 pub fn start_daemon(config_path: &Path, socket_path: &Path) -> io::Result<UnixStream> {
     ensure_run_dir(socket_path)?;
-    let exe = std::env::current_exe()?;
+    let exe = daemon_executable()?;
     let log = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -272,6 +310,51 @@ mod tests {
         with_env(NO_AUTOSTART_ENV, Some("no"), || {
             assert!(!autostart_disabled(), "a falsey value keeps autostart on");
         });
+    }
+
+    #[test]
+    fn the_daemon_executable_defaults_to_the_current_program() {
+        with_env(DAEMON_BIN_ENV, None, || {
+            assert_eq!(
+                daemon_executable().expect("the current program resolves"),
+                std::env::current_exe().expect("the current program is known")
+            );
+        });
+    }
+
+    #[test]
+    fn the_daemon_executable_override_wins() {
+        let dir = std::env::temp_dir().join(format!("so-daemon-bin-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let binary = dir.join("service-orchestrator");
+        std::fs::write(&binary, b"#!/bin/sh\n").expect("the stand-in binary is written");
+        with_env(
+            DAEMON_BIN_ENV,
+            Some(binary.to_str().expect("utf-8 path")),
+            || {
+                assert_eq!(
+                    daemon_executable().expect("the override resolves"),
+                    binary,
+                    "the override names the daemon executable"
+                );
+            },
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_daemon_executable_override_is_rejected() {
+        with_env(
+            DAEMON_BIN_ENV,
+            Some("/nonexistent/service-orchestrator"),
+            || {
+                let error = daemon_executable().expect_err("the override must name a file");
+                assert!(
+                    error.to_string().contains(DAEMON_BIN_ENV),
+                    "the error names the variable: {error}"
+                );
+            },
+        );
     }
 
     #[test]

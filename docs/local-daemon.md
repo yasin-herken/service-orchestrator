@@ -71,11 +71,12 @@ The daemon owns the mutable runtime state. Clients hold only refreshable caches.
   routes each request to the shared application core, and fans task and log
   events out to connected clients. It contains **no business logic**.
 - **Client** (`crates/client`): the shared `OrchestratorClient` boundary and its
-  daemon-backed implementation, `RemoteClient`. Both the TUI and MCP call this
-  boundary and never learn that the daemon exists.
+  daemon-backed implementation, `RemoteClient`. The TUI, MCP, and desktop GUI all
+  call this boundary and never learn that the daemon exists.
 
-The application core must not depend on the TUI, MCP, or the daemon; the daemon
-depends on the core, and the interfaces depend only on the client abstraction.
+The application core must not depend on the TUI, MCP, the GUI, or the daemon; the
+daemon depends on the core, and the interfaces depend only on the client
+abstraction.
 
 ---
 
@@ -232,8 +233,8 @@ of the application's use cases. Two implementations exist:
 - `Application` itself, so interface tests run on the real core with no daemon;
 - `RemoteClient`, which proxies each call over the socket.
 
-The TUI and MCP hold `Arc<dyn OrchestratorClient>` and never know which
-implementation they have. `RemoteClient` exposes the same method set as the
+The TUI, MCP, and desktop GUI hold `Arc<dyn OrchestratorClient>` and never know
+which implementation they have. `RemoteClient` exposes the same method set as the
 application; a new use case is added in one place and is immediately available to
 every interface and to the daemon.
 
