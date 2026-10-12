@@ -3,6 +3,8 @@ import { vi } from 'vitest';
 import type {
   ConnectionSnapshot,
   DaemonStatus,
+  OperationOutcome,
+  ServiceDetail,
   ServiceSummary,
   TaskEvent,
   WorkspaceStatus,
@@ -42,6 +44,16 @@ export const mockDesktopApi = {
   listServices: vi.fn<(workspaceId: string) => Promise<ServiceSummary[]>>(),
   getWorkspaceStatus: vi.fn<(workspaceId: string) => Promise<WorkspaceStatus>>(),
   getServiceStatus: vi.fn<(workspaceId: string, serviceId: string) => Promise<ServiceSummary>>(),
+  getServiceDetail: vi.fn<(workspaceId: string, serviceId: string) => Promise<ServiceDetail>>(),
+  startService: vi.fn<(serviceId: string) => Promise<OperationOutcome>>(),
+  stopService: vi.fn<(serviceId: string) => Promise<OperationOutcome>>(),
+  restartService: vi.fn<(serviceId: string) => Promise<OperationOutcome>>(),
+  startServices: vi.fn<(workspaceId: string, serviceIds: string[]) => Promise<OperationOutcome>>(),
+  stopServices: vi.fn<(workspaceId: string, serviceIds: string[]) => Promise<OperationOutcome>>(),
+  restartServices: vi.fn<
+    (workspaceId: string, serviceIds: string[]) => Promise<OperationOutcome>
+  >(),
+  checkServiceHealth: vi.fn<(serviceId: string) => Promise<OperationOutcome>>(),
   getConnectionState: vi.fn<() => Promise<ConnectionSnapshot>>(),
   onConnectionChanged: vi.fn<(handler: ConnectionHandler) => Promise<() => void>>(
     subscribeConnections,

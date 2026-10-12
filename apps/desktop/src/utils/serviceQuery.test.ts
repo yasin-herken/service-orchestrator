@@ -4,7 +4,7 @@ import { makeService } from '../test/fixtures';
 import { countServices, filterServices, sortServices } from './serviceQuery';
 
 describe('countServices', () => {
-  it('derives dashboard counts from real rows', () => {
+  it('derives dashboard counts from real rows without collapsing states', () => {
     const services = [
       makeService({ id: 'a', process_state: 'running', health_state: 'healthy' }),
       makeService({ id: 'b', process_state: 'not_running', health_state: 'unknown' }),
@@ -15,13 +15,44 @@ describe('countServices', () => {
     expect(countServices(services)).toEqual({
       total: 5,
       running: 1,
-      stopped: 3,
+      starting: 1,
+      stopping: 0,
+      stopped: 2,
+      failed: 1,
       unhealthy: 2,
     });
   });
 
+  it('reports stopping separately from stopped', () => {
+    const services = [
+      makeService({ id: 'a', process_state: 'stopping' }),
+      makeService({ id: 'b', process_state: 'stopped' }),
+    ];
+    const counts = countServices(services);
+    expect(counts.stopping).toBe(1);
+    expect(counts.stopped).toBe(1);
+  });
+
+  it('counts health independently of runtime state', () => {
+    const services = [
+      makeService({ id: 'a', process_state: 'running', health_state: 'unhealthy' }),
+      makeService({ id: 'b', process_state: 'running', health_state: 'healthy' }),
+    ];
+    const counts = countServices(services);
+    expect(counts.running).toBe(2);
+    expect(counts.unhealthy).toBe(1);
+  });
+
   it('returns zeroes for an empty list', () => {
-    expect(countServices([])).toEqual({ total: 0, running: 0, stopped: 0, unhealthy: 0 });
+    expect(countServices([])).toEqual({
+      total: 0,
+      running: 0,
+      starting: 0,
+      stopping: 0,
+      stopped: 0,
+      failed: 0,
+      unhealthy: 0,
+    });
   });
 
   it('does not count transitional states as stopped', () => {
@@ -57,6 +88,19 @@ describe('filterServices', () => {
     expect(filterServices(services, { search: '', kind: 'frontend' }).map((s) => s.id)).toEqual([
       'admin-ui',
     ]);
+  });
+
+  it('filters by runtime and health state', () => {
+    const mixed = [
+      makeService({ id: 'running', process_state: 'running', health_state: 'healthy' }),
+      makeService({ id: 'failed', process_state: 'failed', health_state: 'unreachable' }),
+    ];
+    expect(
+      filterServices(mixed, { search: '', kind: 'all', processState: 'failed' }).map((s) => s.id),
+    ).toEqual(['failed']);
+    expect(
+      filterServices(mixed, { search: '', kind: 'all', healthState: 'unreachable' }).map((s) => s.id),
+    ).toEqual(['failed']);
   });
 
   it('combines kind and search filters', () => {

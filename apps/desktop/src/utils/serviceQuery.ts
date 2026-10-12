@@ -4,25 +4,54 @@ import type { ServiceSummary } from '../types/models';
 export interface ServiceCounts {
   total: number;
   running: number;
+  starting: number;
+  stopping: number;
   stopped: number;
+  failed: number;
   unhealthy: number;
 }
-
-/** Process states that count as "stopped" for dashboard reporting. */
-const STOPPED_STATES = new Set(['not_running', 'stopped', 'failed']);
 
 /** Health states that count as "unhealthy" for dashboard reporting. */
 const UNHEALTHY_STATES = new Set(['unhealthy', 'unreachable']);
 
-/** Derives dashboard counts from real service rows (never hard-coded). */
+/**
+ * Derives dashboard counts from real service rows (never hard-coded).
+ *
+ * Runtime states stay distinct (`tasks/019.md` §20): `stopped` counts only the
+ * resting states, while `starting`, `stopping`, and `failed` are reported
+ * separately. Health is counted independently, so a running service can be
+ * unhealthy (`tasks/019.md` §21).
+ */
 export function countServices(services: readonly ServiceSummary[]): ServiceCounts {
-  const counts: ServiceCounts = { total: services.length, running: 0, stopped: 0, unhealthy: 0 };
+  const counts: ServiceCounts = {
+    total: services.length,
+    running: 0,
+    starting: 0,
+    stopping: 0,
+    stopped: 0,
+    failed: 0,
+    unhealthy: 0,
+  };
   for (const service of services) {
-    if (service.process_state === 'running') {
-      counts.running += 1;
-    }
-    if (STOPPED_STATES.has(service.process_state)) {
-      counts.stopped += 1;
+    switch (service.process_state) {
+      case 'running':
+        counts.running += 1;
+        break;
+      case 'starting':
+        counts.starting += 1;
+        break;
+      case 'stopping':
+        counts.stopping += 1;
+        break;
+      case 'stopped':
+      case 'not_running':
+        counts.stopped += 1;
+        break;
+      case 'failed':
+        counts.failed += 1;
+        break;
+      default:
+        break;
     }
     if (UNHEALTHY_STATES.has(service.health_state)) {
       counts.unhealthy += 1;
@@ -37,6 +66,10 @@ export interface ServiceFilter {
   search: string;
   /** Service kind, or `'all'`. */
   kind: string;
+  /** Process state, or `'all'`/absent for every state. */
+  processState?: string;
+  /** Health state, or `'all'`/absent for every state. */
+  healthState?: string;
 }
 
 /** Applies the toolbar filters to a service list. */
@@ -45,8 +78,16 @@ export function filterServices(
   filter: ServiceFilter,
 ): ServiceSummary[] {
   const needle = filter.search.trim().toLowerCase();
+  const processState = filter.processState ?? 'all';
+  const healthState = filter.healthState ?? 'all';
   return services.filter((service) => {
     if (filter.kind !== 'all' && service.kind !== filter.kind) {
+      return false;
+    }
+    if (processState !== 'all' && service.process_state !== processState) {
+      return false;
+    }
+    if (healthState !== 'all' && service.health_state !== healthState) {
       return false;
     }
     if (needle.length === 0) {

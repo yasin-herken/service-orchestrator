@@ -1014,10 +1014,10 @@ SDK `rmcp` 3.5.1.
 ## 25. The Tauri desktop GUI adapter
 
 The `apps/desktop` application is the graphical interface (`docs/desktop-gui.md`,
-`docs/adr/018-tauri-desktop-gui.md`). It is launched with
-`npm run tauri dev` during development; the Tauri crate is deliberately its own
-Cargo workspace, excluded from the root one, so the `wry`/`tao`/`objc`
-dependency tree is compiled only for the GUI.
+`docs/adr/018-tauri-desktop-gui.md`, `docs/adr/019-desktop-service-management.md`).
+It is launched with `npm run tauri dev` during development; the Tauri crate is
+deliberately its own Cargo workspace, excluded from the root one, so the
+`wry`/`tao`/`objc` dependency tree is compiled only for the GUI.
 
 - **Adapter, not an implementation.** The Rust crate behind the webview
   validates input, applies policy, and forwards calls to application use cases.
@@ -1030,12 +1030,17 @@ dependency tree is compiled only for the GUI.
   `Arc<RemoteClient>` the TUI and MCP use, so a task visible in one interface is
   visible in all of them and the GUI holds no competing state
   (`docs/local-daemon.md`).
-- **Read-only command set.** Six Tauri commands exist — `get_daemon_status`,
-  `list_workspaces`, `list_services`, `get_workspace_status`,
-  `get_service_status`, and `get_connection_state`. Nothing starts, stops, or
-  edits anything; service control and destructive confirmation are a later
-  task, and when they arrive they must pass through the same policy engine as
-  every other interface.
+- **Read and lifecycle commands.** The adapter exposes read commands
+  (`get_daemon_status`, `list_workspaces`, `list_services`,
+  `get_workspace_status`, `get_service_status`, `get_service_detail`, and
+  `get_connection_state`) and lifecycle commands (`start_service`,
+  `stop_service`, `restart_service`, `start_services`, `stop_services`,
+  `restart_services`, and `check_service_health`). Every command validates its
+  identifiers into domain types at the boundary and delegates to the shared
+  client; no Git, build, library, migration, or destructive operation is
+  exposed. Bulk operations submit a single daemon workflow rather than a
+  frontend loop, and restart always uses the daemon's coordinated
+  stop-then-start.
 - **One connection, one client.** A shared `AppState` owns a single client
   behind a connect lock, so a burst of commands cannot start several daemons.
   The adapter resolves the real `service-orchestrator` binary (explicit
@@ -1049,10 +1054,19 @@ dependency tree is compiled only for the GUI.
   check, so an idle GUI does not issue probes against a stopped daemon; a
   daemon is started only by an explicit action or by the shared client's single
   reconnect-retry, exactly as the TUI and MCP behave while attached.
+- **Mutations pass through the policy engine.** Starting, stopping, and
+  restarting a service are `SafeWrite` operations submitted as a `Cli` client,
+  exactly as the TUI and MCP do; a confirmation dialog in the webview is a
+  usability affordance and never substitutes for the daemon's authorization.
+  The frontend's pending state and the daemon's own operation coordination
+  together prevent duplicate requests (`tasks/019.md` §28).
 - **Forwarded events.** The adapter subscribes to the daemon's task-event
   stream and re-emits events verbatim as `daemon://task`, plus a synthetic
   `Lagged` payload when the subscription falls behind; the frontend never polls
-  for task state.
+  for task state. The stream carries task, log, and shutdown events only, so the
+  GUI refreshes service runtime/health state when a task settles (or after a
+  command) rather than on a dedicated service event — a documented limitation
+  of the current daemon event surface (`docs/desktop-gui.md` §15).
 - **Minimal capabilities.** The webview is granted `core:default` only — no
   shell, filesystem, HTTP, or process plugin — behind a strict CSP and a
   navigation filter that accepts the `tauri:` scheme plus the Vite dev server in
@@ -1107,6 +1121,11 @@ dependency tree is compiled only for the GUI.
   workspace, the read-only command set, the connection state machine, the
   daemon-binary resolution that keeps the GUI from being re-executed as a
   daemon, and the minimal capabilities.
+- `docs/adr/019-desktop-service-management.md` — the decision record for desktop
+  service management: validated lifecycle commands over the shared client, the
+  normalized operation outcome, bulk as one daemon workflow, the policy engine
+  as the sole authority, task-event-driven refresh, stable-id selection, and
+  disconnection that never replays uncertain writes.
 - `docs/environment-workflows.md` — environment preparation: the request and its
   defaults, selection precedence, dependency closure, planning, the execution
   phases, cancellation and failure handling, aggregated results, and TUI and MCP

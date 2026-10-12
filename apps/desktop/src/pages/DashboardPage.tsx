@@ -18,9 +18,11 @@ export function DashboardPage() {
   const { workspaces, activeWorkspace, loading, error, reload } = useWorkspaces();
   const { snapshot } = useConnection();
   const connected = snapshot.state === 'connected';
-  const { recent } = useTaskEvents();
+  const { recent, terminalRevision } = useTaskEvents();
 
-  const daemon = useAsync(() => desktopApi.getDaemonStatus(), [], { enabled: connected });
+  const daemon = useAsync(() => desktopApi.getDaemonStatus(), [terminalRevision], {
+    enabled: connected,
+  });
   const services = useAsync(
     () => {
       if (!activeWorkspace) {
@@ -28,7 +30,7 @@ export function DashboardPage() {
       }
       return desktopApi.getWorkspaceStatus(activeWorkspace.id);
     },
-    [activeWorkspace?.id],
+    [activeWorkspace?.id, terminalRevision],
     { enabled: connected && activeWorkspace !== null },
   );
 
@@ -67,12 +69,19 @@ export function DashboardPage() {
           />
           <StatCard label="Total services" value={counts.total} />
           <StatCard label="Running" value={counts.running} tone="positive" />
+          <StatCard label="Starting" value={counts.starting} tone="warning" />
           <StatCard label="Stopped" value={counts.stopped} />
+          <StatCard
+            label="Failed"
+            value={counts.failed}
+            tone={counts.failed > 0 ? 'negative' : 'default'}
+          />
           <StatCard
             label="Unhealthy"
             value={counts.unhealthy}
             tone={counts.unhealthy > 0 ? 'negative' : 'default'}
           />
+          <StatCard label="Active tasks" value={daemon.data?.active_tasks ?? '—'} />
         </div>
       </section>
 
@@ -141,8 +150,16 @@ export function DashboardPage() {
               <dd>{counts.running}</dd>
             </div>
             <div>
+              <dt>Starting</dt>
+              <dd>{counts.starting}</dd>
+            </div>
+            <div>
               <dt>Stopped</dt>
               <dd>{counts.stopped}</dd>
+            </div>
+            <div>
+              <dt>Failed</dt>
+              <dd>{counts.failed}</dd>
             </div>
             <div>
               <dt>Unhealthy</dt>
