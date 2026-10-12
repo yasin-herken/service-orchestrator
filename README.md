@@ -8,10 +8,12 @@ building shared libraries, running Liquibase migrations, building and starting
 applications, inspecting logs, running health checks, and executing
 dependency-aware workflows.
 
-It provides two interfaces over one shared application core:
+It provides three interfaces over one shared application core:
 
-- a **Ratatui terminal UI** for human developers, and
-- an **MCP server** for AI agents.
+- a **Ratatui terminal UI** for human developers,
+- an **MCP server** for AI agents, and
+- a **Tauri desktop GUI** for human developers (`apps/desktop`, run with
+  `npm run tauri dev`).
 
 AI is optional. The core works with no LLM, no MCP client, no internet, and no
 remote backend.
@@ -22,8 +24,8 @@ This repository contains the full local orchestration platform: the Cargo
 workspace and crate boundaries, the pure domain model, the versioned
 configuration system, the task engine, the infrastructure adapters (Git, process,
 build, library, service runtime, migration, health, and logging), the shared
-application core, and two interface adapters — the Ratatui terminal UI and the
-MCP stdio server.
+application core, and three interface adapters — the Ratatui terminal UI, the MCP
+stdio server, and the Tauri desktop GUI.
 
 ## Usage
 
@@ -33,9 +35,18 @@ service-orchestrator mcp                  # the MCP server on stdin/stdout
 service-orchestrator mcp --config <path>  # either interface accepts --config
 ```
 
-Both interfaces share one application core, so they observe identical behavior,
+The desktop GUI is a separate application:
+
+```bash
+cd apps/desktop
+npm install
+npm run tauri dev                         # preflight builds the daemon binary, then opens the window
+```
+
+All interfaces share one application core, so they observe identical behavior,
 policies, and errors. The TUI is fully usable offline; no LLM or MCP client is
-required. See [docs/tui.md](docs/tui.md) and [docs/mcp.md](docs/mcp.md).
+required. See [docs/tui.md](docs/tui.md), [docs/mcp.md](docs/mcp.md), and
+[docs/desktop-gui.md](docs/desktop-gui.md).
 
 Configuration is external and versioned. See
 [docs/configuration.md](docs/configuration.md) for the schema and
@@ -56,7 +67,7 @@ rationale.
 tui  ───────┐
             │
 mcp  ───────┼──> application ───> execution ──> domain
-            │                └──> policy    ──> domain
+gui  ───────┤                └──> policy    ──> domain
 future cli ─┘
 
 infrastructure (git, process, build, liquibase, health, logging)
@@ -80,6 +91,8 @@ crates/
 ├── logging/       # infrastructure
 ├── mcp/           # interface adapter
 └── tui/           # interface adapter
+apps/
+└── desktop/       # interface adapter (Tauri 2 GUI; its own Cargo workspace)
 src/               # composition root (service-orchestrator binary)
 ```
 

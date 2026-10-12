@@ -31,6 +31,7 @@ pub use protocol::{
 };
 pub use remote::{DaemonStatus, RemoteClient, RemoteLogSubscription, REQUEST_TIMEOUT};
 pub use socket::{
-    autostart_disabled, connect_existing, connect_or_start, ensure_run_dir, is_reachable, log_path,
-    pid_path, run_dir, socket_path, start_daemon, NO_AUTOSTART_ENV, SOCKET_ENV,
+    autostart_disabled, connect_existing, connect_or_start, daemon_executable, ensure_run_dir,
+    is_reachable, log_path, pid_path, run_dir, socket_path, start_daemon, DAEMON_BIN_ENV,
+    NO_AUTOSTART_ENV, SOCKET_ENV,
 };

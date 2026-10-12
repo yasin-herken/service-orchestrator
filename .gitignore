@@ -27,6 +27,12 @@ debug/
 target/debug/
 target/release/
 
+### Node / Desktop GUI (apps/desktop) ###
+node_modules/
+apps/desktop/dist/
+apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/gen/
+
 ### Intellij ###
 # IntelliJ IDEA editor files and settings
 
