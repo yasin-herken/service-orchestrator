@@ -34,8 +34,9 @@ use service_orchestrator_application::{
     OperationResult,
 };
 use service_orchestrator_client::{
-    codes, read_frame, socket_path, write_frame, ClientKind, OrchestratorClient, RemoteClient,
-    RequestEnvelope, ResponseEnvelope, ServerMessage, PROTOCOL_VERSION, SOCKET_ENV,
+    codes, ops, read_frame, socket_path, write_frame, ClientKind, OrchestratorClient, RemoteClient,
+    RequestEnvelope, ResponseEnvelope, ServerMessage, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    SOCKET_ENV,
 };
 use service_orchestrator_config::{
     load_from_str, ConfigChange, ConfigManager, EntityChange, FileConfigManager,
@@ -547,6 +548,80 @@ fn wait_for_created(
                 panic!("the event stream closed before the task event arrived")
             }
             Err(_) => panic!("no task event arrived before the deadline"),
+        }
+    }
+}
+
+// -- IPC robustness ----------------------------------------------------------
+
+#[test]
+fn an_oversized_request_frame_is_rejected_without_crashing_the_daemon() {
+    use std::io::Write as _;
+
+    let harness = Harness::start();
+    let mut stream =
+        UnixStream::connect(&harness.socket).expect("the daemon accepts the connection");
+
+    // A length prefix one byte past the hard maximum: the daemon must reject it
+    // before allocating the body, answer with a structured error, and stay up.
+    let oversized = u32::try_from(MAX_FRAME_BYTES + 1).expect("fits in a u32");
+    stream
+        .write_all(&oversized.to_be_bytes())
+        .expect("the length prefix is written");
+    stream.flush().expect("the prefix reaches the daemon");
+
+    let response = loop {
+        match read_frame::<_, ServerMessage>(&mut stream).expect("the response frame reads") {
+            Some(ServerMessage::Response(response)) => break response,
+            Some(_) => continue,
+            None => panic!("the daemon closed without a structured error"),
+        }
+    };
+    let error = response
+        .result
+        .expect_err("an oversized frame is rejected, not executed");
+    assert_runtime_code(&error, codes::INVALID_REQUEST);
+
+    // The daemon is still serving other clients after the hostile frame.
+    let client = harness.client(ClientKind::Cli);
+    assert!(client.list_workspaces().is_ok());
+}
+
+#[test]
+fn concurrent_clients_receive_their_own_correlated_responses() {
+    let harness = Harness::start();
+
+    // Send a distinct request on several connections before reading any
+    // response, so the daemon must interleave them and correlate each reply to
+    // the request that produced it (`tasks/027.md` §26).
+    let mut pending = Vec::new();
+    for index in 0..8 {
+        let mut stream =
+            UnixStream::connect(&harness.socket).expect("the daemon accepts the connection");
+        let mut envelope = request(ops::LIST_WORKSPACES, serde_json::json!([]));
+        envelope.request_id = format!("concurrent-{index}");
+        write_frame(&mut stream, &envelope).expect("the request frame is written");
+        pending.push((envelope.request_id, stream));
+    }
+
+    for (request_id, mut stream) in pending {
+        loop {
+            match read_frame::<_, ServerMessage>(&mut stream).expect("the response frame reads") {
+                Some(ServerMessage::Response(response)) => {
+                    assert_eq!(
+                        response.request_id, request_id,
+                        "each response is correlated to its own request id"
+                    );
+                    let value = response.result.expect("the request succeeds");
+                    assert!(
+                        value.as_array().is_some(),
+                        "the fixture workspace list is returned"
+                    );
+                    break;
+                }
+                Some(_) => continue,
+                None => panic!("the daemon closed before answering {request_id}"),
+            }
         }
     }
 }

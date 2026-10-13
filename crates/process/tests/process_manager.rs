@@ -363,3 +363,87 @@ async fn shutdown_stops_every_active_process() {
     assert!(manager.is_shutdown());
     assert!(manager.spawn(sh("exit 0")).is_err());
 }
+
+// ---------------------------------------------------------------------------
+// Process groups: descendant cleanup (`tasks/027.md` §14)
+// ---------------------------------------------------------------------------
+
+/// Waits for the first line for `process` that starts with `prefix`, returning
+/// the remainder of that line.
+#[cfg(unix)]
+async fn await_line_prefix(
+    logs: &mut service_orchestrator_process::LogStream,
+    process: &service_orchestrator_process::ProcessId,
+    prefix: &str,
+) -> String {
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    loop {
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "did not observe a line starting with '{prefix}' for {process}"
+        );
+        match timeout(Duration::from_millis(500), logs.recv()).await {
+            Ok(Ok(line)) if &line.process == process => {
+                if let Some(rest) = line.line.strip_prefix(prefix) {
+                    return rest.to_owned();
+                }
+            }
+            Ok(Ok(_)) => {}
+            Ok(Err(_)) => panic!("the log stream closed before '{prefix}' was observed"),
+            Err(_) => {}
+        }
+    }
+}
+
+/// Reports whether `pid` still exists and can be signalled.
+#[cfg(unix)]
+fn process_exists(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    kill(Pid::from_raw(pid as i32), None).is_ok()
+}
+
+/// Polls until `pid` no longer exists; on timeout, force-kills it so a failing
+/// test never leaks a descendant, then fails.
+#[cfg(unix)]
+async fn await_process_gone(pid: u32) {
+    use nix::sys::signal::{kill, Signal};
+    use nix::unistd::Pid;
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+    while process_exists(pid) {
+        if tokio::time::Instant::now() >= deadline {
+            let _ = kill(Pid::from_raw(pid as i32), Signal::SIGKILL);
+            panic!("the background descendant {pid} outlived its process group");
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// Spawning a managed process into its own group must reap the shell's
+/// background children when the group is signalled, so a stop never orphans a
+/// build tool or a server (`AGENTS.md` §15). This is POSIX process-group
+/// behaviour, exercised here on the macOS target.
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn stopping_a_process_reaps_its_background_children() {
+    let manager = manager();
+    let mut logs = manager.subscribe_logs();
+    // The shell starts a long-lived background child, prints its pid, then
+    // waits. Stopping the managed process signals the whole group, so the
+    // `sleep` descendant must die with it.
+    let handle = manager
+        .spawn(sh("sleep 300 & echo \"GRANDCHILD=$!\"; wait"))
+        .expect("spawn succeeds");
+    await_running(&handle).await;
+    let raw = await_line_prefix(&mut logs, handle.id(), "GRANDCHILD=").await;
+    let grandchild: u32 = raw.trim().parse().expect("a numeric pid");
+    assert!(
+        process_exists(grandchild),
+        "the background child is running before the stop"
+    );
+
+    handle.stop().expect("stop succeeds");
+    handle.wait().await.expect("wait succeeds");
+
+    await_process_gone(grandchild).await;
+}
