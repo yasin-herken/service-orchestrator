@@ -5,40 +5,15 @@ import { desktopApi } from '../../services/desktopApi';
 import { toDesktopError } from '../../services/errors';
 import type {
   ProjectSuggestionView,
-  RawCommandView,
   RawEnvValueView,
   RawHealthCheckView,
   RawRuntimeView,
   RawServiceView,
   RepositoryProbeView,
 } from '../../types/models';
+import { parseList, structuredCommandLine, toCommand } from '../../utils/configuration';
 import { EnvironmentEditor } from './EnvironmentEditor';
 import { RepositoryDetectionPanel } from './RepositoryDetectionPanel';
-
-/** Parses a comma/whitespace separated list into unique, ordered ids. */
-function parseList(text: string): string[] {
-  const seen = new Set<string>();
-  const ids: string[] = [];
-  for (const raw of text.split(/[\s,]+/)) {
-    const id = raw.trim();
-    if (id !== '' && !seen.has(id)) {
-      seen.add(id);
-      ids.push(id);
-    }
-  }
-  return ids;
-}
-
-/** A non-empty command line, or `undefined`. */
-function toCommand(line: string): RawCommandView | undefined {
-  const trimmed = line.trim();
-  return trimmed === '' ? undefined : trimmed;
-}
-
-/** Renders a structured suggestion command back into a single line. */
-function commandLine(command: { program: string; args?: string[] }): string {
-  return [command.program, ...(command.args ?? [])].join(' ');
-}
 
 /** The single runtime requirement implied by the build system, if any. */
 function runtimeFor(
@@ -120,14 +95,14 @@ export function ServiceEditor({
     typeof initial?.commands?.build === 'string'
       ? initial.commands.build
       : initial?.commands?.build
-        ? commandLine(initial.commands.build)
+        ? structuredCommandLine(initial.commands.build)
         : '',
   );
   const [startCommand, setStartCommand] = useState(
     typeof initial?.commands?.start === 'string'
       ? initial.commands.start
       : initial?.commands?.start
-        ? commandLine(initial.commands.start)
+        ? structuredCommandLine(initial.commands.start)
         : '',
   );
   const existingHealth = initial?.health_checks?.[0];
@@ -205,10 +180,10 @@ export function ServiceEditor({
       setNodeVersion(node.required_version);
     }
     if (detected.build_command) {
-      setBuildCommand(commandLine(detected.build_command));
+      setBuildCommand(structuredCommandLine(detected.build_command));
     }
     if (detected.start_command) {
-      setStartCommand(commandLine(detected.start_command));
+      setStartCommand(structuredCommandLine(detected.start_command));
     }
   };
 

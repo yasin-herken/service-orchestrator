@@ -31,7 +31,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 
-use crate::dispatch;
+use crate::dispatch::{self, encode};
 use crate::error::DaemonError;
 use crate::lock::{write_pid_file, InstanceLock, SocketGuard};
 
@@ -581,16 +581,6 @@ async fn respond(
             result,
         }))
         .await;
-}
-
-/// Serializes an operation result into a JSON value.
-fn encode<T: Serialize>(value: T) -> Result<Value, ApplicationError> {
-    serde_json::to_value(value).map_err(|error| {
-        unavailable(
-            codes::INVALID_REQUEST,
-            format!("the operation's result could not be serialized: {error}"),
-        )
-    })
 }
 
 /// Waits for an explicit shutdown request or a termination signal.

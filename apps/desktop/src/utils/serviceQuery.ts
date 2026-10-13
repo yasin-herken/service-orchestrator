@@ -1,4 +1,5 @@
 import type { ServiceSummary } from '../types/models';
+import { compareNullableNumber, compareNullableString, type SortDirection } from './compare';
 
 /** Aggregated counts shown on the dashboard. */
 export interface ServiceCounts {
@@ -103,23 +104,6 @@ export function filterServices(
 
 /** Sortable columns of the services table. */
 export type ServiceSortKey = 'name' | 'kind' | 'process_state' | 'health_state' | 'branch' | 'port';
-
-/** Sort direction. */
-export type SortDirection = 'asc' | 'desc';
-
-function compareNullableString(a: string | null, b: string | null): number {
-  if (a === null && b === null) return 0;
-  if (a === null) return -1;
-  if (b === null) return 1;
-  return a.localeCompare(b);
-}
-
-function compareNullableNumber(a: number | null, b: number | null): number {
-  if (a === null && b === null) return 0;
-  if (a === null) return -1;
-  if (b === null) return 1;
-  return a - b;
-}
 
 /** Sorts a service list by one column without mutating the input. */
 export function sortServices(

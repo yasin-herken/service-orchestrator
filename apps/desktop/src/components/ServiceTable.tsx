@@ -1,9 +1,9 @@
-import { useEffect, useRef } from 'react';
-
 import type { TrackedTask } from '../context/TaskEventsContext';
 import type { ServiceSummary } from '../types/models';
 import { operationLabel } from '../utils/format';
-import type { ServiceSortKey, SortDirection } from '../utils/serviceQuery';
+import type { ServiceSortKey } from '../utils/serviceQuery';
+import type { SortDirection } from '../utils/compare';
+import { useIndeterminateCheckbox } from '../hooks/useIndeterminateCheckbox';
 import { HealthBadge, ProcessBadge } from './StatusBadge';
 
 /** Current sort of the services table. */
@@ -61,13 +61,7 @@ export function ServiceTable({
   busy: ReadonlySet<string>;
   lastOperations: ReadonlyMap<string, TrackedTask>;
 }) {
-  const headerCheckbox = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (headerCheckbox.current) {
-      headerCheckbox.current.indeterminate = someVisibleSelected;
-    }
-  }, [someVisibleSelected]);
+  const headerCheckbox = useIndeterminateCheckbox(someVisibleSelected);
 
   return (
     <table className="service-table">

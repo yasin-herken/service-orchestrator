@@ -449,16 +449,6 @@ impl HealthManager {
     }
 }
 
-impl HealthIndex for HealthManager {
-    fn service_health(&self, service_id: &ServiceId) -> Option<ServiceHealth> {
-        self.store.service_health(service_id)
-    }
-
-    fn services(&self) -> Vec<ServiceHealth> {
-        self.store.services()
-    }
-}
-
 impl std::fmt::Debug for HealthManager {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("HealthManager")

@@ -2,20 +2,7 @@ import { useState } from 'react';
 
 import { Dialog } from '../Dialog';
 import type { RawGroupView } from '../../types/models';
-
-/** Parses a comma/whitespace separated list into unique, ordered ids. */
-function parseList(text: string): string[] {
-  const seen = new Set<string>();
-  const ids: string[] = [];
-  for (const raw of text.split(/[\s,]+/)) {
-    const id = raw.trim();
-    if (id !== '' && !seen.has(id)) {
-      seen.add(id);
-      ids.push(id);
-    }
-  }
-  return ids;
-}
+import { parseList } from '../../utils/configuration';
 
 /**
  * The service-group editor (`tasks/023.md` §32).

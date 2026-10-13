@@ -1,16 +1,11 @@
 import type { TrackedTask } from '../context/TaskEventsContext';
 import { isTerminalTaskStatus } from './taskStatus';
 
-/** Whether a task status is terminal. */
-export function isTerminalStatus(status: string): boolean {
-  return isTerminalTaskStatus(status);
-}
-
 /** The service ids that currently have a non-terminal (busy) task. */
 export function busyServiceIds(tasks: readonly TrackedTask[]): Set<string> {
   const busy = new Set<string>();
   for (const task of tasks) {
-    if (task.serviceId && !isTerminalStatus(task.status)) {
+    if (task.serviceId && !isTerminalTaskStatus(task.status)) {
       busy.add(task.serviceId);
     }
   }

@@ -1,28 +1,9 @@
 import { useState } from 'react';
 
 import { Dialog } from '../Dialog';
-import type {
-  RawCommandView,
-  RawEnvValueView,
-  RawLibraryView,
-} from '../../types/models';
+import type { RawEnvValueView, RawLibraryView } from '../../types/models';
+import { commandText, toCommand } from '../../utils/configuration';
 import { EnvironmentEditor } from './EnvironmentEditor';
-
-/** A non-empty command line, or `undefined`. */
-function toCommand(line: string): RawCommandView | undefined {
-  const trimmed = line.trim();
-  return trimmed === '' ? undefined : trimmed;
-}
-
-/** Renders a command, whether short-string or structured, as one line. */
-function commandText(command: RawCommandView | undefined): string {
-  if (command === undefined) {
-    return '';
-  }
-  return typeof command === 'string'
-    ? command
-    : [command.program, ...(command.args ?? [])].join(' ');
-}
 
 /**
  * The shared-library editor (`tasks/023.md` §30).

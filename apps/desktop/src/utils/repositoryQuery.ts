@@ -1,5 +1,5 @@
 import type { RepositorySummary } from '../types/models';
-import type { SortDirection } from './serviceQuery';
+import { compareNullableString, type SortDirection } from './compare';
 
 /** User-facing filters for the Git repository list. */
 export interface RepositoryFilter {
@@ -43,13 +43,6 @@ export function filterRepositories(
       (repository.branch ?? '').toLowerCase().includes(needle)
     );
   });
-}
-
-function compareNullableString(a: string | null, b: string | null): number {
-  if (a === null && b === null) return 0;
-  if (a === null) return -1;
-  if (b === null) return 1;
-  return a.localeCompare(b);
 }
 
 /** Sorts a repository list by one column without mutating the input. */

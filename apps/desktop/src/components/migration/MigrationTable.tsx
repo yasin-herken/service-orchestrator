@@ -1,8 +1,7 @@
-import { useEffect, useRef } from 'react';
-
 import { StatusBadge } from '../StatusBadge';
 import { TaskStatusIndicator } from '../tasks/TaskStatusIndicator';
 import type { MigrationRowView } from '../../types/models';
+import { useIndeterminateCheckbox } from '../../hooks/useIndeterminateCheckbox';
 import { formatDateTime } from '../../utils/format';
 
 /** Badge tone for a declared target environment. */
@@ -65,13 +64,7 @@ export function MigrationTable({
   busy: ReadonlySet<string>;
   disabled: boolean;
 }) {
-  const headerCheckbox = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (headerCheckbox.current) {
-      headerCheckbox.current.indeterminate = someVisibleSelected;
-    }
-  }, [someVisibleSelected]);
+  const headerCheckbox = useIndeterminateCheckbox(someVisibleSelected);
 
   return (
     <table className="service-table">
