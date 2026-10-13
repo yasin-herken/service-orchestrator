@@ -1,4 +1,4 @@
-import type { ConnectionState, HealthState, ProcessState } from '../types/models';
+import type { ConnectionState, GitState, HealthState, ProcessState } from '../types/models';
 
 /** Badge tone. */
 export type BadgeTone = 'neutral' | 'positive' | 'warning' | 'negative' | 'info';
@@ -28,6 +28,15 @@ const CONNECTION_TONES: Record<ConnectionState, BadgeTone> = {
   reconnecting: 'warning',
   disconnected: 'negative',
   error: 'negative',
+};
+
+const GIT_TONES: Record<GitState, BadgeTone> = {
+  clean: 'positive',
+  modified: 'warning',
+  ahead: 'info',
+  behind: 'info',
+  diverged: 'warning',
+  unknown: 'neutral',
 };
 
 /** Human-readable labels for the process/health/connection enums. */
@@ -60,6 +69,11 @@ export function ProcessBadge({ state }: { state: ProcessState }) {
 /** Badge for a health state. */
 export function HealthBadge({ state }: { state: HealthState }) {
   return <StatusBadge value={state} tone={HEALTH_TONES[state]} />;
+}
+
+/** Badge for a Git working-copy state. */
+export function GitBadge({ state }: { state: GitState }) {
+  return <StatusBadge value={state} tone={GIT_TONES[state]} />;
 }
 
 /** Badge for the daemon connection state. */

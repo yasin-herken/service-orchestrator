@@ -13,10 +13,11 @@ use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
 use service_orchestrator_domain::{
-    AbsolutePath, ArtifactCoordinate, Branch, DependencyKind, GitState, GroupId, LibraryId,
-    LiquibaseExecutionMode, MigrationProviderType, MigrationTargetEnvironment, Port, ProcessState,
-    ProfileId, ServiceCapability, ServiceId, ServiceType, Task, TaskId, TaskKind, TaskStatus,
-    Timestamp, Version, WorkflowId, WorkflowKind, WorkflowState, WorkspaceId,
+    AbsolutePath, ArtifactCoordinate, Branch, BuildOperation, BuildSystem, DependencyKind,
+    GitState, GroupId, LibraryId, LiquibaseExecutionMode, MigrationProviderType,
+    MigrationTargetEnvironment, Port, ProcessState, ProfileId, ServiceCapability, ServiceId,
+    ServiceType, Task, TaskId, TaskKind, TaskStatus, Timestamp, Version, WorkflowId, WorkflowKind,
+    WorkflowState, WorkspaceId,
 };
 
 use crate::ports::{HealthCheckOutcome, HealthState};
@@ -503,6 +504,37 @@ pub struct ServiceStatus {
     pub ports: Vec<Port>,
     /// The capabilities the service declares.
     pub capabilities: BTreeSet<ServiceCapability>,
+}
+
+// -- build management ---------------------------------------------------------
+
+/// The build-system-neutral operations a build provider supports.
+///
+/// This is a read-only projection of the build adapter's provider registry. It
+/// lets an interface render exactly the operations a configured build system can
+/// perform — and disable the rest with an explanation — without hard-coding
+/// Maven (or npm) knowledge into the UI (`tasks/020.md` §13). Producing it
+/// performs no build and mutates nothing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildCapabilities {
+    /// The build system these capabilities describe.
+    pub build_system: BuildSystem,
+    /// The operations the provider supports, in a stable order.
+    pub operations: Vec<BuildOperation>,
+}
+
+impl BuildCapabilities {
+    /// Returns `true` when the provider supports `operation`.
+    #[must_use]
+    pub fn supports(&self, operation: BuildOperation) -> bool {
+        self.operations.contains(&operation)
+    }
+
+    /// Returns `true` when the provider supports no operation.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.operations.is_empty()
+    }
 }
 
 /// A structured snapshot of a service's managed runtime.

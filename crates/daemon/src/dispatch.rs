@@ -243,6 +243,10 @@ pub(crate) async fn route(
         }
 
         // -- builds and libraries -------------------------------------------
+        ops::GET_BUILD_CAPABILITIES => {
+            let (id,): (ServiceId,) = decode(params)?;
+            encode(app.get_build_capabilities(&id)?)
+        }
         ops::BUILD_SERVICE => unary_service(params, |id| app.build_service(id)),
         ops::BUILD_WORKSPACE => {
             let (id,): (WorkspaceId,) = decode(params)?;

@@ -211,6 +211,304 @@ export interface ServiceDetail {
   recent_errors: string[];
 }
 
+// -- git ----------------------------------------------------------------------
+
+/** How a bulk Git operation resolves (`sync`, `fetch`, or `checkout`). */
+export type GitSyncMode = 'sync' | 'fetch' | 'checkout';
+
+/**
+ * A repository row: validated configuration plus the last observed state.
+ *
+ * The list is configuration-derived and performs no Git operation, so the Git
+ * screen opens cheaply with 100+ repositories; real working-tree state is
+ * observed on demand (`tasks/020.md` §4, §35).
+ */
+export interface RepositorySummary {
+  /** A stable, workspace-aware identifier (`workspace:service`). */
+  id: string;
+  service_id: string;
+  workspace_id: string;
+  name: string;
+  /** The service directory relative to the workspace root, when configured. */
+  path: string | null;
+  repository: RepositoryView | null;
+  /** The last observed Git state, or `unknown` before inspection. */
+  git_state: GitState;
+  branch: string | null;
+}
+
+/** A structured `{ code, message }` error embedded in a per-item result. */
+export interface CommandErrorView {
+  code: string;
+  message: string;
+}
+
+/** One repository's on-demand inspection result, success or failure. */
+export interface RepositoryInspectionView {
+  repository_id: string;
+  service_id: string;
+  status: GitStatusView | null;
+  error: CommandErrorView | null;
+}
+
+/** A full working-tree inspection of one repository. */
+export interface GitStatusView {
+  service_id: string;
+  /** The checkout lifecycle (`available`, `not_cloned`, …). */
+  lifecycle: string;
+  branch: string | null;
+  commit: string | null;
+  detached_head: boolean;
+  unborn: boolean;
+  upstream: string | null;
+  ahead: number | null;
+  behind: number | null;
+  staged_changes: number;
+  unstaged_changes: number;
+  untracked_files: number;
+  conflicts: number;
+  clean: boolean;
+  has_local_changes: boolean;
+  diverged: boolean;
+}
+
+/** One branch in a repository listing. */
+export interface BranchView {
+  name: string;
+  /** `local` or `remote`. */
+  kind: string;
+  current: boolean;
+  upstream: string | null;
+  commit: string | null;
+}
+
+/** One repository's entry in a bulk Git preview. */
+export interface GitSyncPreviewEntry {
+  repository_id: string;
+  service_id: string;
+  name: string;
+  current_branch: string | null;
+  target_branch_exists: boolean;
+  target_branch_kind: string | null;
+  lifecycle: string;
+  git_state: GitState;
+  clean: boolean;
+  ahead: number | null;
+  behind: number | null;
+  diverged: boolean;
+  /** The operations the daemon will run for this repository. */
+  expected_operations: string[];
+  warnings: string[];
+  blocked: boolean;
+}
+
+/** A read-only preview of a bulk Git operation over a selection. */
+export interface GitSyncPreview {
+  workspace_id: string;
+  target_branch: string;
+  mode: GitSyncMode;
+  entries: GitSyncPreviewEntry[];
+  total: number;
+  ready: number;
+  dirty: number;
+  missing_branch: number;
+  diverged: number;
+  unavailable: number;
+}
+
+// -- build --------------------------------------------------------------------
+
+/** One build operation in a provider's capability list. */
+export interface BuildOperationView {
+  /** `clean`, `build`, `test`, `install_dependencies`, `publish_local_artifact`. */
+  operation: string;
+  supported: boolean;
+  /** Whether the application core exposes the operation for a service. */
+  exposed: boolean;
+  reason: string | null;
+}
+
+/** The build operations a build system's provider supports. */
+export interface BuildCapabilitiesView {
+  build_system: string;
+  operations: BuildOperationView[];
+  empty: boolean;
+}
+
+/** One service row on the Builds screen: configuration plus capabilities. */
+export interface BuildTargetSummary {
+  service_id: string;
+  display_name: string;
+  workspace_id: string;
+  kind: string;
+  /** The configured build system (`maven`, `npm`), when known. */
+  build_system: string | null;
+  runtimes: RuntimeView[];
+  capability: BuildCapabilitiesView | null;
+  capability_error: string | null;
+}
+
+// -- library ------------------------------------------------------------------
+
+/** A Maven-style artifact coordinate in display form. */
+export interface ArtifactView {
+  group_id: string;
+  artifact_id: string;
+  version: string;
+  packaging: string;
+  classifier: string | null;
+  file_name: string;
+  /** The canonical `group:artifact:version` coordinate. */
+  coordinate: string;
+}
+
+/** A service that depends on a library. */
+export interface LibraryDependentView {
+  service_id: string;
+  workspace_id: string;
+  required: boolean;
+  /** Whether the dependency is needed for `build` or `runtime`. */
+  kind: string;
+}
+
+/** One library row on the Libraries screen. */
+export interface LibrarySummary {
+  id: string;
+  display_name: string;
+  workspace_id: string;
+  build_system: string | null;
+  repository_url: string | null;
+  artifact: ArtifactView | null;
+  artifacts: ArtifactView[];
+  branch: string | null;
+  commit: string | null;
+  git_state: GitState;
+  repository_error: string | null;
+  configured_version: string | null;
+  dependents: LibraryDependentView[];
+}
+
+/** The result of verifying a library's artifact in the local repository. */
+export interface ArtifactVerificationView {
+  library_id: string;
+  workspace_id: string;
+  artifact: ArtifactView;
+  present: boolean;
+  path: string | null;
+  message: string;
+}
+
+/** The alignment of one consumer with a library's target version. */
+export type AlignmentStatus = 'aligned' | 'mismatch' | 'unknown' | 'unresolved';
+
+/** One consumer's alignment with a library's target version. */
+export interface ConsumerAlignmentView {
+  service_id: string;
+  workspace_id: string;
+  path: string | null;
+  /** The version the consumer resolves to, when known. */
+  current_version: string | null;
+  status: AlignmentStatus;
+  detail: string | null;
+}
+
+/** A structured version-alignment view for a library and its consumers. */
+export interface VersionAlignmentView {
+  library_id: string;
+  workspace_id: string;
+  target: ArtifactView;
+  consumers: ConsumerAlignmentView[];
+  aligned_count: number;
+  total: number;
+  fully_aligned: boolean;
+}
+
+// -- tasks, workflows, and logs ----------------------------------------------
+
+/** Task lifecycle status (`queued`, `running`, `succeeded`, …). */
+export type TaskStatus =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'failed'
+  | 'cancelled'
+  | 'skipped'
+  | 'blocked';
+
+/** How far along a task is. */
+export interface TaskProgressView {
+  current: number;
+  total: number | null;
+  message: string | null;
+  /** The completion fraction in `0.0..=1.0`, when the total is known. */
+  fraction: number | null;
+}
+
+/** A structured task failure. */
+export interface TaskFailureView {
+  code: string;
+  message: string;
+  detail: string | null;
+}
+
+/** A task-engine task in display form (read through the shared adapter). */
+export interface TaskView {
+  id: string;
+  /** The task kind label (`build_service`, `git_sync`, …). */
+  kind: string;
+  status: string;
+  service_id: string | null;
+  library_id: string | null;
+  workflow_id: string | null;
+  created_at: number;
+  started_at: number | null;
+  finished_at: number | null;
+  duration_ms: number | null;
+  progress: TaskProgressView;
+  failure: TaskFailureView | null;
+  dependencies: string[];
+}
+
+/** An aggregate of a workflow's per-task outcomes. */
+export interface BulkSummaryView {
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  skipped: number;
+  pending: number;
+  complete: boolean;
+}
+
+/** The result of requesting cancellation of a workflow's tasks. */
+export interface WorkflowCancellationView {
+  cancelled_tasks: number;
+  already_complete: boolean;
+}
+
+/** A single structured log entry. */
+export interface LogEntryView {
+  timestamp: number;
+  /** `trace`, `debug`, `info`, `warn`, or `error`. */
+  level: string;
+  message: string;
+  /** `process`, `task`, `build`, `library`, … */
+  source: string;
+  /** `stdout` / `stderr`, for process entries. */
+  stream: string | null;
+  service_id: string | null;
+  task_id: string | null;
+  process_id: string | null;
+  sequence: number;
+}
+
+/** A bounded page of log entries with its continuation cursor. */
+export interface LogPageView {
+  entries: LogEntryView[];
+  next_cursor: number | null;
+  truncated: boolean;
+}
+
 /** Daemon connection state as reported by the adapter. */
 export type ConnectionState =
   | 'connecting'
