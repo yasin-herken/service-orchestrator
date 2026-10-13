@@ -44,5 +44,8 @@ pub use ingest::{
     entry_from_process_line, entry_from_task_event, spawn_process_ingestor, spawn_task_ingestor,
     task_event_id, task_event_service, ProcessLogIngestor, TaskLogIngestor,
 };
+// The redaction rule is a domain invariant shared by every layer, so the
+// canonical implementation lives in `service_orchestrator_domain` and is
+// re-exported through `crate::redact` (`AGENTS.md` §31).
 pub use redact::{is_clean, redact};
 pub use subscription::ChannelLogSubscription;

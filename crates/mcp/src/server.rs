@@ -45,6 +45,7 @@ use service_orchestrator_application::{
     ApplicationError, DiffOptions, LogRequest, PrepareSelectedLibrariesRequest,
 };
 use service_orchestrator_client::OrchestratorClient;
+use service_orchestrator_execution::{clamp_task_limit, DEFAULT_TASK_LIST_LIMIT};
 
 use crate::{
     catalog, logging, params, parse_branch, parse_group_id, parse_library_id, parse_profile_id,
@@ -534,9 +535,21 @@ impl OrchestratorServer {
             }
             "list_tasks" => {
                 let p = parse::<params::ListTasksRequest>(arguments)?;
+                // Always bounded, so a tool call can never return an unbounded
+                // task history: an explicit limit is clamped to the hard
+                // maximum, and a missing limit keeps the newest window of every
+                // known task (active plus finished), preserving the tool's
+                // "running tasks + recent history" contract (`AGENTS.md` §35).
                 let tasks = match p.limit {
-                    Some(limit) => self.monitor.recent_tasks(limit),
-                    None => self.monitor.tasks(),
+                    Some(limit) => self.monitor.recent_tasks(clamp_task_limit(limit)),
+                    None => {
+                        let mut tasks = self.monitor.tasks();
+                        if tasks.len() > DEFAULT_TASK_LIST_LIMIT {
+                            let excess = tasks.len() - DEFAULT_TASK_LIST_LIMIT;
+                            tasks.drain(..excess);
+                        }
+                        tasks
+                    }
                 };
                 Ok(Value::Array(tasks.iter().map(response::task).collect()))
             }

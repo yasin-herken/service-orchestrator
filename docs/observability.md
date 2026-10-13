@@ -248,6 +248,10 @@ Redacted values are replaced with the domain's `REDACTED` placeholder (`***`), s
 the marker is consistent with the environment model (`AGENTS.md` §31`).
 Whitespace and non-secret assignments are preserved.
 
+The rule is a domain invariant (`service_orchestrator_domain::redact`) shared by
+the log hub, the build and migration adapters, and the process description;
+`service_orchestrator_logging::redact` re-exports it (`docs/security.md` §7).
+
 **It is best-effort and does not pretend otherwise.** There is no reliable way to
 detect every secret in free text, so redaction targets obvious shapes, and the
 system additionally avoids logging sensitive inputs in the first place. This is

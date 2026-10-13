@@ -48,6 +48,23 @@ const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50)
 /// (`tasks/017.md` §18, defect D7).
 const OUTBOUND_CAPACITY: usize = 256;
 
+/// The maximum number of simultaneously connected IPC clients.
+///
+/// Each connection costs a file descriptor and three background tasks, so an
+/// unbounded accept loop could exhaust the daemon's file descriptors and
+/// memory. The cap is far above the handful of interfaces a developer runs
+/// (TUI, desktop, MCP, CLI) while still bounded (`AGENTS.md` §35, `tasks/026.md`
+/// §7).
+const MAX_CONNECTIONS: usize = 128;
+
+/// How long a freshly accepted connection may wait for its *first* request.
+///
+/// A connection that never sends anything would otherwise hold a connection
+/// slot forever. Only the first request is bounded: once a client has issued a
+/// request it may legitimately stay idle while it waits for pushed events
+/// (task and log streams), so later reads are not timed out.
+const INITIAL_REQUEST_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 /// How many configuration-change events a slow client may fall behind before it
 /// is told it lagged. Configuration changes are rare, so this only needs to
 /// cover a burst of edits.
@@ -202,6 +219,16 @@ async fn accept_loop(
             accepted = listener.accept() => {
                 match accepted {
                     Ok((stream, _)) => {
+                        // Reserve a connection slot before spawning. If the cap
+                        // is already reached the stream is dropped immediately,
+                        // so a flood of connections cannot exhaust the daemon's
+                        // file descriptors or task count (`AGENTS.md` §35).
+                        let active = shared.clients.fetch_add(1, Ordering::SeqCst);
+                        if active >= MAX_CONNECTIONS {
+                            shared.clients.fetch_sub(1, Ordering::SeqCst);
+                            drop(stream);
+                            continue;
+                        }
                         // The connecting peer's identity is taken from the
                         // kernel, never from the request envelope: a connection
                         // whose UID does not match the daemon's is never treated
@@ -211,7 +238,6 @@ async fn accept_loop(
                         let same_user = stream
                             .peer_cred()
                             .is_ok_and(|cred| cred.uid() == nix::unistd::geteuid().as_raw());
-                        shared.clients.fetch_add(1, Ordering::SeqCst);
                         let shared = Arc::clone(&shared);
                         let shutdown = shutdown.clone();
                         tokio::spawn(async move {
@@ -291,6 +317,10 @@ async fn handle_connection(
     });
 
     let mut subscriptions: HashMap<ServiceId, JoinHandle<()>> = HashMap::new();
+    // The first request is bounded so a connection that never speaks does not
+    // hold its slot indefinitely; subsequent reads are unbounded so a client
+    // may stay idle while it waits for pushed events.
+    let mut first_request = true;
 
     loop {
         tokio::select! {
@@ -300,9 +330,10 @@ async fn handle_connection(
                 })).await;
                 break;
             }
-            frame = read_frame_async::<_, RequestEnvelope>(&mut reader) => {
+            frame = read_request(&mut reader, first_request, INITIAL_REQUEST_TIMEOUT) => {
                 match frame {
                     Ok(Some(request)) => {
+                        first_request = false;
                         handle_request(&shared, &out, request, &mut subscriptions, same_user).await;
                     }
                     Ok(None) => break,
@@ -621,4 +652,89 @@ where
     let value = serde_json::from_slice(&buffer)
         .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
     Ok(Some(value))
+}
+
+/// Reads one request frame, bounding only the first read of a connection.
+///
+/// The initial read is wrapped in `initial_timeout` so a connection that never
+/// sends a request cannot squat a slot; later reads are unbounded so a
+/// subscribed client may wait indefinitely for pushed events.
+async fn read_request<R>(
+    reader: &mut R,
+    first: bool,
+    initial_timeout: std::time::Duration,
+) -> std::io::Result<Option<RequestEnvelope>>
+where
+    R: AsyncReadExt + Unpin,
+{
+    if !first {
+        return read_frame_async::<_, RequestEnvelope>(reader).await;
+    }
+    match tokio::time::timeout(
+        initial_timeout,
+        read_frame_async::<_, RequestEnvelope>(reader),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_) => Err(std::io::Error::new(
+            std::io::ErrorKind::TimedOut,
+            "no request arrived before the initial connection timeout",
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+
+    use super::{read_request, MAX_CONNECTIONS, PROTOCOL_VERSION};
+    use service_orchestrator_client::{ClientKind, RequestEnvelope};
+    use tokio::io::{AsyncWriteExt, DuplexStream};
+
+    fn request_bytes() -> Vec<u8> {
+        let envelope = RequestEnvelope {
+            protocol: PROTOCOL_VERSION,
+            request_id: "req-1".to_owned(),
+            client: ClientKind::Tui,
+            allow_destructive: false,
+            method: "daemon_status".to_owned(),
+            params: serde_json::json!([]),
+        };
+        let body = serde_json::to_vec(&envelope).expect("the request serializes");
+        let mut framed = (body.len() as u32).to_be_bytes().to_vec();
+        framed.extend_from_slice(&body);
+        framed
+    }
+
+    #[tokio::test]
+    async fn a_prompt_first_request_is_read() {
+        let (mut writer, mut reader) = tokio::io::duplex(1024);
+        writer.write_all(&request_bytes()).await.unwrap();
+        let request = read_request(&mut reader, true, Duration::from_secs(1))
+            .await
+            .expect("the read succeeds")
+            .expect("a request is present");
+        assert_eq!(request.request_id, "req-1");
+    }
+
+    #[tokio::test]
+    async fn a_silent_first_connection_is_bounded() {
+        // Hold the write half open without sending anything; the bounded read
+        // must give up rather than wait forever for a first request.
+        let (_writer, mut reader): (DuplexStream, DuplexStream) = tokio::io::duplex(64);
+        let result = read_request(&mut reader, true, Duration::from_millis(10)).await;
+        assert!(
+            result.is_err(),
+            "an idle connection is released once its slot times out"
+        );
+    }
+
+    #[test]
+    fn the_connection_cap_is_positive_and_bounded() {
+        // Compile-time invariants: a zero cap would refuse every client, and a
+        // huge cap would not bound anything.
+        const { assert!(MAX_CONNECTIONS > 0) };
+        const { assert!(MAX_CONNECTIONS <= 4096) };
+    }
 }

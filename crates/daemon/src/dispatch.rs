@@ -22,7 +22,7 @@ use service_orchestrator_config::ConfigChange;
 use service_orchestrator_domain::{
     Branch, GroupId, LibraryId, ProfileId, ServiceId, TaskId, WorkspaceId,
 };
-use service_orchestrator_execution::TaskEngine;
+use service_orchestrator_execution::{clamp_task_limit, TaskEngine, MAX_TASK_LIST_LIMIT};
 
 /// Returns whether a request may act as an interactive destructive confirmation.
 ///
@@ -72,11 +72,22 @@ pub(crate) async fn route(
                 default_timeout_seconds: config.execution.default_timeout_seconds,
             })
         }
-        ops::LIST_TASKS => encode(engine.list_tasks()),
+        // A task listing is bounded: an unbounded request would serialize the
+        // entire task history into one IPC frame. `list_tasks` keeps the newest
+        // tasks (oldest first within the retained window) so its ordering is
+        // unchanged for a bounded history (`AGENTS.md` §35).
+        ops::LIST_TASKS => {
+            let mut tasks = engine.list_tasks();
+            if tasks.len() > MAX_TASK_LIST_LIMIT {
+                let excess = tasks.len() - MAX_TASK_LIST_LIMIT;
+                tasks.drain(..excess);
+            }
+            encode(tasks)
+        }
         ops::LIST_RUNNING_TASKS => encode(engine.list_running_tasks()),
         ops::LIST_RECENT_TASKS => {
             let (limit,): (usize,) = decode(params)?;
-            encode(engine.list_recent_tasks(limit))
+            encode(engine.list_recent_tasks(clamp_task_limit(limit)))
         }
 
         // -- configuration management (read-only) ---------------------------

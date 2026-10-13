@@ -390,6 +390,11 @@ fn build_command(spec: &ProcessSpec) -> Command {
     if let Some(dir) = &spec.working_dir {
         command.current_dir(dir);
     }
+    // Remove inherited variables the specification marks as unsafe before
+    // applying explicit values, so an explicit `environment` entry always wins.
+    for name in &spec.removed_environment {
+        command.env_remove(name);
+    }
     for variable in spec.environment.iter() {
         command.env(&variable.key, &variable.value);
     }
@@ -612,5 +617,66 @@ where
     let mut lines = BufReader::new(reader).lines();
     while let Ok(Some(line)) = lines.next_line().await {
         entry.publish_log(kind, line);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+    use std::ffi::OsString;
+
+    use service_orchestrator_domain::EnvironmentVariable;
+
+    use super::{build_command, ProcessSpec};
+
+    /// The final environment a built command will apply, keyed by name.
+    fn child_env(spec: &ProcessSpec) -> HashMap<OsString, Option<OsString>> {
+        let command = build_command(spec);
+        command
+            .as_std()
+            .get_envs()
+            .map(|(key, value)| (key.to_os_string(), value.map(ToOwned::to_owned)))
+            .collect()
+    }
+
+    #[test]
+    fn removed_environment_is_unset_in_the_child_command() {
+        let spec = ProcessSpec::new("/bin/echo")
+            .expect("program is valid")
+            .env(EnvironmentVariable::new("SO_KEEP", "1").expect("key is valid"))
+            .expect("environment is valid")
+            .remove_env("SO_DROP");
+        let environment = child_env(&spec);
+        assert_eq!(
+            environment.get(&OsString::from("SO_DROP")),
+            Some(&None),
+            "a removed variable carries no value"
+        );
+        assert_eq!(
+            environment
+                .get(&OsString::from("SO_KEEP"))
+                .and_then(|value| value.clone())
+                .map(|value| value.to_string_lossy().into_owned()),
+            Some("1".to_owned()),
+            "an explicitly set variable is preserved"
+        );
+    }
+
+    #[test]
+    fn explicit_environment_wins_over_a_removal() {
+        let spec = ProcessSpec::new("/bin/echo")
+            .expect("program is valid")
+            .remove_env("SO_BOTH")
+            .env(EnvironmentVariable::new("SO_BOTH", "kept").expect("key is valid"))
+            .expect("environment is valid");
+        let environment = child_env(&spec);
+        assert_eq!(
+            environment
+                .get(&OsString::from("SO_BOTH"))
+                .and_then(|value| value.clone())
+                .map(|value| value.to_string_lossy().into_owned()),
+            Some("kept".to_owned()),
+            "an explicit value is applied after the removal"
+        );
     }
 }

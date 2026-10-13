@@ -157,10 +157,7 @@ pub fn daemon_executable() -> io::Result<PathBuf> {
 pub fn start_daemon(config_path: &Path, socket_path: &Path) -> io::Result<UnixStream> {
     ensure_run_dir(socket_path)?;
     let exe = daemon_executable()?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(log_path(socket_path))?;
+    let log = open_daemon_log(&log_path(socket_path))?;
     let log_err = log.try_clone()?;
 
     let mut command = Command::new(exe);
@@ -178,6 +175,31 @@ pub fn start_daemon(config_path: &Path, socket_path: &Path) -> io::Result<UnixSt
     command.process_group(0);
     let mut child = command.spawn()?;
     wait_for_socket(socket_path, &mut child)
+}
+
+/// Opens (creating if needed) the daemon's log file, owner-only.
+///
+/// The daemon log captures the child's standard output and error, which can
+/// include configuration-derived detail, so it is created `0600` and an
+/// existing file is re-tightened to `0600`. The containing runtime directory is
+/// normally already `0700`, but this holds even when
+/// `SERVICE_ORCHESTRATOR_SOCKET` points at a shared directory such as `/tmp`
+/// (`AGENTS.md` §31, §33).
+fn open_daemon_log(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    let file = options.open(path)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(file)
 }
 
 /// Polls `socket_path` until a connection succeeds or `child` exits.
@@ -403,5 +425,43 @@ mod tests {
         let _ = std::fs::remove_file(&missing);
         assert!(!is_reachable(&missing));
         assert!(connect_existing(&missing).is_err());
+    }
+
+    #[test]
+    fn the_daemon_log_is_created_owner_only() {
+        let root = std::env::temp_dir().join(format!("so-client-log-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the directory is created");
+        let log = root.join("daemon.log");
+        open_daemon_log(&log).expect("the log file is created");
+        let mode = std::fs::metadata(&log)
+            .expect("the log exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o600, "the daemon log is owner-only");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn a_pre_existing_world_readable_daemon_log_is_tightened() {
+        let root = std::env::temp_dir().join(format!("so-client-logfix-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).expect("the directory is created");
+        let log = root.join("daemon.log");
+        std::fs::write(&log, b"old").expect("the log exists");
+        std::fs::set_permissions(&log, std::fs::Permissions::from_mode(0o644))
+            .expect("the log is world-readable");
+        open_daemon_log(&log).expect("the log is reopened");
+        let mode = std::fs::metadata(&log)
+            .expect("the log exists")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(
+            mode, 0o600,
+            "an existing loose log is tightened to owner-only"
+        );
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

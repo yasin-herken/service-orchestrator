@@ -15,7 +15,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use service_orchestrator_domain::{Environment, EnvironmentVariable, ServiceId};
+use service_orchestrator_domain::{redact, Environment, EnvironmentVariable, ServiceId};
 
 use crate::error::ProcessError;
 use crate::state::ExitReason;
@@ -150,6 +150,17 @@ pub struct ProcessSpec {
     /// Secret variables are applied to the child process but are redacted when
     /// the specification is displayed or serialized.
     pub environment: Environment,
+    /// Environment variable names to unset in the child process.
+    ///
+    /// The child inherits the daemon's environment by default, which is what a
+    /// developer build or process expects. Some tools, however, are steered by
+    /// environment variables that can point them outside the intended workspace
+    /// or make them execute arbitrary code — Git's `GIT_DIR`, `GIT_WORK_TREE`,
+    /// or `GIT_SSH_COMMAND`, for example. This list removes those variables
+    /// before the child runs, so an inherited value cannot redirect a command
+    /// (`AGENTS.md` §21, §32).
+    #[serde(default)]
+    pub removed_environment: Vec<String>,
     /// An optional maximum runtime. When exceeded, the process is stopped.
     pub timeout: Option<Duration>,
     /// When the process should be restarted automatically.
@@ -182,6 +193,7 @@ impl ProcessSpec {
             args: Vec::new(),
             working_dir: None,
             environment: Environment::new(),
+            removed_environment: Vec::new(),
             timeout: None,
             restart: RestartPolicy::Never,
             shutdown: ShutdownStrategy::graceful(),
@@ -233,6 +245,25 @@ impl ProcessSpec {
         self
     }
 
+    /// Unsets an inherited environment variable in the child process.
+    #[must_use]
+    pub fn remove_env(mut self, name: impl Into<String>) -> Self {
+        self.removed_environment.push(name.into());
+        self
+    }
+
+    /// Unsets several inherited environment variables in the child process.
+    #[must_use]
+    pub fn remove_envs<I, S>(mut self, names: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.removed_environment
+            .extend(names.into_iter().map(Into::into));
+        self
+    }
+
     /// Sets the maximum runtime.
     #[must_use]
     pub fn with_timeout(mut self, timeout: Duration) -> Self {
@@ -280,16 +311,20 @@ impl ProcessSpec {
         Ok(())
     }
 
-    /// Returns a redacted, human-readable description of the command.
+    /// Returns a best-effort redacted, human-readable description of the command.
     ///
-    /// Environment *values* are never included; only the program and arguments
-    /// are shown, and secret environment variables are displayed as `***`.
+    /// Environment *values* are never included — only the program and arguments
+    /// are shown — and each argument is passed through the shared [`redact`]
+    /// rule so a value carried on the command line (for example
+    /// `--password=…`) is masked before the description reaches a log, a task
+    /// event, or an interface (`AGENTS.md` §31). Redaction is best-effort: an
+    /// unrecognized secret shape in an argument may survive.
     #[must_use]
     pub fn description(&self) -> String {
         let mut rendered = self.program.clone();
         for arg in &self.args {
             rendered.push(' ');
-            rendered.push_str(arg);
+            rendered.push_str(&redact(arg));
         }
         rendered
     }
@@ -307,6 +342,29 @@ mod tests {
         assert_eq!(spec.program, "/bin/echo");
         assert_eq!(spec.args, vec!["hello", "world"]);
         assert_eq!(spec.description(), "/bin/echo hello world");
+    }
+
+    #[test]
+    fn description_redacts_secret_looking_arguments() {
+        let spec = ProcessSpec::new("/bin/tool")
+            .unwrap()
+            .args(["--password=hunter2", "safe"]);
+        let description = spec.description();
+        assert!(!description.contains("hunter2"));
+        assert!(description.contains("--password=***"));
+        assert!(description.contains("safe"));
+    }
+
+    #[test]
+    fn environment_removals_are_recorded() {
+        let spec = ProcessSpec::new("/bin/echo")
+            .unwrap()
+            .remove_env("GIT_DIR")
+            .remove_envs(["GIT_WORK_TREE", "GIT_SSH_COMMAND"]);
+        assert_eq!(
+            spec.removed_environment,
+            vec!["GIT_DIR", "GIT_WORK_TREE", "GIT_SSH_COMMAND"]
+        );
     }
 
     #[test]

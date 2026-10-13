@@ -15,7 +15,7 @@ use std::time::Duration;
 use service_orchestrator_domain::{MigrationOperation, ServiceId};
 use service_orchestrator_execution::Cancellation;
 use service_orchestrator_liquibase::DatabaseCoordinator;
-use support::{config, manager, Workspace, SERVICE};
+use support::{config, manager, script, Workspace, SERVICE};
 
 const UPDATE_ECHO: &str = r#"update = { program = "/bin/echo", args = ["applied"] }"#;
 const STATUS_ECHO: &str = r#"status = { program = "/bin/echo", args = ["status"] }"#;
@@ -51,8 +51,13 @@ async fn a_failed_migration_is_reported_with_a_structured_code() {
 #[cfg(unix)]
 async fn a_lock_conflict_is_reported() {
     let workspace = Workspace::new("auth-service");
-    let commands = r#"update = { program = "/bin/sh", args = ["-c", "echo 'Waiting for changelog lock....' >&2; exit 1"] }"#;
-    let config = config(&workspace, "local", commands);
+    let program = script(
+        &workspace,
+        "lock.sh",
+        "echo 'Waiting for changelog lock....' >&2\nexit 1",
+    );
+    let commands = format!(r#"update = {{ program = "{program}", args = [] }}"#);
+    let config = config(&workspace, "local", &commands);
     let error = manager(config)
         .execute(&workspace.target(MigrationOperation::Apply), None, None)
         .await
@@ -145,14 +150,23 @@ async fn a_read_only_operation_never_requires_authorization() {
 #[cfg(unix)]
 async fn credentials_are_redacted_from_captured_output() {
     let workspace = Workspace::new("auth-service");
-    let commands = r#"update = { program = "/bin/sh", args = ["-c", "echo 'jdbc:postgresql://db/app?password=hunter2'"] }"#;
-    let config = config(&workspace, "local", commands);
+    let program = script(
+        &workspace,
+        "secret.sh",
+        "echo 'jdbc:postgresql://db/app?password=hunter2'\necho 'AUTH_TOKEN=abc123'",
+    );
+    let commands = format!(r#"update = {{ program = "{program}", args = [] }}"#);
+    let config = config(&workspace, "local", &commands);
     let outcome = manager(config)
         .execute(&workspace.target(MigrationOperation::Apply), None, None)
         .await
         .unwrap();
+    // The JDBC line is dropped wholesale; the token line survives but its
+    // value is masked by the shared redaction rule.
     assert!(!outcome.stdout.contains("hunter2"));
     assert!(!outcome.stderr.contains("hunter2"));
+    assert!(!outcome.stdout.contains("abc123"));
+    assert!(outcome.stdout.contains("AUTH_TOKEN=***"));
 }
 
 #[tokio::test]

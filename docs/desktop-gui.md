@@ -450,8 +450,8 @@ connect lock, so a burst of commands cannot start several daemons.
 | Control | Setting |
 | --- | --- |
 | Capabilities | `core:default` only — no shell, filesystem, HTTP, or process plugin |
-| CSP (production) | `default-src 'self'`, no remote code, `connect-src 'self' ipc:` |
-| CSP (dev) | adds `http://localhost:5173` and the HMR WebSocket only |
+| CSP (production) | `default-src 'self'`, no remote code, `connect-src 'self' ipc:`, plus `base-uri 'none'; object-src 'none'; frame-ancestors 'none'; form-action 'none'` |
+| CSP (dev) | adds `http://localhost:5173` and the HMR WebSocket only, with the same `base-uri`/`object-src`/`frame-ancestors`/`form-action` hardening |
 | Navigation | `tauri:` scheme always; `http://localhost:5173` only in debug builds |
 | Secrets | never returned by a command; the adapter exposes only the shapes above |
 

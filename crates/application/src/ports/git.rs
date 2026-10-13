@@ -185,6 +185,13 @@ impl GitOptions {
     }
 }
 
+/// The hard upper bound on the number of patch bytes a diff request may ask for.
+///
+/// A diff can be arbitrarily large; the limit keeps a single request from
+/// having to serialize an unbounded patch into an IPC frame or an MCP response
+/// (`AGENTS.md` §35, §40). The default (64 KiB) is well below this.
+pub const MAX_DIFF_BYTES: usize = 1024 * 1024;
+
 /// Options for a diff inspection.
 #[derive(Clone, Debug)]
 pub struct DiffOptions {
@@ -223,10 +230,11 @@ impl DiffOptions {
         self
     }
 
-    /// Sets the maximum patch size, in bytes.
+    /// Sets the maximum patch size, in bytes, clamped to
+    /// `1..=`[`MAX_DIFF_BYTES`].
     #[must_use]
     pub fn with_max_bytes(mut self, max_bytes: usize) -> Self {
-        self.max_bytes = max_bytes;
+        self.max_bytes = max_bytes.clamp(1, MAX_DIFF_BYTES);
         self
     }
 
@@ -797,6 +805,25 @@ mod tests {
             ..repository()
         };
         assert!(!escaping.is_inside_workspace());
+    }
+
+    #[test]
+    fn diff_max_bytes_is_clamped() {
+        assert_eq!(
+            DiffOptions::new().with_max_bytes(4096).max_bytes,
+            4096,
+            "a value below the maximum is preserved"
+        );
+        assert_eq!(
+            DiffOptions::new().with_max_bytes(usize::MAX).max_bytes,
+            MAX_DIFF_BYTES,
+            "an oversized request is clamped to the maximum"
+        );
+        assert_eq!(
+            DiffOptions::new().with_max_bytes(0).max_bytes,
+            1,
+            "a zero limit is raised to one byte"
+        );
     }
 
     #[test]

@@ -1137,10 +1137,16 @@ impl ConfigRepository {
             Err(_) => set_owner_only(&temp),
         }
 
-        // Keep a backup of the previous good file.
+        // Keep a backup of the previous good file. The backup may carry secret
+        // environment values (only by reference in the default model, but a
+        // user may have inlined one), so it is restricted to the owner rather
+        // than inheriting a potentially world-readable mode (`AGENTS.md` §31,
+        // `tasks/026.md` §34).
         if self.path.exists() {
             let backup = self.path.with_extension("toml.bak");
-            let _ = fs::copy(&self.path, &backup);
+            if fs::copy(&self.path, &backup).is_ok() {
+                set_owner_only(&backup);
+            }
         }
 
         fs::rename(&temp, &self.path).map_err(|source| {

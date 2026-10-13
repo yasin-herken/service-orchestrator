@@ -47,6 +47,7 @@ pub use build::{
 };
 pub use git::{
     parameter, DiffOptions, GitError, GitManager, GitOptions, NullGitManager, ResolvedRepository,
+    MAX_DIFF_BYTES,
 };
 pub use health::{
     HealthCheckOutcome, HealthIndex, NullHealthIndex, ServiceHealth, CHECK_HTTP, CHECK_PROCESS,

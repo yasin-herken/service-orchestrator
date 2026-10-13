@@ -60,7 +60,10 @@ mod task_manager;
 
 pub use cancellation::Cancellation;
 pub use context::{ProgressReporter, TaskContext};
-pub use engine::{EngineConfig, TaskEngine, TaskEngineBuilder};
+pub use engine::{
+    clamp_task_limit, EngineConfig, TaskEngine, TaskEngineBuilder, DEFAULT_TASK_LIST_LIMIT,
+    MAX_TASK_LIST_LIMIT,
+};
 pub use error::TaskEngineError;
 pub use events::TaskEvent;
 pub use executor::{TaskExecutor, TaskExecutorError, TaskOutcome};

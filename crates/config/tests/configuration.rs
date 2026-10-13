@@ -245,6 +245,67 @@ fn rejects_an_unsafe_migration_command() {
 }
 
 #[test]
+fn rejects_a_shell_command_line_from_a_service_command() {
+    // A configured `sh -c "…"` would make the whole command line shell
+    // interpreted, defeating the structured-command boundary, so it is refused
+    // at validation time (`AGENTS.md` §32).
+    let text = r#"
+config_version = 1
+
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+
+[[services]]
+id = "auth-service"
+type = "backend"
+workspace = "acme"
+
+[services.commands]
+build = "sh -c 'echo build'"
+start = "./mvnw spring-boot:run"
+"#;
+    let error = load(text).unwrap_err();
+    let errors = validation_errors(&error);
+    let command_error = errors
+        .errors()
+        .iter()
+        .find(|e| e.location.contains("commands.build"))
+        .expect("expected a shell command to be rejected");
+    assert!(command_error.problem.contains("shell"));
+}
+
+#[test]
+fn rejects_a_shell_command_from_a_structured_service_command() {
+    let text = r#"
+config_version = 1
+
+[[workspaces]]
+id = "acme"
+root = "/tmp/acme"
+
+[[services]]
+id = "auth-service"
+type = "backend"
+workspace = "acme"
+
+[services.commands]
+build = { program = "bash", args = ["-c", "echo hi"] }
+start = "./mvnw spring-boot:run"
+"#;
+    let error = load(text).unwrap_err();
+    let errors = validation_errors(&error);
+    assert!(
+        errors
+            .errors()
+            .iter()
+            .any(|e| e.location.contains("commands.build") && e.problem.contains("shell")),
+        "expected a structured shell command to be rejected: {:?}",
+        errors.errors()
+    );
+}
+
+#[test]
 fn an_invalid_execution_mode_is_rejected() {
     let text = r#"
 config_version = 1
