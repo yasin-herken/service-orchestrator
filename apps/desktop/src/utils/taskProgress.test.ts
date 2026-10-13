@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest';
 import type { TrackedTask } from '../context/TaskEventsContext';
 import {
   busyServiceIds,
-  isTerminalStatus,
   lastTaskByService,
   summarizeTasks,
   tasksForWorkflow,
@@ -26,12 +25,6 @@ function task(overrides: Partial<TrackedTask> = {}): TrackedTask {
 }
 
 describe('taskProgress', () => {
-  it('classifies terminal statuses', () => {
-    expect(isTerminalStatus('succeeded')).toBe(true);
-    expect(isTerminalStatus('failed')).toBe(true);
-    expect(isTerminalStatus('running')).toBe(false);
-  });
-
   it('collects services with non-terminal tasks', () => {
     const tasks = [
       task({ id: 'a', serviceId: 'x', status: 'running' }),

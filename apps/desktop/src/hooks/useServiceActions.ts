@@ -1,8 +1,13 @@
-import { useCallback, useRef, useState } from 'react';
+import { useCallback, useMemo } from 'react';
 
 import { desktopApi } from '../services/desktopApi';
-import { toDesktopError } from '../services/errors';
-import type { DesktopError, OperationOutcome } from '../types/models';
+import type { OperationOutcome } from '../types/models';
+import {
+  useEntityOperations,
+  type EntityOperations,
+  type OperationError,
+  type SubmittedOperation,
+} from './useEntityOperations';
 
 /** The lifecycle actions the services screen can submit. */
 export type LifecycleAction = 'start' | 'stop' | 'restart' | 'check_health';
@@ -22,40 +27,15 @@ export const ACTION_LABELS: Record<LifecycleAction, string> = {
 };
 
 /** An operation submitted to the daemon, newest first. */
-export interface ServiceOperation {
-  /** Monotonic key for rendering. */
-  key: number;
-  action: LifecycleAction;
-  /** The services the operation targeted. */
-  serviceIds: string[];
-  /** Human-readable target labels. */
-  labels: string[];
-  /** The daemon's normalized outcome. */
-  outcome: OperationOutcome;
-  /** When it was submitted, seconds since the Unix epoch. */
-  at: number;
-}
+export type ServiceOperation = SubmittedOperation<LifecycleAction>;
 
 /** The most recent action failure, kept for the error dialog. */
-export interface ActionErrorState {
-  action: LifecycleAction;
-  serviceIds: string[];
-  labels: string[];
-  error: DesktopError;
-}
+export type ActionErrorState = OperationError<LifecycleAction>;
 
 /** The value returned by [`useServiceActions`]. */
-export interface ServiceActions {
-  /** Service ids with an in-flight command. */
-  pending: ReadonlySet<string>;
-  /** Submitted operations, newest first. */
-  operations: readonly ServiceOperation[];
-  /** The most recent failure, or `null`. */
-  error: ActionErrorState | null;
+export interface ServiceActions extends Omit<EntityOperations<LifecycleAction>, 'execute'> {
   /** Submits a lifecycle action for the given services. */
   execute: (action: LifecycleAction, targets: ServiceTarget[]) => Promise<void>;
-  /** Dismisses the error dialog. */
-  clearError: () => void;
 }
 
 async function callSingle(
@@ -96,67 +76,47 @@ async function callBulk(
  * Submits service lifecycle actions through the daemon and tracks their
  * pending state.
  *
+ * The pending/operations/error bookkeeping is the shared
+ * [`useEntityOperations`] state machine; this hook only maps the service-shaped
+ * target to the generic `OperationTarget` and dispatches single vs bulk calls.
  * The hook never marks an operation successful: it records the daemon's
  * normalized outcome and calls `onSettled` so the caller can reload the
- * authoritative state. `pending` guards against duplicate submissions while a
- * command is in flight; the backend's own coordination guards the rest
- * (`tasks/019.md` §24, §28).
+ * authoritative state (`tasks/019.md` §24, §28).
  */
 export function useServiceActions(
   workspaceId: string | null,
   onSettled: () => void,
 ): ServiceActions {
-  const [pending, setPending] = useState<ReadonlySet<string>>(new Set());
-  const [operations, setOperations] = useState<ServiceOperation[]>([]);
-  const [error, setError] = useState<ActionErrorState | null>(null);
-  const nextKey = useRef(0);
-
-  const execute = useCallback(
-    async (action: LifecycleAction, targets: ServiceTarget[]) => {
-      if (!workspaceId || targets.length === 0) {
-        return;
-      }
-      const serviceIds = targets.map((target) => target.id);
-      const labels = targets.map((target) => target.display_name);
-      setError(null);
-      setPending((current) => new Set([...current, ...serviceIds]));
-      try {
-        const outcome =
-          targets.length === 1
-            ? await callSingle(action, serviceIds[0])
-            : await callBulk(action, workspaceId, serviceIds);
-        nextKey.current += 1;
-        const operation: ServiceOperation = {
-          key: nextKey.current,
-          action,
-          serviceIds,
-          labels,
-          outcome,
-          at: Math.floor(Date.now() / 1000),
-        };
-        setOperations((current) => [operation, ...current].slice(0, 20));
-        onSettled();
-      } catch (cause) {
-        setError({
-          action,
-          serviceIds,
-          labels,
-          error: toDesktopError(cause),
-        });
-      } finally {
-        setPending((current) => {
-          const next = new Set(current);
-          for (const id of serviceIds) {
-            next.delete(id);
-          }
-          return next;
-        });
-      }
-    },
-    [workspaceId, onSettled],
+  const submit = useCallback(
+    async (
+      action: LifecycleAction,
+      workspace: string,
+      serviceIds: string[],
+    ): Promise<OperationOutcome> =>
+      serviceIds.length === 1
+        ? callSingle(action, serviceIds[0])
+        : callBulk(action, workspace, serviceIds),
+    [],
   );
 
-  const clearError = useCallback(() => setError(null), []);
+  const base = useEntityOperations<LifecycleAction>(workspaceId, submit, onSettled);
+  const execute = useCallback(
+    (action: LifecycleAction, targets: ServiceTarget[]) =>
+      base.execute(
+        action,
+        targets.map((target) => ({ id: target.id, label: target.display_name })),
+      ),
+    [base],
+  );
 
-  return { pending, operations, error, execute, clearError };
+  return useMemo(
+    () => ({
+      pending: base.pending,
+      operations: base.operations,
+      error: base.error,
+      clearError: base.clearError,
+      execute,
+    }),
+    [base, execute],
+  );
 }

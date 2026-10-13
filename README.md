@@ -59,7 +59,9 @@ for the rationale. A complete example lives at
 The core-first architecture keeps the application core independent of Ratatui
 and MCP. Both are interface adapters over the same core.
 
-See [docs/architecture.md](docs/architecture.md) for the full design and
+See [docs/architecture.md](docs/architecture.md) for the full design,
+[docs/architecture-simplification.md](docs/architecture-simplification.md) for
+the latest simplification audit, and
 [docs/adr/001-core-architecture.md](docs/adr/001-core-architecture.md) for the
 rationale.
 

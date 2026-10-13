@@ -1,11 +1,10 @@
-import { useEffect, useRef } from 'react';
-
 import { GitBadge } from '../StatusBadge';
 import type { TrackedTask } from '../../context/TaskEventsContext';
 import type { RepositorySummary } from '../../types/models';
+import { useIndeterminateCheckbox } from '../../hooks/useIndeterminateCheckbox';
 import { operationLabel } from '../../utils/format';
 import type { RepositorySortKey } from '../../utils/repositoryQuery';
-import type { SortDirection } from '../../utils/serviceQuery';
+import type { SortDirection } from '../../utils/compare';
 
 /** Current sort of the repository table. */
 export interface RepositoryTableSort {
@@ -55,13 +54,7 @@ export function RepositoryTable({
   busy: ReadonlySet<string>;
   lastOperations: ReadonlyMap<string, TrackedTask>;
 }) {
-  const headerCheckbox = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (headerCheckbox.current) {
-      headerCheckbox.current.indeterminate = someVisibleSelected;
-    }
-  }, [someVisibleSelected]);
+  const headerCheckbox = useIndeterminateCheckbox(someVisibleSelected);
 
   return (
     <table className="service-table">

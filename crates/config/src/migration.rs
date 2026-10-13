@@ -44,7 +44,6 @@ pub(crate) fn migrate(
     //   if from < 2 { value = upgrade_to_2(value)?; }
     //
     // and the guard below disappears.
-    let _ = value;
     Err(ConfigError::UnsupportedVersion {
         path: path.to_owned(),
         found: i64::from(from),

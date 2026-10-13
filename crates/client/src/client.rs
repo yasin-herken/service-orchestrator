@@ -29,6 +29,7 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
+use service_orchestrator_application::DiffOptions;
 use service_orchestrator_application::{
     Application, ApplicationError, Authorization, BuildCapabilities, BulkOperationSummary,
     ConfigurationCommit, ConfigurationReload, ConfigurationValidation, EnvironmentPlan,
@@ -39,7 +40,6 @@ use service_orchestrator_application::{
     ServiceRuntimeStatus, ServiceStatus, WorkflowCancellation, WorkflowStatus, WorkspaceStatus,
     WorkspaceValidationReport,
 };
-use service_orchestrator_application::{DiffOptions, HealthState};
 use service_orchestrator_config::{ConfigChange, ConfigurationPreview, ConfigurationSnapshot};
 use service_orchestrator_domain::{
     Branch, BranchInfo, GroupId, Library, LibraryId, Profile, ProfileId, RepoDiff,
@@ -1117,8 +1117,3 @@ impl OrchestratorClient for Application {
         Application::detect_project_configuration(self, path)
     }
 }
-
-/// Silences an unused-import warning when the `HealthState` re-export is not
-/// otherwise referenced by a downstream crate.
-#[allow(unused_imports)]
-use HealthState as _HealthState;

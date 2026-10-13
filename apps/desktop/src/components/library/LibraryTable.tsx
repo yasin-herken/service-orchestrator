@@ -1,8 +1,7 @@
-import { useEffect, useRef } from 'react';
-
 import { GitBadge } from '../StatusBadge';
 import type { TrackedTask } from '../../context/TaskEventsContext';
 import type { LibrarySummary } from '../../types/models';
+import { useIndeterminateCheckbox } from '../../hooks/useIndeterminateCheckbox';
 import { operationLabel } from '../../utils/format';
 
 /**
@@ -36,13 +35,7 @@ export function LibraryTable({
   busy: ReadonlySet<string>;
   lastOperations: ReadonlyMap<string, TrackedTask>;
 }) {
-  const headerCheckbox = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (headerCheckbox.current) {
-      headerCheckbox.current.indeterminate = someVisibleSelected;
-    }
-  }, [someVisibleSelected]);
+  const headerCheckbox = useIndeterminateCheckbox(someVisibleSelected);
 
   return (
     <table className="service-table">

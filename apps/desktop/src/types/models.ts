@@ -57,9 +57,6 @@ export type HealthState =
 /** Git working-copy state (domain `GitState`). */
 export type GitState = 'clean' | 'modified' | 'ahead' | 'behind' | 'diverged' | 'unknown';
 
-/** Well-known service kinds; the domain keeps the type open. */
-export const SERVICE_KINDS = ['backend', 'frontend', 'library'] as const;
-
 /** A service row: configuration plus its last observed runtime state. */
 export interface ServiceSummary {
   id: string;
@@ -424,16 +421,6 @@ export interface VersionAlignmentView {
 }
 
 // -- tasks, workflows, and logs ----------------------------------------------
-
-/** Task lifecycle status (`queued`, `running`, `succeeded`, …). */
-export type TaskStatus =
-  | 'queued'
-  | 'running'
-  | 'succeeded'
-  | 'failed'
-  | 'cancelled'
-  | 'skipped'
-  | 'blocked';
 
 /** How far along a task is. */
 export interface TaskProgressView {

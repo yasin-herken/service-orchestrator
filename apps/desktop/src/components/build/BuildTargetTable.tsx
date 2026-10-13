@@ -1,7 +1,6 @@
-import { useEffect, useRef } from 'react';
-
 import type { TrackedTask } from '../../context/TaskEventsContext';
 import type { BuildTargetSummary } from '../../types/models';
+import { useIndeterminateCheckbox } from '../../hooks/useIndeterminateCheckbox';
 import { operationLabel } from '../../utils/format';
 import { buildOperationLabel, exposedOperations } from './BuildCapabilitiesList';
 
@@ -49,13 +48,7 @@ export function BuildTargetTable({
   busy: ReadonlySet<string>;
   lastOperations: ReadonlyMap<string, TrackedTask>;
 }) {
-  const headerCheckbox = useRef<HTMLInputElement>(null);
-
-  useEffect(() => {
-    if (headerCheckbox.current) {
-      headerCheckbox.current.indeterminate = someVisibleSelected;
-    }
-  }, [someVisibleSelected]);
+  const headerCheckbox = useIndeterminateCheckbox(someVisibleSelected);
 
   return (
     <table className="service-table">

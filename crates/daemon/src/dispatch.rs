@@ -423,7 +423,7 @@ fn decode<T: DeserializeOwned>(params: Value) -> Result<T, ApplicationError> {
 }
 
 /// Encodes an operation's result.
-fn encode<T: Serialize>(value: T) -> Result<Value, ApplicationError> {
+pub(crate) fn encode<T: Serialize>(value: T) -> Result<Value, ApplicationError> {
     serde_json::to_value(value).map_err(|error| {
         unavailable(
             codes::INVALID_REQUEST,
