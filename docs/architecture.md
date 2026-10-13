@@ -244,9 +244,10 @@ Instead:
 - The MCP server validates tool input, applies policy, and forwards calls to
   application use cases. It contains no business logic and never shells out
   directly.
-- The desktop GUI wraps the same use cases in a small read-only command set and
-  renders the answers; it holds no second client, task engine, or process
-  manager.
+- The desktop GUI validates its inputs, applies policy, and forwards calls to the
+  same use cases for reads, service lifecycle, Git, build, and library
+  management, then renders the answers; it holds no second client, task engine,
+  or process manager.
 
 All speak to the application core through the same `OrchestratorClient` boundary
 and, in production, through the same local daemon. They are therefore not only
@@ -1014,7 +1015,8 @@ SDK `rmcp` 3.5.1.
 ## 25. The Tauri desktop GUI adapter
 
 The `apps/desktop` application is the graphical interface (`docs/desktop-gui.md`,
-`docs/adr/018-tauri-desktop-gui.md`, `docs/adr/019-desktop-service-management.md`).
+`docs/adr/018-tauri-desktop-gui.md`, `docs/adr/019-desktop-service-management.md`,
+`docs/adr/020-desktop-git-build-library.md`).
 It is launched with `npm run tauri dev` during development; the Tauri crate is
 deliberately its own Cargo workspace, excluded from the root one, so the
 `wry`/`tao`/`objc` dependency tree is compiled only for the GUI.
@@ -1037,10 +1039,27 @@ deliberately its own Cargo workspace, excluded from the root one, so the
   `stop_service`, `restart_service`, `start_services`, `stop_services`,
   `restart_services`, and `check_service_health`). Every command validates its
   identifiers into domain types at the boundary and delegates to the shared
-  client; no Git, build, library, migration, or destructive operation is
-  exposed. Bulk operations submit a single daemon workflow rather than a
+  client. Bulk operations submit a single daemon workflow rather than a
   frontend loop, and restart always uses the daemon's coordinated
   stop-then-start.
+- **Git, build, and library commands.** The adapter also exposes Git reads
+  (`list_repositories`, `get_git_status`, `inspect_repositories`,
+  `list_branches`, `preview_git_sync`) and mutations (`fetch_repository`,
+  `pull_repository`, `checkout_repository`, `sync_repository`, and their bulk
+  `*_repositories` workflows); build reads and mutations (`list_build_targets`,
+  `get_build_capabilities`, `build_service`, `build_services`); and library reads
+  and mutations (`list_libraries`, `get_library_dependents`,
+  `verify_library_artifact`, `inspect_version_alignment`, `build_library`,
+  `install_library`, `sync_library`, `prepare_library`, `prepare_libraries`),
+  plus task and log reads (`get_task`, `summarize_workflow`, `get_task_logs`)
+  and cancellation (`cancel_task`, `cancel_workflow`). Each maps onto an
+  existing application use case; bulk Git sync, bulk builds, and library
+  preparation submit one coordinated core operation. No destructive Git
+  operation is exposed. `get_build_capabilities` is the one query this interface
+  required from the core: a read-only projection of the build adapter's provider
+  registry behind the `BuildCapabilityIndex` port
+  (`crates/application/src/ports/build.rs`), so the GUI renders a build system's
+  operations without hard-coding Maven or npm.
 - **One connection, one client.** A shared `AppState` owns a single client
   behind a connect lock, so a burst of commands cannot start several daemons.
   The adapter resolves the real `service-orchestrator` binary (explicit
@@ -1055,11 +1074,12 @@ deliberately its own Cargo workspace, excluded from the root one, so the
   daemon is started only by an explicit action or by the shared client's single
   reconnect-retry, exactly as the TUI and MCP behave while attached.
 - **Mutations pass through the policy engine.** Starting, stopping, and
-  restarting a service are `SafeWrite` operations submitted as a `Cli` client,
-  exactly as the TUI and MCP do; a confirmation dialog in the webview is a
-  usability affordance and never substitutes for the daemon's authorization.
-  The frontend's pending state and the daemon's own operation coordination
-  together prevent duplicate requests (`tasks/019.md` §28).
+  restarting a service, Git synchronization, builds, and library preparation are
+  `SafeWrite` operations submitted as a `Cli` client, exactly as the TUI and MCP
+  do; a confirmation dialog in the webview is a usability affordance and never
+  substitutes for the daemon's authorization. The frontend's pending state and
+  the daemon's own operation coordination together prevent duplicate requests
+  (`tasks/019.md` §28, `tasks/020.md` §31).
 - **Forwarded events.** The adapter subscribes to the daemon's task-event
   stream and re-emits events verbatim as `daemon://task`, plus a synthetic
   `Lagged` payload when the subscription falls behind; the frontend never polls
@@ -1126,6 +1146,13 @@ deliberately its own Cargo workspace, excluded from the root one, so the
   normalized operation outcome, bulk as one daemon workflow, the policy engine
   as the sole authority, task-event-driven refresh, stable-id selection, and
   disconnection that never replays uncertain writes.
+- `docs/adr/020-desktop-git-build-library.md` — the decision record for desktop
+  Git, build, and library management: the read-only build-capability index,
+  configuration-derived repository lists with on-demand inspection, one
+  coordinated core operation per bulk action (no frontend loop), the read-only
+  sync preview with no silent discard of local changes, provider-agnostic build
+  capabilities, read-only version alignment, and the shared task-monitoring and
+  log components.
 - `docs/environment-workflows.md` — environment preparation: the request and its
   defaults, selection precedence, dependency closure, planning, the execution
   phases, cancellation and failure handling, aggregated results, and TUI and MCP
@@ -1162,10 +1189,11 @@ deliberately its own Cargo workspace, excluded from the root one, so the
 - `docs/mcp.md` — the MCP server: stdio connection model, tools, resources,
   prompts, permissions, observability, long-running work, example workflows,
   testing, and limitations.
-- `docs/desktop-gui.md` — the Tauri 2 desktop GUI: the shell and read-only
-  screens, the six commands, the two event streams, the connection model, the
-  daemon-binary resolution, security controls, development workflow, testing,
-  and limitations.
+- `docs/desktop-gui.md` — the Tauri 2 desktop GUI: the shell, service lifecycle,
+  Git, build, and library screens, the command set, the two event streams, the
+  connection model, the daemon-binary resolution, security controls, shared task
+  monitoring and logs, performance, development workflow, testing, and
+  limitations.
 - `docs/domain-model.md` — the domain entities, relationships, and invariants.
 - `docs/workspace-validation.md` — workspace validation: scope, read-only
   guarantees, the individual checks, diagnostic codes, and safe execution.

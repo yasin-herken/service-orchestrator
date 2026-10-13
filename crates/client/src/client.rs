@@ -30,10 +30,10 @@ use std::sync::Arc;
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use service_orchestrator_application::{
-    Application, ApplicationError, Authorization, BulkOperationSummary, EnvironmentPlan,
-    HealthCheckScope, LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions,
-    LibraryStatus, LogEntry, LogPage, LogRequest, LogSubscription, MigrationStatus,
-    OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
+    Application, ApplicationError, Authorization, BuildCapabilities, BulkOperationSummary,
+    EnvironmentPlan, HealthCheckScope, LibraryArtifactVerification, LibraryDependent,
+    LibraryPrepareOptions, LibraryStatus, LogEntry, LogPage, LogRequest, LogSubscription,
+    MigrationStatus, OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
     ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus, ServiceStatus, WorkflowCancellation,
     WorkflowStatus, WorkspaceStatus, WorkspaceValidationReport,
 };
@@ -335,6 +335,11 @@ pub trait OrchestratorClient: Send + Sync {
 
     // -- builds and libraries -----------------------------------------------
 
+    /// Returns the build operations a service's build system supports.
+    fn get_build_capabilities(
+        &self,
+        service_id: &ServiceId,
+    ) -> Result<BuildCapabilities, ApplicationError>;
     /// Builds a service.
     fn build_service(&self, service_id: &ServiceId) -> Result<OperationResult, ApplicationError>;
     /// Builds a service's repository (alias).
@@ -787,6 +792,13 @@ impl OrchestratorClient for Application {
         branch: &Branch,
     ) -> Result<OperationResult, ApplicationError> {
         Application::checkout_repositories(self, workspace_id, services, branch)
+    }
+
+    fn get_build_capabilities(
+        &self,
+        service_id: &ServiceId,
+    ) -> Result<BuildCapabilities, ApplicationError> {
+        Application::get_build_capabilities(self, service_id)
     }
 
     fn build_service(&self, service_id: &ServiceId) -> Result<OperationResult, ApplicationError> {

@@ -41,7 +41,8 @@ pub use artifact::{
     DependencyVersionInspection, NullArtifactInspector, ResolvedArtifact, ResolvedDependency,
 };
 pub use build::{
-    parameter as build_parameter, BuildError, ResolvedBuildCommand, ResolvedBuildTarget,
+    parameter as build_parameter, BuildCapabilityIndex, BuildError, NullBuildCapabilityIndex,
+    ResolvedBuildCommand, ResolvedBuildTarget,
 };
 pub use git::{
     parameter, DiffOptions, GitError, GitManager, GitOptions, NullGitManager, ResolvedRepository,

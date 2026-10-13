@@ -26,7 +26,8 @@ use std::time::Duration;
 
 use service_orchestrator_application::{Application, ArtifactInspector, InMemoryRuntimeStateStore};
 use service_orchestrator_build::{
-    register_build_executors, register_library_executors, BuildManager, MavenArtifactInspector,
+    register_build_executors, register_library_executors, BuildManager, BuildProviderRegistry,
+    MavenArtifactInspector,
 };
 use service_orchestrator_client::{socket_path, ClientKind, OrchestratorClient, RemoteClient};
 use service_orchestrator_config::{default_config_file, load_from_path, Config, ConfigError};
@@ -349,6 +350,10 @@ async fn bootstrap(
     .with_artifact_inspector(Arc::clone(&artifacts))
     .with_service_runtime(services.clone())
     .with_health_index(health.store())
+    // The build-provider registry, projected read-only so interfaces can render
+    // which operations each build system supports without hard-coding provider
+    // knowledge (`tasks/020.md` §13).
+    .with_build_capabilities(Arc::new(BuildProviderRegistry::standard()))
     // The real, read-only environment probe behind `validate_workspace`. The
     // application core never reaches the filesystem, `PATH`, or the network on
     // its own (`tasks/017.md` §7).

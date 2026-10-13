@@ -13,7 +13,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use service_orchestrator_application::BuildError;
+use service_orchestrator_application::{BuildCapabilities, BuildCapabilityIndex, BuildError};
 use service_orchestrator_domain::BuildSystem;
 
 use crate::maven::MavenBuildProvider;
@@ -80,6 +80,22 @@ impl std::fmt::Debug for BuildProviderRegistry {
     }
 }
 
+/// Projects the registry as the application core's read-only capability index.
+///
+/// This is how an interface learns which operations a build system supports
+/// without reaching the provider directly: the registry is the single source of
+/// truth for provider capabilities (`tasks/020.md` §13).
+impl BuildCapabilityIndex for BuildProviderRegistry {
+    fn capabilities(&self, system: BuildSystem) -> Option<BuildCapabilities> {
+        self.providers
+            .get(&system)
+            .map(|provider| BuildCapabilities {
+                build_system: system,
+                operations: provider.capabilities().to_vec(),
+            })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -114,5 +130,31 @@ mod tests {
         registry.register(Arc::new(MavenBuildProvider::new()));
         registry.register(Arc::new(MavenBuildProvider::new()));
         assert_eq!(registry.systems().count(), 1);
+    }
+
+    #[test]
+    fn the_capability_index_projects_provider_operations() {
+        use service_orchestrator_domain::BuildOperation;
+
+        let registry = BuildProviderRegistry::standard();
+        let maven = registry
+            .capabilities(BuildSystem::Maven)
+            .expect("maven is registered");
+        assert_eq!(maven.build_system, BuildSystem::Maven);
+        assert!(maven.supports(BuildOperation::Build));
+        assert!(maven.supports(BuildOperation::PublishLocalArtifact));
+
+        let npm = registry
+            .capabilities(BuildSystem::Npm)
+            .expect("npm is registered");
+        assert_eq!(npm.build_system, BuildSystem::Npm);
+        assert!(npm.supports(BuildOperation::InstallDependencies));
+        assert!(!npm.supports(BuildOperation::PublishLocalArtifact));
+    }
+
+    #[test]
+    fn an_empty_registry_reports_no_capabilities() {
+        let registry = BuildProviderRegistry::new();
+        assert!(registry.capabilities(BuildSystem::Maven).is_none());
     }
 }

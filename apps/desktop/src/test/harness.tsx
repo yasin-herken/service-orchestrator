@@ -2,11 +2,23 @@ import { act, render, type RenderResult } from '@testing-library/react';
 
 import App from '../App';
 import {
+  makeAlignment,
+  makeBranches,
+  makeBulkSummary,
+  makeBuildTargets,
   makeConnected,
   makeDaemonStatus,
+  makeGitStatus,
+  makeGitSyncPreview,
+  makeInspection,
+  makeLibraries,
+  makeLogPage,
   makeOperationOutcome,
+  makeRepositories,
   makeServiceDetail,
   makeServices,
+  makeTaskView,
+  makeVerification,
   makeWorkspace,
   makeWorkspaceStatus,
 } from './fixtures';
@@ -90,4 +102,62 @@ export function happyPathDefaults(): void {
   mockDesktopApi.checkServiceHealth.mockResolvedValue(
     makeOperationOutcome({ kind: 'health_check' }),
   );
+  mockDesktopApi.listRepositories.mockResolvedValue(makeRepositories());
+  mockDesktopApi.getGitStatus.mockResolvedValue(makeGitStatus());
+  mockDesktopApi.inspectRepositories.mockImplementation(async (workspaceId, serviceIds) =>
+    serviceIds.map((serviceId) =>
+      makeInspection({
+        repository_id: `${workspaceId}:${serviceId}`,
+        service_id: serviceId,
+        status: makeGitStatus({ service_id: serviceId }),
+      }),
+    ),
+  );
+  mockDesktopApi.listBranches.mockResolvedValue(makeBranches());
+  mockDesktopApi.previewGitSync.mockResolvedValue(makeGitSyncPreview());
+  mockDesktopApi.fetchRepository.mockResolvedValue(makeOperationOutcome({ kind: 'git_fetch' }));
+  mockDesktopApi.pullRepository.mockResolvedValue(makeOperationOutcome({ kind: 'git_pull' }));
+  mockDesktopApi.checkoutRepository.mockResolvedValue(
+    makeOperationOutcome({ kind: 'git_checkout' }),
+  );
+  mockDesktopApi.syncRepository.mockResolvedValue(makeOperationOutcome({ kind: 'git_sync' }));
+  mockDesktopApi.fetchRepositories.mockResolvedValue(
+    makeOperationOutcome({ status: 'workflow', task_id: null, workflow_id: 'wf-fetch', kind: 'fetch_repositories' }),
+  );
+  mockDesktopApi.syncRepositories.mockResolvedValue(
+    makeOperationOutcome({ status: 'workflow', task_id: null, workflow_id: 'wf-sync', kind: 'sync_repositories' }),
+  );
+  mockDesktopApi.checkoutRepositories.mockResolvedValue(
+    makeOperationOutcome({ status: 'workflow', task_id: null, workflow_id: 'wf-co', kind: 'checkout_repositories' }),
+  );
+  mockDesktopApi.listBuildTargets.mockResolvedValue(makeBuildTargets());
+  mockDesktopApi.buildService.mockResolvedValue(makeOperationOutcome({ kind: 'build_service' }));
+  mockDesktopApi.buildServices.mockResolvedValue(
+    makeOperationOutcome({ status: 'workflow', task_id: null, workflow_id: 'wf-build', kind: 'prepare_environment' }),
+  );
+  mockDesktopApi.listLibraries.mockResolvedValue(makeLibraries());
+  mockDesktopApi.getLibraryDependents.mockResolvedValue([
+    { service_id: 'orders-api', workspace_id: 'demo', required: true, kind: 'build' },
+  ]);
+  mockDesktopApi.verifyLibraryArtifact.mockResolvedValue(makeVerification());
+  mockDesktopApi.inspectVersionAlignment.mockResolvedValue(makeAlignment());
+  mockDesktopApi.buildLibrary.mockResolvedValue(makeOperationOutcome({ kind: 'build_library' }));
+  mockDesktopApi.installLibrary.mockResolvedValue(makeOperationOutcome({ kind: 'library_install' }));
+  mockDesktopApi.syncLibrary.mockResolvedValue(makeOperationOutcome({ kind: 'git_sync' }));
+  mockDesktopApi.prepareLibrary.mockResolvedValue(
+    makeOperationOutcome({ status: 'workflow', task_id: null, workflow_id: 'wf-prep', kind: 'prepare_library' }),
+  );
+  mockDesktopApi.prepareLibraries.mockResolvedValue(
+    makeOperationOutcome({ status: 'workflow', task_id: null, workflow_id: 'wf-prep', kind: 'prepare_libraries' }),
+  );
+  mockDesktopApi.getTask.mockResolvedValue(makeTaskView());
+  mockDesktopApi.summarizeWorkflow.mockResolvedValue(makeBulkSummary());
+  mockDesktopApi.getTaskLogs.mockResolvedValue(makeLogPage());
+  mockDesktopApi.cancelTask.mockResolvedValue(
+    makeTaskView({ status: 'cancelled', finished_at: 1_700_000_002 }),
+  );
+  mockDesktopApi.cancelWorkflow.mockResolvedValue({
+    cancelled_tasks: 1,
+    already_complete: false,
+  });
 }

@@ -7,11 +7,15 @@
 
 use serde::Serialize;
 use service_orchestrator_application::{
-    HealthCheckOutcome, OperationResult, ServiceDiagnostics, ServiceStatus,
+    BuildCapabilities, BulkOperationSummary, HealthCheckOutcome, LibraryArtifactVerification,
+    LibraryDependent, LibraryStatus, LogEntry, LogPage, OperationResult, ServiceDiagnostics,
+    ServiceStatus, VersionAlignmentPlan, WorkflowCancellation,
     WorkspaceStatus as CoreWorkspaceStatus,
 };
 use service_orchestrator_domain::{
-    Dependency, DependencyTarget, HealthCheck, Repository, Runtime, Service, Timestamp, Workspace,
+    ArtifactCoordinate, BranchInfo, BuildOperation, Dependency, DependencyTarget, HealthCheck,
+    Library, Repository, RepositoryStatus, Runtime, Service, Task, TaskProgress, Timestamp,
+    Workspace,
 };
 
 /// A workspace as shown in the selector and the dashboard.
@@ -419,13 +423,817 @@ fn timestamp_seconds(timestamp: Timestamp) -> i64 {
     i64::try_from(timestamp.epoch_millis() / 1000).unwrap_or(0)
 }
 
+// -- git ----------------------------------------------------------------------
+
+/// One configured repository, as a row on the Git screen.
+///
+/// The row combines validated configuration — which service owns which
+/// repository, its checkout path, and its default branch — with the last
+/// *observed* Git state, when there is one. It performs no Git operation: the
+/// real working tree is inspected on demand through `get_git_status`
+/// (`tasks/020.md` §4, §6, §35).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepositorySummary {
+    /// A stable, workspace-aware repository identifier (`workspace:service`).
+    pub id: String,
+    /// The service that owns the repository.
+    pub service_id: String,
+    /// The workspace that owns the service.
+    pub workspace_id: String,
+    /// The human-readable repository name.
+    pub name: String,
+    /// The service directory relative to the workspace root, when configured.
+    pub path: Option<String>,
+    /// The source repository, when configured.
+    pub repository: Option<RepositoryView>,
+    /// The last observed Git working-copy state (snake_case), or `unknown`.
+    pub git_state: String,
+    /// The branch last observed as checked out, when known.
+    pub branch: Option<String>,
+}
+
+impl RepositorySummary {
+    /// Builds a repository row from configuration and last-observed state.
+    #[must_use]
+    pub fn new(workspace_id: &str, service: &Service, status: Option<&ServiceStatus>) -> Self {
+        Self {
+            id: format!("{workspace_id}:{}", service.id),
+            service_id: service.id.to_string(),
+            workspace_id: workspace_id.to_owned(),
+            name: service.display_name.clone(),
+            path: service.path.as_ref().map(|path| path.as_str().to_owned()),
+            repository: service.repository.as_ref().map(RepositoryView::from),
+            git_state: status.map_or_else(
+                || "unknown".to_owned(),
+                |status| enum_value(&status.git_state),
+            ),
+            branch: status
+                .and_then(|status| status.branch.as_ref())
+                .map(ToString::to_string),
+        }
+    }
+}
+
+/// A structured `{ code, message }` error embedded in a per-item result.
+///
+/// A batch inspection must report one repository's failure without failing the
+/// whole batch, so the error is carried as a value rather than a rejected
+/// command (`tasks/020.md` §11, §30).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct CommandErrorView {
+    /// Stable machine-readable code.
+    pub code: String,
+    /// Human-readable, user-safe message.
+    pub message: String,
+}
+
+impl From<crate::error::CommandError> for CommandErrorView {
+    fn from(error: crate::error::CommandError) -> Self {
+        Self {
+            code: error.code,
+            message: error.message,
+        }
+    }
+}
+
+/// One repository's on-demand inspection result, success or failure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct RepositoryInspectionView {
+    /// The stable, workspace-aware repository identifier.
+    pub repository_id: String,
+    /// The service that owns the repository.
+    pub service_id: String,
+    /// The inspected status, when inspection succeeded.
+    pub status: Option<GitStatusView>,
+    /// Why inspection failed, when it did.
+    pub error: Option<CommandErrorView>,
+}
+
+/// A full working-tree inspection of one repository.
+///
+/// This mirrors [`RepositoryStatus`](service_orchestrator_domain::RepositoryStatus)
+/// field for field, so the frontend can present the real ahead/behind, staged,
+/// unstaged, untracked, and conflict counts without re-deriving them
+/// (`tasks/020.md` §4, §8, §11).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GitStatusView {
+    /// The service that owns the repository.
+    pub service_id: String,
+    /// The lifecycle of the checkout on disk (`available`, `not_cloned`, …).
+    pub lifecycle: String,
+    /// The checked-out branch, when not detached or unborn.
+    pub branch: Option<String>,
+    /// The current commit SHA, when there is one.
+    pub commit: Option<String>,
+    /// Whether `HEAD` is detached.
+    pub detached_head: bool,
+    /// Whether the branch is unborn (a fresh repository).
+    pub unborn: bool,
+    /// The configured upstream of the current branch, when any.
+    pub upstream: Option<String>,
+    /// How many commits the branch is ahead of its upstream, when known.
+    pub ahead: Option<u32>,
+    /// How many commits the branch is behind its upstream, when known.
+    pub behind: Option<u32>,
+    /// The number of staged changes.
+    pub staged_changes: u32,
+    /// The number of unstaged changes.
+    pub unstaged_changes: u32,
+    /// The number of untracked files.
+    pub untracked_files: u32,
+    /// The number of unmerged (conflicted) entries.
+    pub conflicts: u32,
+    /// Whether the working tree has no staged, unstaged, untracked, or
+    /// conflicted entries.
+    pub clean: bool,
+    /// Whether any local change would be at risk from a destructive operation.
+    pub has_local_changes: bool,
+    /// Whether the branch is both ahead of and behind its upstream.
+    pub diverged: bool,
+}
+
+impl GitStatusView {
+    /// Builds an inspection view from a repository status.
+    #[must_use]
+    pub fn new(service_id: &str, status: &RepositoryStatus) -> Self {
+        Self {
+            service_id: service_id.to_owned(),
+            lifecycle: status.lifecycle.label().to_owned(),
+            branch: status.branch.as_ref().map(ToString::to_string),
+            commit: status.commit.clone(),
+            detached_head: status.detached_head,
+            unborn: status.unborn,
+            upstream: status.upstream.clone(),
+            ahead: status.ahead,
+            behind: status.behind,
+            staged_changes: status.staged_changes,
+            unstaged_changes: status.unstaged_changes,
+            untracked_files: status.untracked_files,
+            conflicts: status.conflicts,
+            clean: status.is_clean(),
+            has_local_changes: status.has_local_changes(),
+            diverged: status.is_diverged(),
+        }
+    }
+}
+
+/// One branch in a repository listing.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BranchView {
+    /// The branch name (`main`, `origin/main`).
+    pub name: String,
+    /// Whether the branch is `local` or `remote`.
+    pub kind: String,
+    /// Whether the branch is currently checked out.
+    pub current: bool,
+    /// The upstream branch name, when one is configured.
+    pub upstream: Option<String>,
+    /// The commit the branch points at, when known.
+    pub commit: Option<String>,
+}
+
+impl From<&BranchInfo> for BranchView {
+    fn from(info: &BranchInfo) -> Self {
+        Self {
+            name: info.name.clone(),
+            kind: enum_value(&info.kind),
+            current: info.current,
+            upstream: info.upstream.clone(),
+            commit: info.commit.clone(),
+        }
+    }
+}
+
+/// A read-only preview of a bulk Git operation over a selection.
+///
+/// The preview aggregates real status and branch information for each selected
+/// repository so the user can see dirty working trees, missing target branches,
+/// and diverged histories *before* anything mutates. It never stashes, resets,
+/// or discards anything (`tasks/020.md` §7, §8, §9).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GitSyncPreview {
+    /// The workspace the operation targets.
+    pub workspace_id: String,
+    /// The target branch.
+    pub target_branch: String,
+    /// The requested mode (`sync`, `fetch`, or `checkout`).
+    pub mode: String,
+    /// One entry per selected repository.
+    pub entries: Vec<GitSyncPreviewEntry>,
+    /// The number of selected repositories.
+    pub total: usize,
+    /// How many are ready without warnings.
+    pub ready: usize,
+    /// How many have uncommitted local changes.
+    pub dirty: usize,
+    /// How many are missing the target branch.
+    pub missing_branch: usize,
+    /// How many have diverged from their upstream.
+    pub diverged: usize,
+    /// How many could not be inspected (not cloned, invalid, or unavailable).
+    pub unavailable: usize,
+}
+
+/// One repository's entry in a bulk Git preview.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GitSyncPreviewEntry {
+    /// The stable repository identifier.
+    pub repository_id: String,
+    /// The service that owns the repository.
+    pub service_id: String,
+    /// The human-readable repository name.
+    pub name: String,
+    /// The branch currently checked out, when known.
+    pub current_branch: Option<String>,
+    /// Whether the target branch exists locally or as a remote-tracking ref.
+    pub target_branch_exists: bool,
+    /// Whether the matching target ref is `local` or `remote`.
+    pub target_branch_kind: Option<String>,
+    /// The lifecycle of the checkout on disk.
+    pub lifecycle: String,
+    /// The last observed working-copy state.
+    pub git_state: String,
+    /// Whether the working tree is clean.
+    pub clean: bool,
+    /// How many commits ahead of upstream, when known.
+    pub ahead: Option<u32>,
+    /// How many commits behind upstream, when known.
+    pub behind: Option<u32>,
+    /// Whether the branch has diverged from its upstream.
+    pub diverged: bool,
+    /// The operations the daemon will run for this repository.
+    pub expected_operations: Vec<String>,
+    /// Human-readable warnings that do not stop the operation.
+    pub warnings: Vec<String>,
+    /// Whether the operation cannot safely proceed for this repository.
+    pub blocked: bool,
+}
+
+// -- build --------------------------------------------------------------------
+
+/// One service row on the Builds screen: configuration plus provider
+/// capabilities.
+///
+/// The capability list is the build adapter's own registry projected read-only
+/// through the application core, so the GUI never hard-codes Maven or npm
+/// knowledge (`tasks/020.md` §12, §13).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BuildTargetSummary {
+    /// The service identifier.
+    pub service_id: String,
+    /// The human-readable service name.
+    pub display_name: String,
+    /// The workspace that owns the service.
+    pub workspace_id: String,
+    /// The service category.
+    pub kind: String,
+    /// The configured build system, when known.
+    pub build_system: Option<String>,
+    /// The runtimes the service requires.
+    pub runtimes: Vec<RuntimeView>,
+    /// The operations the build system supports, when a provider is registered.
+    pub capability: Option<BuildCapabilitiesView>,
+    /// Why capabilities could not be resolved, when they could not.
+    pub capability_error: Option<String>,
+}
+
+impl BuildTargetSummary {
+    /// Builds a build target row from a service and its resolved capabilities.
+    #[must_use]
+    pub fn new(
+        workspace_id: &str,
+        service: &Service,
+        capability: Option<&BuildCapabilities>,
+        capability_error: Option<String>,
+    ) -> Self {
+        Self {
+            service_id: service.id.to_string(),
+            display_name: service.display_name.clone(),
+            workspace_id: workspace_id.to_owned(),
+            kind: service.kind.label().to_owned(),
+            build_system: service.build_system.as_ref().map(ToString::to_string),
+            runtimes: service.runtimes.iter().map(RuntimeView::from).collect(),
+            capability: capability.map(BuildCapabilitiesView::from),
+            capability_error,
+        }
+    }
+}
+
+/// The build operations a build system's provider supports.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BuildCapabilitiesView {
+    /// The build system the capabilities describe.
+    pub build_system: String,
+    /// One entry per build-system-neutral operation, in a stable order.
+    pub operations: Vec<BuildOperationView>,
+    /// Whether the provider supports no operation at all.
+    pub empty: bool,
+}
+
+impl From<&BuildCapabilities> for BuildCapabilitiesView {
+    fn from(capabilities: &BuildCapabilities) -> Self {
+        // Enumerate the closed operation set explicitly: the core deliberately
+        // exposes no `all()` so a new variant forces a compile error here
+        // rather than silently vanishing from the UI.
+        let all = [
+            BuildOperation::Clean,
+            BuildOperation::Build,
+            BuildOperation::Test,
+            BuildOperation::InstallDependencies,
+            BuildOperation::PublishLocalArtifact,
+        ];
+        let operations = all
+            .into_iter()
+            .map(|operation| BuildOperationView {
+                operation: operation.label().to_owned(),
+                supported: capabilities.supports(operation),
+                // Only `Build` is reachable through the application core's
+                // service build use case today; the rest are reported honestly
+                // as unsupported-by-the-application rather than hidden.
+                exposed: operation == BuildOperation::Build,
+                reason: if capabilities.supports(operation) {
+                    (operation != BuildOperation::Build).then(|| {
+                        "supported by the provider but not exposed by the application core for services"
+                            .to_owned()
+                    })
+                } else {
+                    Some("the configured build provider does not support this operation".to_owned())
+                },
+            })
+            .collect();
+        Self {
+            build_system: capabilities.build_system.label().to_owned(),
+            operations,
+            empty: capabilities.is_empty(),
+        }
+    }
+}
+
+/// One build operation in a provider's capability list.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct BuildOperationView {
+    /// The operation label (`clean`, `build`, `test`, …).
+    pub operation: String,
+    /// Whether the configured provider supports the operation.
+    pub supported: bool,
+    /// Whether the application core exposes the operation for a service.
+    pub exposed: bool,
+    /// Why the operation is disabled, when it is.
+    pub reason: Option<String>,
+}
+
+// -- library ------------------------------------------------------------------
+
+/// A Maven-style artifact coordinate in display form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ArtifactView {
+    /// The group identifier.
+    pub group_id: String,
+    /// The artifact identifier.
+    pub artifact_id: String,
+    /// The artifact version.
+    pub version: String,
+    /// The packaging (`jar`, `pom`, …), defaulting to `jar`.
+    pub packaging: String,
+    /// The classifier, when the artifact has one.
+    pub classifier: Option<String>,
+    /// The artifact's file name.
+    pub file_name: String,
+    /// The canonical `group:artifact:version` coordinate.
+    pub coordinate: String,
+}
+
+impl From<&ArtifactCoordinate> for ArtifactView {
+    fn from(artifact: &ArtifactCoordinate) -> Self {
+        Self {
+            group_id: artifact.group_id.clone(),
+            artifact_id: artifact.artifact_id.clone(),
+            version: artifact.version.to_string(),
+            packaging: artifact.packaging_or_default().to_owned(),
+            classifier: artifact.classifier.clone(),
+            file_name: artifact.file_name(),
+            coordinate: artifact.to_string(),
+        }
+    }
+}
+
+/// One library row on the Libraries screen.
+///
+/// The row combines validated configuration with best-effort observed state
+/// (repository branch/commit and Git state) and the services that depend on it.
+/// It never rewrites a POM or changes a version (`tasks/020.md` §20, §23, §24).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LibrarySummary {
+    /// The library identifier.
+    pub id: String,
+    /// The human-readable library name.
+    pub display_name: String,
+    /// The workspace that owns the library.
+    pub workspace_id: String,
+    /// The configured build system, when known.
+    pub build_system: Option<String>,
+    /// The configured repository URL, when any (never containing credentials).
+    pub repository_url: Option<String>,
+    /// The primary artifact coordinate, when configured.
+    pub artifact: Option<ArtifactView>,
+    /// Every artifact the library produces (primary first).
+    pub artifacts: Vec<ArtifactView>,
+    /// The branch last observed as checked out, when known.
+    pub branch: Option<String>,
+    /// The commit last observed, when known.
+    pub commit: Option<String>,
+    /// The last observed Git working-copy state.
+    pub git_state: String,
+    /// Why repository state could not be inspected, when it could not.
+    pub repository_error: Option<String>,
+    /// The configured version of the primary artifact, when known.
+    pub configured_version: Option<String>,
+    /// The services that depend on the library.
+    pub dependents: Vec<LibraryDependentView>,
+}
+
+impl LibrarySummary {
+    /// Builds a library row from configuration, observed status, and dependents.
+    #[must_use]
+    pub fn new(
+        library: &Library,
+        status: Option<&LibraryStatus>,
+        dependents: &[LibraryDependent],
+    ) -> Self {
+        let artifacts = library
+            .produced_artifacts()
+            .into_iter()
+            .map(ArtifactView::from)
+            .collect();
+        Self {
+            id: library.id.to_string(),
+            display_name: library.display_name.clone(),
+            workspace_id: status
+                .map(|status| status.workspace_id.to_string())
+                .unwrap_or_default(),
+            build_system: library.build_system.as_ref().map(ToString::to_string),
+            repository_url: library.repository.as_ref().map(|repo| repo.url.clone()),
+            artifact: library.artifact.as_ref().map(ArtifactView::from),
+            artifacts,
+            branch: status
+                .and_then(|status| status.branch.as_ref())
+                .map(ToString::to_string),
+            commit: status.and_then(|status| status.commit.clone()),
+            git_state: status.map_or_else(
+                || "unknown".to_owned(),
+                |status| enum_value(&status.git_state),
+            ),
+            repository_error: status.and_then(|status| status.repository_error.clone()),
+            configured_version: library
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.version.to_string()),
+            dependents: dependents.iter().map(LibraryDependentView::from).collect(),
+        }
+    }
+}
+
+/// A service that depends on a library.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LibraryDependentView {
+    /// The dependent service.
+    pub service_id: String,
+    /// The workspace that owns the service.
+    pub workspace_id: String,
+    /// Whether the dependency is mandatory.
+    pub required: bool,
+    /// Whether the dependency is needed for `build` or `runtime`.
+    pub kind: String,
+}
+
+impl From<&LibraryDependent> for LibraryDependentView {
+    fn from(dependent: &LibraryDependent) -> Self {
+        Self {
+            service_id: dependent.service_id.to_string(),
+            workspace_id: dependent.workspace_id.to_string(),
+            required: dependent.required,
+            kind: dependent.kind.to_string(),
+        }
+    }
+}
+
+/// The result of verifying a library's artifact in the local repository.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ArtifactVerificationView {
+    /// The library identifier.
+    pub library_id: String,
+    /// The workspace that owns the library.
+    pub workspace_id: String,
+    /// The artifact that was verified.
+    pub artifact: ArtifactView,
+    /// Whether the artifact is present in the effective local repository.
+    pub present: bool,
+    /// The artifact file's absolute path, when it was found.
+    pub path: Option<String>,
+    /// A human-readable summary.
+    pub message: String,
+}
+
+impl From<&LibraryArtifactVerification> for ArtifactVerificationView {
+    fn from(verification: &LibraryArtifactVerification) -> Self {
+        Self {
+            library_id: verification.library_id.to_string(),
+            workspace_id: verification.workspace_id.to_string(),
+            artifact: ArtifactView::from(&verification.artifact),
+            present: verification.present,
+            path: verification.path.as_ref().map(ToString::to_string),
+            message: verification.message.clone(),
+        }
+    }
+}
+
+/// One consumer's alignment with a library's target version.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ConsumerAlignmentView {
+    /// The dependent service.
+    pub service_id: String,
+    /// The workspace that owns the service.
+    pub workspace_id: String,
+    /// The consumer module's absolute directory, when it could be resolved.
+    pub path: Option<String>,
+    /// The version the consumer resolves to, when known.
+    pub current_version: Option<String>,
+    /// The alignment outcome (`aligned`, `mismatch`, `unknown`, `unresolved`).
+    pub status: String,
+    /// Additional context, for example why a version is unknown.
+    pub detail: Option<String>,
+}
+
+/// A structured version-alignment view for a library and its consumers.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct VersionAlignmentView {
+    /// The library identifier.
+    pub library_id: String,
+    /// The workspace that owns the library.
+    pub workspace_id: String,
+    /// The coordinate whose version consumers should align with.
+    pub target: ArtifactView,
+    /// One entry per dependent service.
+    pub consumers: Vec<ConsumerAlignmentView>,
+    /// How many consumers are aligned with the target version.
+    pub aligned_count: usize,
+    /// How many consumers were inspected.
+    pub total: usize,
+    /// Whether every consumer is aligned.
+    pub fully_aligned: bool,
+}
+
+impl From<&VersionAlignmentPlan> for VersionAlignmentView {
+    fn from(plan: &VersionAlignmentPlan) -> Self {
+        Self {
+            library_id: plan.library_id.to_string(),
+            workspace_id: plan.workspace_id.to_string(),
+            target: ArtifactView::from(&plan.target),
+            consumers: plan
+                .consumers
+                .iter()
+                .map(|consumer| ConsumerAlignmentView {
+                    service_id: consumer.service_id.to_string(),
+                    workspace_id: consumer.workspace_id.to_string(),
+                    path: consumer.path.as_ref().map(ToString::to_string),
+                    current_version: consumer.current_version.as_ref().map(ToString::to_string),
+                    status: consumer.status.label().to_owned(),
+                    detail: consumer.detail.clone(),
+                })
+                .collect(),
+            aligned_count: plan.aligned_count(),
+            total: plan.consumers.len(),
+            fully_aligned: plan.is_fully_aligned(),
+        }
+    }
+}
+
+// -- tasks, workflows, and logs ----------------------------------------------
+
+/// A task-engine task in display form.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TaskView {
+    /// The task identifier.
+    pub id: String,
+    /// The task kind label (`build_service`, `git_sync`, …).
+    pub kind: String,
+    /// The task lifecycle status (`queued`, `running`, `succeeded`, …).
+    pub status: String,
+    /// The service the task acts on, when any.
+    pub service_id: Option<String>,
+    /// The library the task acts on, when any.
+    pub library_id: Option<String>,
+    /// The workflow the task belongs to, when any.
+    pub workflow_id: Option<String>,
+    /// When the task was created, seconds since the Unix epoch.
+    pub created_at: i64,
+    /// When the task started running, seconds since the Unix epoch.
+    pub started_at: Option<i64>,
+    /// When the task reached a terminal state, seconds since the Unix epoch.
+    pub finished_at: Option<i64>,
+    /// How long the task ran, in milliseconds, once it has started.
+    pub duration_ms: Option<u64>,
+    /// The task's progress.
+    pub progress: TaskProgressView,
+    /// The task's structured failure, when it failed.
+    pub failure: Option<TaskFailureView>,
+    /// The ids of the tasks this one depends on.
+    pub dependencies: Vec<String>,
+}
+
+impl From<&Task> for TaskView {
+    fn from(task: &Task) -> Self {
+        Self {
+            id: task.id.to_string(),
+            kind: task.kind.label().to_owned(),
+            status: task.status.label().to_owned(),
+            service_id: task.service.as_ref().map(ToString::to_string),
+            library_id: task.library.as_ref().map(ToString::to_string),
+            workflow_id: task.workflow.as_ref().map(ToString::to_string),
+            created_at: timestamp_seconds(task.created_at),
+            started_at: task.started_at.map(timestamp_seconds),
+            finished_at: task.finished_at.map(timestamp_seconds),
+            duration_ms: task_duration_millis(task),
+            progress: TaskProgressView::from(&task.progress),
+            failure: task.error.as_ref().map(|error| TaskFailureView {
+                code: error.code.clone(),
+                message: error.message.clone(),
+                detail: error.detail.clone(),
+            }),
+            dependencies: task.dependencies.iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
+/// How far along a task is.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct TaskProgressView {
+    /// The number of completed units of work.
+    pub current: u32,
+    /// The total number of units, when known.
+    pub total: Option<u32>,
+    /// An optional human-readable progress message.
+    pub message: Option<String>,
+    /// The completion fraction in `0.0..=1.0`, when the total is known.
+    pub fraction: Option<f64>,
+}
+
+impl From<&TaskProgress> for TaskProgressView {
+    fn from(progress: &TaskProgress) -> Self {
+        Self {
+            current: progress.current,
+            total: progress.total,
+            message: progress.message.clone(),
+            fraction: progress.fraction(),
+        }
+    }
+}
+
+/// A structured task failure.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct TaskFailureView {
+    /// A stable, machine-readable code.
+    pub code: String,
+    /// A human-readable summary.
+    pub message: String,
+    /// Optional additional detail, such as the process exit code.
+    pub detail: Option<String>,
+}
+
+/// An aggregate of a workflow's per-task outcomes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct BulkSummaryView {
+    /// The total number of tasks.
+    pub total: u32,
+    /// Tasks that completed successfully.
+    pub succeeded: u32,
+    /// Tasks that failed.
+    pub failed: u32,
+    /// Tasks that were cancelled.
+    pub cancelled: u32,
+    /// Tasks that were deliberately skipped.
+    pub skipped: u32,
+    /// Tasks still queued, blocked, or running.
+    pub pending: u32,
+    /// Whether no task is still pending.
+    pub complete: bool,
+}
+
+impl From<BulkOperationSummary> for BulkSummaryView {
+    fn from(summary: BulkOperationSummary) -> Self {
+        Self {
+            total: summary.total,
+            succeeded: summary.succeeded,
+            failed: summary.failed,
+            cancelled: summary.cancelled,
+            skipped: summary.skipped,
+            pending: summary.pending,
+            complete: summary.is_complete(),
+        }
+    }
+}
+
+/// The result of requesting cancellation of a workflow's tasks.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkflowCancellationView {
+    /// How many still-active tasks were asked to cancel.
+    pub cancelled_tasks: u32,
+    /// Whether every task was already terminal when cancellation was requested.
+    pub already_complete: bool,
+}
+
+impl From<WorkflowCancellation> for WorkflowCancellationView {
+    fn from(cancellation: WorkflowCancellation) -> Self {
+        Self {
+            cancelled_tasks: cancellation.cancelled_tasks,
+            already_complete: cancellation.already_complete,
+        }
+    }
+}
+
+/// A single structured log entry.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LogEntryView {
+    /// When the entry was produced, seconds since the Unix epoch.
+    pub timestamp: i64,
+    /// The severity (`trace`, `debug`, `info`, `warn`, `error`).
+    pub level: String,
+    /// The log message, already redacted of obvious secret material.
+    pub message: String,
+    /// Where the entry originated (`process`, `task`, `build`, …).
+    pub source: String,
+    /// The originating output stream (`stdout`/`stderr`), for process entries.
+    pub stream: Option<String>,
+    /// The service the entry belongs to, when known.
+    pub service_id: Option<String>,
+    /// The task the entry belongs to, when known.
+    pub task_id: Option<String>,
+    /// The managed process the entry belongs to, when known.
+    pub process_id: Option<String>,
+    /// The entry's monotonic sequence, used for cursor pagination.
+    pub sequence: u64,
+}
+
+impl From<&LogEntry> for LogEntryView {
+    fn from(entry: &LogEntry) -> Self {
+        Self {
+            timestamp: timestamp_seconds(entry.timestamp),
+            level: enum_value(&entry.level),
+            message: entry.message.clone(),
+            source: enum_value(&entry.source),
+            stream: entry.stream.as_ref().map(enum_value),
+            service_id: entry.service_id.as_ref().map(ToString::to_string),
+            task_id: entry.task_id.as_ref().map(ToString::to_string),
+            process_id: entry.process_id.clone(),
+            sequence: entry.sequence,
+        }
+    }
+}
+
+/// A bounded page of log entries with its continuation cursor.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LogPageView {
+    /// The matched entries, oldest first.
+    pub entries: Vec<LogEntryView>,
+    /// The cursor to request the next page, or `null` when there is none.
+    pub next_cursor: Option<u64>,
+    /// Whether more matching entries existed than the limit allowed.
+    pub truncated: bool,
+}
+
+impl From<LogPage> for LogPageView {
+    fn from(page: LogPage) -> Self {
+        Self {
+            entries: page.entries.iter().map(LogEntryView::from).collect(),
+            next_cursor: page.next_cursor,
+            truncated: page.truncated,
+        }
+    }
+}
+
+/// Returns a task's wall-clock duration in milliseconds, when it has started.
+fn task_duration_millis(task: &Task) -> Option<u64> {
+    let started = task.started_at?;
+    let finished = task.finished_at.unwrap_or_else(Timestamp::now);
+    u64::try_from(
+        finished
+            .epoch_millis()
+            .saturating_sub(started.epoch_millis()),
+    )
+    .ok()
+}
+
 #[cfg(test)]
 mod tests {
-    use service_orchestrator_application::{DiagnosticFailure, HealthState};
+    use service_orchestrator_application::{
+        AlignmentStatus, ConsumerAlignment, DiagnosticFailure, HealthState, LogLevel, LogSource,
+        LogStream,
+    };
     use service_orchestrator_domain::{
-        Branch, GitState, HealthCheckKind, Port, ProcessState, RelativePath, RuntimeKind,
-        ServiceId, ServiceType, TaskId, TaskKind, Timestamp, Version, WorkflowId, WorkflowKind,
-        WorkspaceId,
+        ArtifactCoordinate, Branch, BranchInfo, BranchKind, BuildSystem, DependencyKind, GitState,
+        HealthCheckKind, Library, LibraryId, Port, ProcessState, RelativePath, RepositoryLifecycle,
+        RepositoryStatus, RuntimeKind, ServiceId, ServiceType, Task, TaskFailure, TaskId, TaskKind,
+        TaskProgress, TaskStatus, Timestamp, Version, WorkflowId, WorkflowKind, WorkspaceId,
     };
 
     use super::*;
@@ -660,5 +1468,492 @@ mod tests {
         assert!(detail.last_failure.is_none());
         assert_eq!(detail.pid, None);
         assert!(detail.recent_errors.is_empty());
+    }
+
+    // -- git ----------------------------------------------------------------
+
+    fn repository_status() -> RepositoryStatus {
+        RepositoryStatus {
+            lifecycle: RepositoryLifecycle::Available,
+            branch: Some(Branch::new("feature/x").expect("a valid branch")),
+            commit: Some("abc123".to_owned()),
+            detached_head: false,
+            unborn: false,
+            upstream: Some("origin/feature/x".to_owned()),
+            ahead: Some(2),
+            behind: Some(1),
+            staged_changes: 1,
+            unstaged_changes: 2,
+            untracked_files: 3,
+            conflicts: 1,
+        }
+    }
+
+    #[test]
+    fn repository_summary_combines_configuration_with_observed_state() {
+        let mut service = service();
+        service.repository = Some(
+            Repository::new(
+                "git@github.com:acme/orders-api.git",
+                RelativePath::new("backend/orders-api").expect("a valid path"),
+                Branch::new("main").expect("a valid branch"),
+            )
+            .expect("a valid repository"),
+        );
+        let summary = RepositorySummary::new("demo", &service, Some(&status()));
+        assert_eq!(summary.id, "demo:orders-api");
+        assert_eq!(summary.service_id, "orders-api");
+        assert_eq!(summary.workspace_id, "demo");
+        assert_eq!(summary.name, "orders-api");
+        assert_eq!(summary.git_state, "clean");
+        assert_eq!(summary.branch.as_deref(), Some("main"));
+        let repository = summary.repository.expect("mapped");
+        assert_eq!(repository.default_branch, "main");
+        assert_eq!(repository.local_path, "backend/orders-api");
+
+        // Without an observation the state is honestly unknown.
+        let unknown = RepositorySummary::new("demo", &service, None);
+        assert_eq!(unknown.git_state, "unknown");
+        assert_eq!(unknown.branch, None);
+    }
+
+    #[test]
+    fn git_status_view_maps_counts_and_safety_flags() {
+        let view = GitStatusView::new("orders-api", &repository_status());
+        assert_eq!(view.service_id, "orders-api");
+        assert_eq!(view.lifecycle, "available");
+        assert_eq!(view.branch.as_deref(), Some("feature/x"));
+        assert_eq!(view.commit.as_deref(), Some("abc123"));
+        assert_eq!(view.upstream.as_deref(), Some("origin/feature/x"));
+        assert_eq!(view.ahead, Some(2));
+        assert_eq!(view.behind, Some(1));
+        assert_eq!(view.staged_changes, 1);
+        assert_eq!(view.unstaged_changes, 2);
+        assert_eq!(view.untracked_files, 3);
+        assert_eq!(view.conflicts, 1);
+        assert!(!view.clean);
+        assert!(view.has_local_changes);
+        assert!(view.diverged);
+    }
+
+    #[test]
+    fn a_clean_ahead_branch_is_not_reported_as_dirty_or_diverged() {
+        let clean = RepositoryStatus {
+            lifecycle: RepositoryLifecycle::Available,
+            ahead: Some(1),
+            ..RepositoryStatus::default()
+        };
+        let view = GitStatusView::new("orders-api", &clean);
+        assert!(view.clean);
+        assert!(!view.has_local_changes);
+        assert!(!view.diverged);
+    }
+
+    #[test]
+    fn branch_views_map_local_and_remote_refs() {
+        let mut local = BranchInfo::new("main", BranchKind::Local, true);
+        local.upstream = Some("origin/main".to_owned());
+        local.commit = Some("abc".to_owned());
+        let view = BranchView::from(&local);
+        assert_eq!(view.name, "main");
+        assert_eq!(view.kind, "local");
+        assert!(view.current);
+        assert_eq!(view.upstream.as_deref(), Some("origin/main"));
+        assert_eq!(view.commit.as_deref(), Some("abc"));
+
+        let remote = BranchView::from(&BranchInfo::new("origin/main", BranchKind::Remote, false));
+        assert_eq!(remote.kind, "remote");
+        assert!(!remote.current);
+        assert_eq!(remote.upstream, None);
+    }
+
+    #[test]
+    fn command_error_views_preserve_code_and_message() {
+        let view = CommandErrorView::from(crate::error::CommandError::invalid_input("bad id"));
+        assert_eq!(view.code, "INVALID_INPUT");
+        assert_eq!(view.message, "bad id");
+    }
+
+    // -- build --------------------------------------------------------------
+
+    fn maven_capabilities() -> BuildCapabilities {
+        BuildCapabilities {
+            build_system: BuildSystem::Maven,
+            operations: vec![
+                BuildOperation::Clean,
+                BuildOperation::Build,
+                BuildOperation::Test,
+                BuildOperation::PublishLocalArtifact,
+            ],
+        }
+    }
+
+    #[test]
+    fn build_capabilities_expose_only_the_service_build_operation() {
+        let view = BuildCapabilitiesView::from(&maven_capabilities());
+        assert_eq!(view.build_system, "maven");
+        assert!(!view.empty);
+        // The closed operation set is always reported in full.
+        assert_eq!(view.operations.len(), 5);
+        let find = |name: &str| {
+            view.operations
+                .iter()
+                .find(|operation| operation.operation == name)
+                .expect("present")
+        };
+
+        let build = find("build");
+        assert!(build.supported);
+        assert!(build.exposed);
+        assert_eq!(build.reason, None);
+
+        let clean = find("clean");
+        assert!(clean.supported);
+        assert!(!clean.exposed);
+        assert!(clean
+            .reason
+            .as_deref()
+            .expect("a reason")
+            .contains("not exposed"));
+
+        let install = find("install_dependencies");
+        assert!(!install.supported);
+        assert!(!install.exposed);
+        assert!(install
+            .reason
+            .as_deref()
+            .expect("a reason")
+            .contains("does not support"));
+    }
+
+    #[test]
+    fn a_provider_with_no_operations_reports_empty() {
+        let view = BuildCapabilitiesView::from(&BuildCapabilities {
+            build_system: BuildSystem::Npm,
+            operations: Vec::new(),
+        });
+        assert!(view.empty);
+        assert!(view.operations.iter().all(|operation| !operation.supported));
+    }
+
+    #[test]
+    fn build_target_summary_carries_capabilities_or_a_reason() {
+        let target = BuildTargetSummary::new("demo", &service(), Some(&maven_capabilities()), None);
+        assert_eq!(target.service_id, "orders-api");
+        assert_eq!(target.workspace_id, "demo");
+        assert_eq!(target.build_system.as_deref(), Some("maven"));
+        assert!(target.capability.is_some());
+        assert_eq!(target.capability_error, None);
+        assert_eq!(
+            target.runtimes.first().map(|runtime| runtime.kind.as_str()),
+            Some("java")
+        );
+
+        let unresolved =
+            BuildTargetSummary::new("demo", &service(), None, Some("no provider".to_owned()));
+        assert!(unresolved.capability.is_none());
+        assert_eq!(unresolved.capability_error.as_deref(), Some("no provider"));
+    }
+
+    // -- library ------------------------------------------------------------
+
+    fn coordinate(artifact_id: &str) -> ArtifactCoordinate {
+        ArtifactCoordinate::new(
+            "com.demo",
+            artifact_id,
+            Version::new("1.8.0-SNAPSHOT").expect("a valid version"),
+        )
+        .expect("a valid coordinate")
+    }
+
+    #[test]
+    fn artifact_views_render_coordinates_files_and_classifiers() {
+        let view = ArtifactView::from(
+            &coordinate("shared-kit")
+                .with_packaging("pom")
+                .with_classifier("sources"),
+        );
+        assert_eq!(view.group_id, "com.demo");
+        assert_eq!(view.artifact_id, "shared-kit");
+        assert_eq!(view.version, "1.8.0-SNAPSHOT");
+        assert_eq!(view.packaging, "pom");
+        assert_eq!(view.classifier.as_deref(), Some("sources"));
+        assert_eq!(view.file_name, "shared-kit-1.8.0-SNAPSHOT-sources.pom");
+        assert_eq!(view.coordinate, "com.demo:shared-kit:1.8.0-SNAPSHOT");
+
+        let default_packaging = ArtifactView::from(&coordinate("shared-kit"));
+        assert_eq!(default_packaging.packaging, "jar");
+        assert_eq!(default_packaging.file_name, "shared-kit-1.8.0-SNAPSHOT.jar");
+    }
+
+    #[test]
+    fn library_summaries_collect_artifacts_and_dependents() {
+        let primary = coordinate("shared-kit");
+        let additional = coordinate("shared-kit-dto");
+        let library = Library::new(
+            LibraryId::new("shared-kit").expect("a valid id"),
+            "Shared Kit",
+        )
+        .expect("a valid library")
+        .with_artifact(primary.clone())
+        .with_additional_artifact(additional.clone())
+        .with_build_system(BuildSystem::Maven);
+        let status = LibraryStatus {
+            library_id: LibraryId::new("shared-kit").expect("a valid id"),
+            workspace_id: WorkspaceId::new("demo").expect("a valid id"),
+            display_name: "Shared Kit".to_owned(),
+            build_system: Some(BuildSystem::Maven),
+            artifact: Some(primary.clone()),
+            artifacts: vec![primary.clone(), additional.clone()],
+            repository_url: Some("git@github.com:acme/shared-kit.git".to_owned()),
+            branch: Some(Branch::new("develop").expect("a valid branch")),
+            commit: Some("deadbeef".to_owned()),
+            git_state: GitState::Modified,
+            repository_error: None,
+            artifact_present: Some(true),
+        };
+        let dependents = vec![LibraryDependent {
+            service_id: ServiceId::new("orders-api").expect("a valid id"),
+            workspace_id: WorkspaceId::new("demo").expect("a valid id"),
+            required: true,
+            kind: DependencyKind::Build,
+        }];
+
+        let summary = LibrarySummary::new(&library, Some(&status), &dependents);
+        assert_eq!(summary.id, "shared-kit");
+        assert_eq!(summary.workspace_id, "demo");
+        assert_eq!(summary.build_system.as_deref(), Some("maven"));
+        assert_eq!(summary.artifacts.len(), 2);
+        assert_eq!(
+            summary
+                .artifact
+                .as_ref()
+                .map(|artifact| artifact.artifact_id.clone()),
+            Some("shared-kit".to_owned())
+        );
+        assert_eq!(
+            summary.configured_version.as_deref(),
+            Some("1.8.0-SNAPSHOT")
+        );
+        assert_eq!(summary.branch.as_deref(), Some("develop"));
+        assert_eq!(summary.commit.as_deref(), Some("deadbeef"));
+        assert_eq!(summary.git_state, "modified");
+        assert_eq!(summary.dependents.len(), 1);
+        assert_eq!(summary.dependents[0].service_id, "orders-api");
+        assert_eq!(summary.dependents[0].kind, "build");
+
+        // With no observed status the repository state stays honest.
+        let bare = LibrarySummary::new(&library, None, &[]);
+        assert_eq!(bare.workspace_id, "");
+        assert_eq!(bare.git_state, "unknown");
+        assert_eq!(bare.commit, None);
+    }
+
+    #[test]
+    fn artifact_verification_reports_presence_and_path() {
+        let verification = LibraryArtifactVerification {
+            library_id: LibraryId::new("shared-kit").expect("a valid id"),
+            workspace_id: WorkspaceId::new("demo").expect("a valid id"),
+            artifact: coordinate("shared-kit"),
+            present: true,
+            path: Some(
+                service_orchestrator_domain::AbsolutePath::new(
+                    "/Users/dev/.m2/repository/com/demo/shared-kit/1.8.0-SNAPSHOT/shared-kit-1.8.0-SNAPSHOT.jar",
+                )
+                .expect("a valid path"),
+            ),
+            message: "artifact present".to_owned(),
+        };
+        let view = ArtifactVerificationView::from(&verification);
+        assert_eq!(view.library_id, "shared-kit");
+        assert_eq!(view.workspace_id, "demo");
+        assert!(view.present);
+        assert!(view.path.as_deref().expect("a path").ends_with(".jar"));
+        assert_eq!(view.message, "artifact present");
+    }
+
+    #[test]
+    fn version_alignment_distinguishes_all_four_outcomes() {
+        let consumer =
+            |service: &str, alignment: AlignmentStatus, version: Option<&str>| ConsumerAlignment {
+                service_id: ServiceId::new(service).expect("a valid id"),
+                workspace_id: WorkspaceId::new("demo").expect("a valid id"),
+                path: None,
+                current_version: version.map(|value| Version::new(value).expect("a valid version")),
+                status: alignment,
+                detail: None,
+            };
+        let target = coordinate("shared-kit");
+        let plan = VersionAlignmentPlan {
+            library_id: LibraryId::new("shared-kit").expect("a valid id"),
+            workspace_id: WorkspaceId::new("demo").expect("a valid id"),
+            target: target.clone(),
+            consumers: vec![
+                consumer(
+                    "auth-service",
+                    AlignmentStatus::Aligned,
+                    Some("1.8.0-SNAPSHOT"),
+                ),
+                consumer(
+                    "user-service",
+                    AlignmentStatus::Mismatch,
+                    Some("1.7.0-SNAPSHOT"),
+                ),
+                consumer("payment-service", AlignmentStatus::Unknown, None),
+                consumer("billing-service", AlignmentStatus::Unresolved, None),
+            ],
+        };
+        let view = VersionAlignmentView::from(&plan);
+        assert_eq!(view.library_id, "shared-kit");
+        assert_eq!(view.target.coordinate, "com.demo:shared-kit:1.8.0-SNAPSHOT");
+        assert_eq!(view.total, 4);
+        assert_eq!(view.aligned_count, 1);
+        assert!(!view.fully_aligned);
+        let statuses: Vec<&str> = view
+            .consumers
+            .iter()
+            .map(|consumer| consumer.status.as_str())
+            .collect();
+        assert_eq!(
+            statuses,
+            vec!["aligned", "mismatch", "unknown", "unresolved"]
+        );
+
+        let empty = VersionAlignmentView::from(&VersionAlignmentPlan {
+            library_id: LibraryId::new("shared-kit").expect("a valid id"),
+            workspace_id: WorkspaceId::new("demo").expect("a valid id"),
+            target,
+            consumers: Vec::new(),
+        });
+        assert!(empty.fully_aligned);
+        assert_eq!(empty.total, 0);
+    }
+
+    // -- tasks, workflows, and logs -----------------------------------------
+
+    #[test]
+    fn task_views_map_lifecycle_progress_and_failure() {
+        let mut task = Task::new(
+            TaskId::new("task-1").expect("a valid id"),
+            TaskKind::BuildService,
+        )
+        .with_service(ServiceId::new("orders-api").expect("a valid id"))
+        .with_library(LibraryId::new("shared-kit").expect("a valid id"))
+        .with_workflow(WorkflowId::new("wf-1").expect("a valid id"))
+        .depends_on(TaskId::new("task-0").expect("a valid id"));
+        task.status = TaskStatus::Failed;
+        task.started_at = Some(Timestamp::now());
+        task.finished_at = Some(Timestamp::now());
+        task.progress = TaskProgress::new(1, Some(2), Some("building".to_owned())).expect("valid");
+        task.error = Some(
+            TaskFailure::new(
+                "MAVEN_BUILD_FAILED",
+                "build failed",
+                Some("exit 1".to_owned()),
+            )
+            .expect("valid"),
+        );
+
+        let view = TaskView::from(&task);
+        assert_eq!(view.id, "task-1");
+        assert_eq!(view.kind, "build_service");
+        assert_eq!(view.status, "failed");
+        assert_eq!(view.service_id.as_deref(), Some("orders-api"));
+        assert_eq!(view.library_id.as_deref(), Some("shared-kit"));
+        assert_eq!(view.workflow_id.as_deref(), Some("wf-1"));
+        assert_eq!(view.progress.current, 1);
+        assert_eq!(view.progress.total, Some(2));
+        assert_eq!(view.progress.fraction, Some(0.5));
+        assert_eq!(view.dependencies, vec!["task-0".to_owned()]);
+        assert!(view.duration_ms.is_some());
+        let failure = view.failure.expect("mapped");
+        assert_eq!(failure.code, "MAVEN_BUILD_FAILED");
+        assert_eq!(failure.message, "build failed");
+        assert_eq!(failure.detail.as_deref(), Some("exit 1"));
+    }
+
+    #[test]
+    fn unknown_task_totals_leave_the_fraction_absent() {
+        let view = TaskProgressView::from(&TaskProgress::default());
+        assert_eq!(view.current, 0);
+        assert_eq!(view.total, None);
+        assert_eq!(view.fraction, None);
+    }
+
+    #[test]
+    fn bulk_summary_views_compute_completion() {
+        let complete = BulkSummaryView::from(BulkOperationSummary {
+            total: 5,
+            succeeded: 3,
+            failed: 1,
+            cancelled: 0,
+            skipped: 1,
+            pending: 0,
+        });
+        assert_eq!(complete.total, 5);
+        assert_eq!(complete.succeeded, 3);
+        assert_eq!(complete.failed, 1);
+        assert_eq!(complete.skipped, 1);
+        assert!(complete.complete);
+
+        let pending = BulkSummaryView::from(BulkOperationSummary {
+            total: 2,
+            succeeded: 1,
+            pending: 1,
+            ..BulkOperationSummary::default()
+        });
+        assert!(!pending.complete);
+    }
+
+    #[test]
+    fn workflow_cancellation_views_report_partial_cancellation() {
+        let partial = WorkflowCancellationView::from(WorkflowCancellation {
+            cancelled_tasks: 3,
+            already_complete: false,
+        });
+        assert_eq!(partial.cancelled_tasks, 3);
+        assert!(!partial.already_complete);
+
+        let done = WorkflowCancellationView::from(WorkflowCancellation {
+            cancelled_tasks: 0,
+            already_complete: true,
+        });
+        assert!(done.already_complete);
+    }
+
+    #[test]
+    fn log_entries_and_pages_map_levels_sources_and_streams() {
+        let mut entry = LogEntry::new(LogLevel::Error, "build failed")
+            .with_source(LogSource::Build)
+            .with_stream(LogStream::Stderr)
+            .with_service(ServiceId::new("orders-api").expect("a valid id"))
+            .with_task(TaskId::new("task-1").expect("a valid id"))
+            .with_process("proc-1");
+        entry.sequence = 7;
+
+        let view = LogEntryView::from(&entry);
+        assert_eq!(view.level, "error");
+        assert_eq!(view.source, "build");
+        assert_eq!(view.stream.as_deref(), Some("stderr"));
+        assert_eq!(view.service_id.as_deref(), Some("orders-api"));
+        assert_eq!(view.task_id.as_deref(), Some("task-1"));
+        assert_eq!(view.process_id.as_deref(), Some("proc-1"));
+        assert_eq!(view.sequence, 7);
+
+        let page = LogPageView::from(LogPage {
+            entries: vec![entry],
+            next_cursor: Some(7),
+            truncated: true,
+        });
+        assert_eq!(page.entries.len(), 1);
+        assert_eq!(page.next_cursor, Some(7));
+        assert!(page.truncated);
+    }
+
+    #[test]
+    fn bulk_summary_view_of_empty_workflow_is_complete() {
+        let view = BulkSummaryView::from(BulkOperationSummary::default());
+        assert_eq!(view.total, 0);
+        assert!(view.complete);
     }
 }

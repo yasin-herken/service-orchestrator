@@ -21,9 +21,10 @@ use service_orchestrator_policy::{Authorization, PolicyEngine};
 
 use crate::error::ApplicationError;
 use crate::ports::{
-    ArtifactInspector, GitManager, HealthIndex, LogService, NullArtifactInspector, NullGitManager,
-    NullHealthIndex, NullServiceRuntimeIndex, NullWorkspaceProbe, ResolvedRepository,
-    ResolvedServiceTarget, RuntimeStateStore, ServiceRuntimeIndex, WorkspaceProbe,
+    ArtifactInspector, BuildCapabilityIndex, GitManager, HealthIndex, LogService,
+    NullArtifactInspector, NullBuildCapabilityIndex, NullGitManager, NullHealthIndex,
+    NullServiceRuntimeIndex, NullWorkspaceProbe, ResolvedRepository, ResolvedServiceTarget,
+    RuntimeStateStore, ServiceRuntimeIndex, WorkspaceProbe,
 };
 
 /// The shared application core.
@@ -37,6 +38,7 @@ pub struct Application {
     artifacts: Arc<dyn ArtifactInspector>,
     service_runtime: Arc<dyn ServiceRuntimeIndex>,
     health: Arc<dyn HealthIndex>,
+    build_capabilities: Arc<dyn BuildCapabilityIndex>,
     probe: Arc<dyn WorkspaceProbe>,
     policy: PolicyEngine,
     authorization: Authorization,
@@ -68,6 +70,7 @@ impl Application {
             artifacts: Arc::new(NullArtifactInspector),
             service_runtime: Arc::new(NullServiceRuntimeIndex),
             health: Arc::new(NullHealthIndex),
+            build_capabilities: Arc::new(NullBuildCapabilityIndex),
             probe: Arc::new(NullWorkspaceProbe),
             policy: PolicyEngine::new(),
             authorization: Authorization::standard(),
@@ -115,6 +118,22 @@ impl Application {
     #[must_use]
     pub fn with_health_index(mut self, health: Arc<dyn HealthIndex>) -> Self {
         self.health = health;
+        self
+    }
+
+    /// Replaces the build-capability index.
+    ///
+    /// The index is provided by the build adapter; it projects the registered
+    /// build providers so interfaces can render which operations a service's
+    /// build system supports without hard-coding provider knowledge
+    /// (`tasks/020.md` §13). Without it, capability queries report that no
+    /// provider is registered.
+    #[must_use]
+    pub fn with_build_capabilities(
+        mut self,
+        build_capabilities: Arc<dyn BuildCapabilityIndex>,
+    ) -> Self {
+        self.build_capabilities = build_capabilities;
         self
     }
 
@@ -208,6 +227,11 @@ impl Application {
     /// Returns the health index.
     pub(crate) fn health(&self) -> &dyn HealthIndex {
         self.health.as_ref()
+    }
+
+    /// Returns the build-capability index.
+    pub(crate) fn build_capability_index(&self) -> &dyn BuildCapabilityIndex {
+        self.build_capabilities.as_ref()
     }
 
     /// Returns the workspace probe boundary.

@@ -24,7 +24,7 @@
 //! drop, so tests in this binary run one at a time and stay isolated from the
 //! daemon and MCP test binaries (separate processes).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::OsString;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -32,8 +32,11 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use service_orchestrator_application::{
-    Application, BulkOperationSummary, HealthState, InMemoryRuntimeStateStore, NullLogService,
-    ResolvedServiceTarget, RuntimeStateStore,
+    build_parameter, parameter, Application, ArtifactInspectionError, ArtifactInspector,
+    ArtifactPresence, BuildCapabilities, BuildCapabilityIndex, BulkOperationSummary,
+    DependencyVersionInspection, DiffOptions, GitError, GitManager, GitOptions, HealthState,
+    InMemoryRuntimeStateStore, NullLogService, ResolvedArtifact, ResolvedDependency,
+    ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore,
 };
 use service_orchestrator_client::{
     socket_path, ClientKind, OrchestratorClient, RemoteClient, PROTOCOL_VERSION, SOCKET_ENV,
@@ -41,11 +44,14 @@ use service_orchestrator_client::{
 use service_orchestrator_config::load_from_str;
 use service_orchestrator_daemon::{Daemon, DaemonError, DaemonOptions};
 use service_orchestrator_desktop_lib::{
+    build,
     dto::{OperationOutcome, OperationStatus},
-    mutations, queries,
+    git, library, mutations, queries, tasks,
 };
 use service_orchestrator_domain::{
-    ProcessState, ServiceId, Task, TaskKind, TaskStatus, WorkflowId,
+    AbsolutePath, Branch, BranchInfo, BranchKind, BuildOperation, BuildSystem, GitOperation,
+    GitOperationResult, ProcessState, RepoDiff, RepositoryLifecycle, RepositoryStatus, ServiceId,
+    Task, TaskKind, TaskStatus, Version, WorkflowId,
 };
 use service_orchestrator_execution::{
     TaskContext, TaskEngine, TaskExecutor, TaskExecutorError, TaskOutcome,
@@ -75,17 +81,31 @@ struct Harness {
     config_path: PathBuf,
     /// The throwaway directory that holds the configuration, socket, and lock.
     root: PathBuf,
+    /// Test-only port state shared with the fake Git manager, artifact
+    /// inspector, and task executors, so a test can observe and steer what the
+    /// "infrastructure" reports without any real Git, Maven, or npm execution.
+    fakes: Arc<Mutex<FakeState>>,
 }
 
 impl Harness {
     /// Starts an isolated daemon over a fresh temporary directory.
     fn start() -> Self {
-        Self::start_with_failures(&[])
+        Self::start_with(&[], &[], &[])
     }
 
     /// Starts an isolated daemon whose start executor fails for the named
     /// services, so bulk partial-failure handling can be exercised.
     fn start_with_failures(failing_starts: &[&str]) -> Self {
+        Self::start_with(failing_starts, &[], &[])
+    }
+
+    /// Starts an isolated daemon with configurable fake-port behaviour.
+    ///
+    /// `failing_starts` fails service lifecycle operations, `failing_builds`
+    /// fails service/library build tasks, and `blocking` makes a Git or build
+    /// task on that entity wait until it is cancelled, so cancellation can be
+    /// observed without any real long-running process.
+    fn start_with(failing_starts: &[&str], failing_builds: &[&str], blocking: &[&str]) -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
 
         let root = unique_root();
@@ -108,7 +128,11 @@ impl Harness {
             .build()
             .expect("a Tokio runtime is built");
         let failing: BTreeSet<String> = failing_starts.iter().map(|id| (*id).to_owned()).collect();
-        let (application, engine) = runtime.block_on(build_core(failing));
+        let failing_builds: BTreeSet<String> =
+            failing_builds.iter().map(|id| (*id).to_owned()).collect();
+        let blocking: BTreeSet<String> = blocking.iter().map(|id| (*id).to_owned()).collect();
+        let (application, engine, fakes) =
+            runtime.block_on(build_core(failing, failing_builds, blocking));
         let daemon = Daemon::new(
             application,
             engine,
@@ -125,6 +149,7 @@ impl Harness {
             daemon: Some(handle),
             config_path,
             root,
+            fakes,
         };
         harness.wait_ready();
         harness
@@ -519,12 +544,523 @@ fn a_stopped_daemon_surfaces_a_structured_unavailable_error() {
     }
 }
 
-/// Builds a real application core with fake lifecycle executors and in-memory
-/// state, so service start/stop/restart/health tasks settle without ever
-/// touching an operating-system process.
-async fn build_core(failing_starts: BTreeSet<String>) -> (Application, Arc<TaskEngine>) {
+/// The desktop Git screen loads configured repositories from configuration and
+/// inspects real working-tree state on demand through the shared core
+/// (`tasks/020.md` §4, §6, §35, §40 items 3–4).
+#[test]
+fn the_adapter_lists_and_inspects_git_repositories() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    let repositories = git::list_repositories(&client, "demo").expect("repositories load");
+    assert_eq!(
+        repositories.len(),
+        2,
+        "both fixture services have repositories"
+    );
+    let orders = repositories
+        .iter()
+        .find(|repo| repo.service_id == "orders-api")
+        .expect("orders-api is listed");
+    let admin = repositories
+        .iter()
+        .find(|repo| repo.service_id == "admin-ui")
+        .expect("admin-ui is listed");
+    assert_eq!(orders.id, "demo:orders-api", "ids are workspace-aware");
+    assert_eq!(admin.id, "demo:admin-ui");
+    assert!(orders.repository.is_some());
+    assert_eq!(orders.path.as_deref(), Some("backend/orders-api"));
+
+    // Inspection observes the working copy on demand; it performs no Git write.
+    let status = git::get_git_status(&client, "orders-api").expect("status loads");
+    assert_eq!(status.lifecycle, "available");
+    assert_eq!(status.branch.as_deref(), Some("main"));
+    assert_eq!(status.upstream.as_deref(), Some("origin/main"));
+    assert!(status.clean);
+    assert!(!status.has_local_changes);
+    assert_eq!(status.ahead, Some(0));
+    assert_eq!(status.behind, Some(0));
+
+    let branches = git::list_branches(&client, "orders-api").expect("branches load");
+    assert_eq!(branches.len(), 2);
+    assert!(branches
+        .iter()
+        .any(|branch| branch.name == "main" && branch.kind == "local" && branch.current));
+    assert!(branches
+        .iter()
+        .any(|branch| branch.name == "origin/main" && branch.kind == "remote"));
+
+    // A batch inspection reports each repository independently.
+    let selection = vec!["orders-api".to_owned(), "admin-ui".to_owned()];
+    let inspected = git::inspect_repositories(&client, "demo", &selection).expect("batch loads");
+    assert_eq!(inspected.len(), 2);
+    assert!(inspected
+        .iter()
+        .all(|entry| entry.status.is_some() && entry.error.is_none()));
+    assert_eq!(inspected[0].repository_id, "demo:orders-api");
+    assert_eq!(inspected[1].repository_id, "demo:admin-ui");
+}
+
+/// Safe Git fetch, checkout, and bulk synchronization run through the shared
+/// core as real tasks and workflows, and the observed working copy reflects
+/// them (`tasks/020.md` §5, §6, §9, §40 items 5–6).
+#[test]
+fn git_fetch_checkout_and_bulk_sync_run_through_the_shared_core() {
+    let harness = Harness::start();
+    let client = harness.client();
+    let selection = vec!["orders-api".to_owned(), "admin-ui".to_owned()];
+
+    // A read-only preview aggregates real status without mutating anything.
+    let preview =
+        git::preview_git_sync(&client, "demo", &selection, "main", "sync").expect("preview builds");
+    assert_eq!(preview.total, 2);
+    assert_eq!(preview.ready, 2);
+    assert_eq!(preview.dirty, 0);
+    assert_eq!(preview.missing_branch, 0);
+    assert_eq!(preview.unavailable, 0);
+    assert_eq!(preview.mode, "sync");
+    assert!(preview.entries.iter().all(|entry| !entry.blocked
+        && entry.target_branch_exists
+        && entry.expected_operations == vec!["fetch", "checkout", "pull"]));
+
+    // A missing target branch is reported as blocked, never silently attempted.
+    let missing = git::preview_git_sync(&client, "demo", &selection, "release/1.0", "sync")
+        .expect("preview builds");
+    assert_eq!(missing.missing_branch, 2);
+    assert!(missing.entries.iter().all(|entry| entry.blocked));
+
+    // A single safe fetch is exactly one task.
+    let fetched = git::fetch_repository(&client, "orders-api").expect("fetch scheduled");
+    assert_eq!(fetched.status, OperationStatus::Task);
+    assert_eq!(fetched.kind, "git_fetch");
+    assert_eq!(settle(&client, &fetched).status, TaskStatus::Succeeded);
+
+    // A single checkout is one task.
+    let checked =
+        git::checkout_repository(&client, "orders-api", "main").expect("checkout scheduled");
+    assert_eq!(checked.kind, "git_checkout");
+    assert_eq!(settle(&client, &checked).status, TaskStatus::Succeeded);
+
+    // A bulk sync is exactly one workflow over the explicit selection.
+    let synced = git::sync_repositories(&client, "demo", &selection).expect("bulk sync");
+    assert_eq!(synced.status, OperationStatus::Workflow);
+    assert_eq!(synced.kind, "sync_repositories");
+    let summary = wait_for_workflow(&client, &workflow_of(&synced));
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 2);
+
+    // Bulk fetch and bulk checkout use the same workflow path.
+    let bulk_fetch = git::fetch_repositories(&client, "demo", &selection).expect("bulk fetch");
+    assert_eq!(bulk_fetch.kind, "fetch_repositories");
+    assert_eq!(
+        wait_for_workflow(&client, &workflow_of(&bulk_fetch)).succeeded,
+        2
+    );
+    let bulk_checkout =
+        git::checkout_repositories(&client, "demo", &selection, "main").expect("bulk checkout");
+    assert_eq!(bulk_checkout.kind, "checkout_repositories");
+    assert_eq!(
+        wait_for_workflow(&client, &workflow_of(&bulk_checkout)).succeeded,
+        2
+    );
+
+    // The observed state reflects the operations the workflow ran.
+    let status = git::get_git_status(&client, "orders-api").expect("status reloads");
+    assert_eq!(status.branch.as_deref(), Some("main"));
+}
+
+/// The Builds screen renders the provider's real capabilities — never
+/// hard-coding Maven or npm — and runs Maven and npm builds through the shared
+/// core (`tasks/020.md` §12, §13, §16, §40 items 7–9).
+#[test]
+fn build_targets_carry_provider_capabilities_and_builds_run() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    let targets = build::list_build_targets(&client, "demo").expect("targets load");
+    assert_eq!(targets.len(), 2);
+    let maven = targets
+        .iter()
+        .find(|target| target.service_id == "orders-api")
+        .expect("orders-api is a build target");
+    let npm = targets
+        .iter()
+        .find(|target| target.service_id == "admin-ui")
+        .expect("admin-ui is a build target");
+    assert_eq!(maven.build_system.as_deref(), Some("maven"));
+    assert_eq!(npm.build_system.as_deref(), Some("npm"));
+
+    let maven_caps = maven.capability.as_ref().expect("maven capabilities");
+    assert_eq!(maven_caps.build_system, "maven");
+    assert!(!maven_caps.empty);
+    let build_op = maven_caps
+        .operations
+        .iter()
+        .find(|operation| operation.operation == "build")
+        .expect("the build operation is listed");
+    assert!(build_op.supported && build_op.exposed && build_op.reason.is_none());
+    let publish = maven_caps
+        .operations
+        .iter()
+        .find(|operation| operation.operation == "publish_local_artifact")
+        .expect("publish is listed");
+    assert!(
+        publish.supported && !publish.exposed && publish.reason.is_some(),
+        "supported-but-not-exposed operations carry an explanation"
+    );
+
+    // The dedicated capability query matches the row projection, and npm is
+    // resolved independently of Maven.
+    let caps = build::get_build_capabilities(&client, "orders-api").expect("capabilities load");
+    assert_eq!(caps.build_system, "maven");
+    let npm_caps = build::get_build_capabilities(&client, "admin-ui").expect("capabilities load");
+    assert_eq!(npm_caps.build_system, "npm");
+    assert!(npm_caps
+        .operations
+        .iter()
+        .any(|operation| operation.operation == "build" && operation.supported));
+
+    // A single Maven build is one task; its progress and bounded logs are
+    // readable through the task-engine queries.
+    let orders = build::build_service(&client, "orders-api").expect("build scheduled");
+    assert_eq!(orders.status, OperationStatus::Task);
+    assert_eq!(orders.kind, "build_service");
+    let task = settle(&client, &orders);
+    assert_eq!(task.status, TaskStatus::Succeeded);
+    let view = tasks::get_task(&client, task.id.as_str()).expect("the task loads");
+    assert_eq!(view.kind, "build_service");
+    assert_eq!(view.status, "succeeded");
+    assert!(
+        view.progress
+            .message
+            .as_deref()
+            .is_some_and(|m| !m.is_empty()),
+        "the executor recorded progress"
+    );
+    let logs = tasks::get_task_logs(&client, task.id.as_str(), &tasks::TaskLogsQuery::default())
+        .expect("logs");
+    assert!(logs.entries.is_empty(), "the harness wires no log service");
+
+    // A single npm build is one task.
+    let admin = build::build_service(&client, "admin-ui").expect("build scheduled");
+    assert_eq!(admin.kind, "build_service");
+    assert_eq!(settle(&client, &admin).status, TaskStatus::Succeeded);
+
+    // A bulk build is exactly one workflow, never one request per service.
+    let selection = vec!["orders-api".to_owned(), "admin-ui".to_owned()];
+    let bulk = build::build_services(&client, "demo", &selection).expect("bulk build");
+    assert_eq!(bulk.status, OperationStatus::Workflow);
+    assert_eq!(bulk.kind, "prepare_environment");
+    let summary = wait_for_workflow(&client, &workflow_of(&bulk));
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 2);
+}
+
+/// The Libraries screen lists a library with its dependents, verifies its
+/// installed artifact, inspects version alignment, and prepares it through the
+/// existing library workflows (`tasks/020.md` §20–§26, §40 items 10–12).
+#[test]
+fn library_operations_run_through_the_shared_core() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    let libraries = library::list_libraries(&client, "demo").expect("libraries load");
+    assert_eq!(libraries.len(), 1);
+    let shared = &libraries[0];
+    assert_eq!(shared.id, "shared-kit");
+    assert_eq!(shared.build_system.as_deref(), Some("maven"));
+    let artifact = shared.artifact.as_ref().expect("a primary artifact");
+    assert_eq!(artifact.coordinate, "com.demo:shared-kit:1.8.0-SNAPSHOT");
+    assert_eq!(artifact.packaging, "jar");
+    assert_eq!(shared.configured_version.as_deref(), Some("1.8.0-SNAPSHOT"));
+    assert_eq!(shared.branch.as_deref(), Some("main"));
+    assert!(shared
+        .dependents
+        .iter()
+        .any(|dependent| dependent.service_id == "orders-api"));
+
+    let dependents =
+        library::get_library_dependents(&client, "shared-kit").expect("dependents load");
+    assert_eq!(dependents.len(), 1);
+    assert_eq!(dependents[0].service_id, "orders-api");
+    assert!(dependents[0].required);
+
+    // Verification reports presence (and the path) without writing anything.
+    let verification =
+        library::verify_library_artifact(&client, "shared-kit").expect("verification");
+    assert!(verification.present);
+    assert!(verification.path.is_some());
+    assert_eq!(
+        verification.artifact.coordinate,
+        "com.demo:shared-kit:1.8.0-SNAPSHOT"
+    );
+
+    // Version alignment is read-only: it reports the consumer's version and
+    // never rewrites a POM.
+    let alignment =
+        library::inspect_version_alignment(&client, "shared-kit").expect("alignment loads");
+    assert_eq!(
+        alignment.target.coordinate,
+        "com.demo:shared-kit:1.8.0-SNAPSHOT"
+    );
+    assert_eq!(alignment.total, 1);
+    assert_eq!(alignment.aligned_count, 1);
+    assert!(alignment.fully_aligned);
+    assert_eq!(alignment.consumers[0].service_id, "orders-api");
+    assert_eq!(alignment.consumers[0].status, "aligned");
+
+    // Single library build, install, and sync are tasks.
+    let built = library::build_library(&client, "shared-kit").expect("build scheduled");
+    assert_eq!(built.kind, "build_library");
+    assert_eq!(settle(&client, &built).status, TaskStatus::Succeeded);
+
+    let installed = library::install_library(&client, "shared-kit").expect("install scheduled");
+    assert_eq!(installed.kind, "library_install");
+    assert_eq!(settle(&client, &installed).status, TaskStatus::Succeeded);
+
+    let synced = library::sync_library(&client, "shared-kit").expect("sync scheduled");
+    assert_eq!(synced.kind, "git_sync");
+    assert_eq!(settle(&client, &synced).status, TaskStatus::Succeeded);
+
+    // Prepare one library without forcing a branch (synchronization disabled).
+    let prepared = library::prepare_library(&client, "shared-kit", false, None, true, true, true)
+        .expect("prepare scheduled");
+    assert_eq!(prepared.status, OperationStatus::Workflow);
+    assert_eq!(prepared.kind, "prepare_library");
+    let summary = wait_for_workflow(&client, &workflow_of(&prepared));
+    assert_eq!(summary.total, 3, "build, install, and verify");
+    assert_eq!(summary.succeeded, 3);
+
+    // Prepare a selection as one dependency-ordered workflow.
+    let selection = vec!["shared-kit".to_owned()];
+    let bulk = library::prepare_libraries(
+        &client,
+        "demo",
+        &selection,
+        true,
+        Some("main"),
+        true,
+        true,
+        true,
+    )
+    .expect("bulk prepare");
+    assert_eq!(bulk.kind, "prepare_libraries");
+    assert_eq!(
+        wait_for_workflow(&client, &workflow_of(&bulk)).succeeded,
+        5,
+        "sync, checkout, build, install, and verify"
+    );
+}
+
+/// Version alignment reports a genuine mismatch without changing anything
+/// (`tasks/020.md` §23, §24).
+#[test]
+fn library_version_alignment_reports_a_mismatch() {
+    let harness = Harness::start();
+    let client = harness.client();
+    {
+        let mut state = harness
+            .fakes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        state.declared_version = Some(Version::new("1.9.0-SNAPSHOT").expect("a valid version"));
+    }
+
+    let alignment =
+        library::inspect_version_alignment(&client, "shared-kit").expect("alignment loads");
+    assert_eq!(alignment.aligned_count, 0);
+    assert!(!alignment.fully_aligned);
+    let consumer = &alignment.consumers[0];
+    assert_eq!(consumer.service_id, "orders-api");
+    assert_eq!(consumer.status, "mismatch");
+    assert_eq!(consumer.current_version.as_deref(), Some("1.9.0-SNAPSHOT"));
+}
+
+/// A long-running operation can be cancelled through the existing task-engine
+/// API, and cancellation is reported honestly (`tasks/020.md` §29, §40 item 13).
+#[test]
+fn a_running_operation_can_be_cancelled() {
+    let harness = Harness::start_with(&[], &[], &["admin-ui"]);
+    let client = harness.client();
+
+    // A blocked fetch stays active until it is cancelled.
+    let fetched = git::fetch_repository(&client, "admin-ui").expect("fetch scheduled");
+    let task_id = fetched.task_id.clone().expect("a task id");
+    let running = tasks::get_task(&client, &task_id).expect("the task loads");
+    assert!(
+        !matches!(
+            running.status.as_str(),
+            "succeeded" | "failed" | "cancelled"
+        ),
+        "the blocked task is still active, got '{}'",
+        running.status
+    );
+
+    let cancelled = tasks::cancel_task(&client, &task_id).expect("cancel is accepted");
+    assert_eq!(cancelled.kind, "git_fetch");
+    let settled = wait_for_task(&client, &task_id);
+    assert_eq!(settled.status, TaskStatus::Cancelled);
+
+    // Cancelling a workflow cancels its still-active tasks; completed work is
+    // not claimed to have been rolled back.
+    let selection = vec!["orders-api".to_owned(), "admin-ui".to_owned()];
+    let bulk = git::sync_repositories(&client, "demo", &selection).expect("bulk sync");
+    let workflow = workflow_of(&bulk);
+    let _ = tasks::cancel_workflow(&client, workflow.as_str()).expect("cancel workflow");
+    let summary = wait_for_workflow(&client, &workflow);
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.pending, 0);
+    assert!(
+        summary.cancelled >= 1,
+        "the blocked repository is cancelled"
+    );
+    assert_eq!(
+        summary.succeeded + summary.cancelled,
+        2,
+        "each repository settles exactly once"
+    );
+}
+
+/// A bulk operation where one member fails reports the partial failure per
+/// target, and a single failure is structured (`tasks/020.md` §30, §40 item 14).
+#[test]
+fn bulk_builds_report_partial_failure_per_target() {
+    let harness = Harness::start_with(&[], &["admin-ui"], &[]);
+    let client = harness.client();
+    let selection = vec!["orders-api".to_owned(), "admin-ui".to_owned()];
+
+    let bulk = build::build_services(&client, "demo", &selection).expect("bulk build");
+    let summary = wait_for_workflow(&client, &workflow_of(&bulk));
+    assert_eq!(summary.total, 2);
+    assert_eq!(summary.succeeded, 1);
+    assert_eq!(summary.failed, 1);
+
+    let failed = build::build_service(&client, "admin-ui").expect("schedule is accepted");
+    let task = settle(&client, &failed);
+    assert_eq!(task.status, TaskStatus::Failed);
+    let error = task.error.expect("a structured failure");
+    assert_eq!(error.code, "BUILD_COMMAND_FAILED");
+    assert!(!error.message.is_empty());
+}
+
+/// The GUI, TUI, and MCP share one authoritative daemon: a Git or build task
+/// scheduled from the GUI is the same task the other interfaces observe
+/// (`tasks/020.md` §3, §40 item 15).
+#[test]
+fn other_interfaces_observe_the_same_git_and_build_tasks() {
+    let harness = Harness::start();
+    let gui = harness.client();
+    let other = harness.client();
+
+    let built = build::build_service(&gui, "orders-api").expect("build scheduled");
+    let task_id = built.task_id.clone().expect("a task id");
+    assert_eq!(settle(&gui, &built).status, TaskStatus::Succeeded);
+    let observed = tasks::get_task(&other, &task_id).expect("the other interface sees the task");
+    assert_eq!(observed.kind, "build_service");
+    assert_eq!(observed.status, "succeeded");
+
+    let selection = vec!["orders-api".to_owned(), "admin-ui".to_owned()];
+    let synced = git::sync_repositories(&gui, "demo", &selection).expect("bulk sync");
+    let workflow = workflow_of(&synced);
+    assert_eq!(wait_for_workflow(&gui, &workflow).succeeded, 2);
+    let summary = tasks::summarize_workflow(&other, workflow.as_str()).expect("summary");
+    assert_eq!(summary.succeeded, 2);
+
+    // The other interface observes the same working copy the GUI operated on.
+    let status = git::get_git_status(&other, "admin-ui").expect("status loads");
+    assert_eq!(status.branch.as_deref(), Some("main"));
+}
+
+/// Invalid and unknown inputs are rejected with structured codes, either by the
+/// adapter or by the core (`tasks/020.md` §27, §30).
+#[test]
+fn git_build_and_library_inputs_are_validated() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    assert_eq!(
+        git::list_repositories(&client, "")
+            .expect_err("an empty workspace is invalid")
+            .code,
+        "INVALID_INPUT"
+    );
+    assert_eq!(
+        git::preview_git_sync(
+            &client,
+            "demo",
+            &["orders-api".to_owned()],
+            "main",
+            "rebase"
+        )
+        .expect_err("an unknown mode is invalid")
+        .code,
+        "INVALID_INPUT"
+    );
+    assert_eq!(
+        git::fetch_repositories(&client, "demo", &[])
+            .expect_err("an empty selection is invalid")
+            .code,
+        "INVALID_INPUT"
+    );
+    assert_eq!(
+        build::list_build_targets(&client, "bad id")
+            .expect_err("spaces are invalid")
+            .code,
+        "INVALID_INPUT"
+    );
+    assert_eq!(
+        build::get_build_capabilities(&client, "ghost-api")
+            .expect_err("the service does not exist")
+            .code,
+        "ServiceNotFound"
+    );
+    assert_eq!(
+        library::list_libraries(&client, "")
+            .expect_err("an empty workspace is invalid")
+            .code,
+        "INVALID_INPUT"
+    );
+    assert_eq!(
+        library::verify_library_artifact(&client, "ghost-lib")
+            .expect_err("the library does not exist")
+            .code,
+        "LibraryNotFound"
+    );
+    assert_eq!(
+        library::prepare_libraries(&client, "demo", &[], false, None, true, true, true)
+            .expect_err("an empty selection is invalid")
+            .code,
+        "INVALID_INPUT"
+    );
+
+    let error = tasks::get_task_logs(
+        &client,
+        "task-1",
+        &tasks::TaskLogsQuery {
+            minimum_level: Some("verbose".to_owned()),
+            ..tasks::TaskLogsQuery::default()
+        },
+    )
+    .expect_err("an unknown severity is invalid");
+    assert_eq!(error.code, "INVALID_INPUT");
+}
+
+/// Builds a real application core with fake Git, artifact, build-capability,
+/// and task executors and in-memory state, so Git, build, and library tasks
+/// settle without ever touching an operating-system process, a real Git
+/// repository, a Maven/npm project, a company database, or the network
+/// (`tasks/020.md` §40).
+///
+/// Returns the shared [`FakeState`] so a test can observe and steer what the
+/// fake "infrastructure" reports.
+async fn build_core(
+    failing_starts: BTreeSet<String>,
+    failing_builds: BTreeSet<String>,
+    blocking: BTreeSet<String>,
+) -> (Application, Arc<TaskEngine>, Arc<Mutex<FakeState>>) {
     let config = load_from_str(FIXTURE, "<desktop-test>").expect("the fixture is valid");
     let store = Arc::new(InMemoryRuntimeStateStore::new());
+    let fakes = Arc::new(Mutex::new(FakeState::seeded()));
 
     // Start/restart observe a running, healthy process; stop observes a stopped
     // process with unknown health. Health checks refresh health only.
@@ -547,6 +1083,19 @@ async fn build_core(failing_starts: BTreeSet<String>) -> (Application, Arc<TaskE
         failing: BTreeSet::new(),
     });
 
+    let git_executor = Arc::new(FakeGitExecutor {
+        state: Arc::clone(&fakes),
+        blocking: blocking.clone(),
+    });
+    let build_executor = Arc::new(FakeBuildExecutor {
+        state: Arc::clone(&fakes),
+        failing: failing_builds,
+        blocking,
+    });
+    let verify_executor = Arc::new(FakeArtifactExecutor {
+        state: Arc::clone(&fakes),
+    });
+
     let engine = Arc::new(
         TaskEngine::builder()
             .max_parallel_tasks(4)
@@ -557,11 +1106,464 @@ async fn build_core(failing_starts: BTreeSet<String>) -> (Application, Arc<TaskE
             .executor(TaskKind::ProcessHealthCheck, health.clone())
             .executor(TaskKind::TcpHealthCheck, health.clone())
             .executor(TaskKind::HttpHealthCheck, health)
+            .executor(TaskKind::GitSync, git_executor.clone())
+            .executor(TaskKind::GitFetch, git_executor.clone())
+            .executor(TaskKind::GitPull, git_executor.clone())
+            .executor(TaskKind::GitCheckout, git_executor)
+            .executor(TaskKind::BuildService, build_executor.clone())
+            .executor(TaskKind::BuildLibrary, build_executor.clone())
+            .executor(TaskKind::LibraryInstall, build_executor)
+            .executor(TaskKind::ArtifactVerification, verify_executor)
             .build()
             .expect("a Tokio runtime is active"),
     );
-    let application = Application::new(config, engine.clone(), store, Arc::new(NullLogService));
-    (application, engine)
+    // The read-only Git/build/library queries reach the fake ports directly,
+    // exactly as they reach the real adapters in production; the mutating
+    // operations go through the fake task executors above.
+    let application = Application::new(config, engine.clone(), store, Arc::new(NullLogService))
+        .with_git_manager(Arc::new(FakeGitManager {
+            state: Arc::clone(&fakes),
+        }))
+        .with_artifact_inspector(Arc::new(FakeArtifactInspector {
+            state: Arc::clone(&fakes),
+        }))
+        .with_build_capabilities(Arc::new(FakeBuildCapabilityIndex));
+    (application, engine, fakes)
+}
+
+/// The test-only "infrastructure" state the fake ports and executors share.
+///
+/// It stands in for the real Git manager, the real artifact inspector, and the
+/// real build adapter, so the desktop adapter's IPC flow can be exercised
+/// end-to-end without any real Git, Maven, npm, filesystem, or network access.
+struct FakeState {
+    /// Observed Git status per repository (keyed by service or library id).
+    git: BTreeMap<String, RepositoryStatus>,
+    /// Branches per repository.
+    branches: BTreeMap<String, Vec<BranchInfo>>,
+    /// The version the inspector reports a consumer declares, or `None` when
+    /// the consumer does not declare the artifact.
+    declared_version: Option<Version>,
+    /// Whether the inspector reports the artifact present.
+    artifact_present: bool,
+    /// The operations the fake executors observed, in order, for assertions.
+    recorded: Vec<String>,
+}
+
+impl FakeState {
+    /// A state where both fixture services and the library are checked out on
+    /// `main`, clean, and up to date with `origin/main`, and the library's
+    /// artifact is installed and consumed at the aligned version.
+    fn seeded() -> Self {
+        let mut git = BTreeMap::new();
+        let mut branches = BTreeMap::new();
+        for name in ["orders-api", "admin-ui", "shared-kit"] {
+            git.insert(name.to_owned(), available_status("main"));
+            branches.insert(
+                name.to_owned(),
+                vec![
+                    BranchInfo::new("main", BranchKind::Local, true),
+                    BranchInfo::new("origin/main", BranchKind::Remote, false),
+                ],
+            );
+        }
+        Self {
+            git,
+            branches,
+            declared_version: Some(Version::new("1.8.0-SNAPSHOT").expect("a valid version")),
+            artifact_present: true,
+            recorded: Vec::new(),
+        }
+    }
+
+    /// Returns the observed status of `name`, defaulting to a clean `main`.
+    fn status(&self, name: &str) -> RepositoryStatus {
+        self.git
+            .get(name)
+            .cloned()
+            .unwrap_or_else(|| available_status("main"))
+    }
+}
+
+/// A clean, available working copy on `branch`, tracking `origin/<branch>`.
+fn available_status(branch: &str) -> RepositoryStatus {
+    RepositoryStatus {
+        lifecycle: RepositoryLifecycle::Available,
+        branch: Some(Branch::new(branch).expect("a valid branch")),
+        commit: Some("0123456789abcdef".to_owned()),
+        upstream: Some(format!("origin/{branch}")),
+        ahead: Some(0),
+        behind: Some(0),
+        ..RepositoryStatus::default()
+    }
+}
+
+/// A [`GitManager`] over the shared [`FakeState`].
+///
+/// Read-only queries (`status`, `branches`) answer from the state exactly as
+/// the real manager answers from a working copy. Mutating methods are never
+/// reached by the engine in this harness (the fake task executors run instead),
+/// but are implemented so the application can be constructed with a real
+/// manager.
+struct FakeGitManager {
+    /// The shared fake state.
+    state: Arc<Mutex<FakeState>>,
+}
+
+#[async_trait]
+impl GitManager for FakeGitManager {
+    async fn status(
+        &self,
+        repository: &ResolvedRepository,
+        _options: &GitOptions,
+    ) -> Result<RepositoryStatus, GitError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(state.status(&repository.name))
+    }
+
+    async fn branches(
+        &self,
+        repository: &ResolvedRepository,
+        _options: &GitOptions,
+    ) -> Result<Vec<BranchInfo>, GitError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(state
+            .branches
+            .get(&repository.name)
+            .cloned()
+            .unwrap_or_else(|| vec![BranchInfo::new("main", BranchKind::Local, true)]))
+    }
+
+    async fn diff(
+        &self,
+        _repository: &ResolvedRepository,
+        _options: &DiffOptions,
+    ) -> Result<RepoDiff, GitError> {
+        Err(GitError::internal(
+            "the desktop Git screen never requests a diff",
+        ))
+    }
+
+    async fn fetch(
+        &self,
+        repository: &ResolvedRepository,
+        _options: &GitOptions,
+    ) -> Result<GitOperationResult, GitError> {
+        Ok(GitOperationResult::succeeded(
+            repository.name.clone(),
+            GitOperation::Fetch,
+        ))
+    }
+
+    async fn pull(
+        &self,
+        repository: &ResolvedRepository,
+        _options: &GitOptions,
+    ) -> Result<GitOperationResult, GitError> {
+        Ok(GitOperationResult::succeeded(
+            repository.name.clone(),
+            GitOperation::Pull,
+        ))
+    }
+
+    async fn checkout(
+        &self,
+        repository: &ResolvedRepository,
+        _branch: &Branch,
+        _options: &GitOptions,
+    ) -> Result<GitOperationResult, GitError> {
+        Ok(GitOperationResult::succeeded(
+            repository.name.clone(),
+            GitOperation::Checkout,
+        ))
+    }
+
+    async fn clone(
+        &self,
+        repository: &ResolvedRepository,
+        _options: &GitOptions,
+    ) -> Result<GitOperationResult, GitError> {
+        Ok(GitOperationResult::succeeded(
+            repository.name.clone(),
+            GitOperation::Clone,
+        ))
+    }
+
+    async fn sync(
+        &self,
+        repository: &ResolvedRepository,
+        _options: &GitOptions,
+    ) -> Result<GitOperationResult, GitError> {
+        Ok(GitOperationResult::succeeded(
+            repository.name.clone(),
+            GitOperation::Sync,
+        ))
+    }
+
+    async fn reset_hard(
+        &self,
+        repository: &ResolvedRepository,
+        _options: &GitOptions,
+    ) -> Result<GitOperationResult, GitError> {
+        Ok(GitOperationResult::succeeded(
+            repository.name.clone(),
+            GitOperation::ResetHard,
+        ))
+    }
+
+    async fn clean(
+        &self,
+        repository: &ResolvedRepository,
+        _options: &GitOptions,
+    ) -> Result<GitOperationResult, GitError> {
+        Ok(GitOperationResult::succeeded(
+            repository.name.clone(),
+            GitOperation::Clean,
+        ))
+    }
+
+    async fn discard_local_changes(
+        &self,
+        repository: &ResolvedRepository,
+        _options: &GitOptions,
+    ) -> Result<GitOperationResult, GitError> {
+        Ok(GitOperationResult::succeeded(
+            repository.name.clone(),
+            GitOperation::DiscardChanges,
+        ))
+    }
+}
+
+/// An [`ArtifactInspector`] over the shared [`FakeState`].
+struct FakeArtifactInspector {
+    /// The shared fake state.
+    state: Arc<Mutex<FakeState>>,
+}
+
+#[async_trait]
+impl ArtifactInspector for FakeArtifactInspector {
+    async fn locate(
+        &self,
+        artifact: &ResolvedArtifact,
+    ) -> Result<ArtifactPresence, ArtifactInspectionError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        if state.artifact_present {
+            let path = AbsolutePath::new(format!(
+                "/tmp/fake-m2/repository/{}",
+                artifact.coordinate.repository_path()
+            ))
+            .expect("a valid fake path");
+            Ok(ArtifactPresence::Found {
+                path,
+                size_bytes: Some(4096),
+            })
+        } else {
+            Ok(ArtifactPresence::Missing {
+                expected_path: None,
+            })
+        }
+    }
+
+    async fn dependency_version(
+        &self,
+        _dependency: &ResolvedDependency,
+    ) -> Result<DependencyVersionInspection, ArtifactInspectionError> {
+        let state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+        Ok(match &state.declared_version {
+            Some(version) => DependencyVersionInspection::Declared {
+                version: version.clone(),
+            },
+            None => DependencyVersionInspection::NotDeclared,
+        })
+    }
+}
+
+/// A [`BuildCapabilityIndex`] over the real Maven/npm capability shape.
+///
+/// It reports the same operations the real build providers declare, so the
+/// desktop adapter's capability projection can be exercised without pulling the
+/// build crate into this test binary (`tasks/020.md` §13, §40).
+struct FakeBuildCapabilityIndex;
+
+impl BuildCapabilityIndex for FakeBuildCapabilityIndex {
+    fn capabilities(&self, system: BuildSystem) -> Option<BuildCapabilities> {
+        let operations = match system {
+            BuildSystem::Maven => vec![
+                BuildOperation::Clean,
+                BuildOperation::Build,
+                BuildOperation::Test,
+                BuildOperation::InstallDependencies,
+                BuildOperation::PublishLocalArtifact,
+            ],
+            BuildSystem::Npm => vec![BuildOperation::Build, BuildOperation::InstallDependencies],
+        };
+        Some(BuildCapabilities {
+            build_system: system,
+            operations,
+        })
+    }
+}
+
+/// A test-only Git executor.
+///
+/// It decodes the workspace-aware [`ResolvedRepository`] from the task's
+/// parameters (exactly as the real Git executor does) and reflects the
+/// operation into the shared [`FakeState`], so a subsequent `get_git_status`
+/// observes the same working copy the sync/checkout produced. An entity named
+/// in `blocking` waits for cancellation instead of completing, so cancellation
+/// can be exercised without a long-running process.
+struct FakeGitExecutor {
+    /// The shared fake state.
+    state: Arc<Mutex<FakeState>>,
+    /// Repository ids whose Git task must block until cancelled.
+    blocking: BTreeSet<String>,
+}
+
+#[async_trait]
+impl TaskExecutor for FakeGitExecutor {
+    async fn execute(&self, context: TaskContext) -> Result<TaskOutcome, TaskExecutorError> {
+        let repository = decode_repository(&context)?;
+        if self.blocking.contains(&repository.name) {
+            context.cancelled().await;
+            return Err(TaskExecutorError::Cancelled);
+        }
+
+        let kind = context.kind().clone();
+        {
+            let mut state = self.state.lock().unwrap_or_else(|error| error.into_inner());
+            let default_branch = repository.default_branch.to_string();
+            state
+                .git
+                .entry(repository.name.clone())
+                .or_insert_with(|| available_status(&default_branch));
+            {
+                let entry = state
+                    .git
+                    .get_mut(&repository.name)
+                    .expect("just inserted or present");
+                match kind {
+                    TaskKind::GitCheckout => {
+                        if let Some(branch) = context.parameter(parameter::BRANCH) {
+                            entry.branch = Branch::new(branch).ok();
+                        }
+                    }
+                    TaskKind::GitSync => {
+                        entry.branch = Some(repository.default_branch.clone());
+                        entry.ahead = Some(0);
+                        entry.behind = Some(0);
+                    }
+                    TaskKind::GitPull => entry.behind = Some(0),
+                    TaskKind::GitFetch => {}
+                    _ => {}
+                }
+            }
+            state
+                .recorded
+                .push(format!("{} {}", kind.label(), repository.name));
+        }
+
+        let _ = context
+            .progress()
+            .message(format!("{} {}", kind.label(), repository.name));
+        Ok(TaskOutcome::succeeded(Some(format!(
+            "{} completed for '{}'",
+            kind.label(),
+            repository.name
+        ))))
+    }
+}
+
+/// A test-only build/library executor.
+///
+/// It decodes the build target's name from the task parameters and reports a
+/// structured failure for an entity named in `failing`, so bulk build
+/// partial-failure handling can be asserted. An entity named in `blocking`
+/// waits for cancellation.
+struct FakeBuildExecutor {
+    /// The shared fake state.
+    state: Arc<Mutex<FakeState>>,
+    /// Entity ids whose build task must fail.
+    failing: BTreeSet<String>,
+    /// Entity ids whose build task must block until cancelled.
+    blocking: BTreeSet<String>,
+}
+
+#[async_trait]
+impl TaskExecutor for FakeBuildExecutor {
+    async fn execute(&self, context: TaskContext) -> Result<TaskOutcome, TaskExecutorError> {
+        let name = context
+            .parameter(build_parameter::NAME)
+            .unwrap_or_default()
+            .to_owned();
+        let operation = context
+            .parameter(build_parameter::OPERATION)
+            .unwrap_or("build")
+            .to_owned();
+        if self.blocking.contains(&name) {
+            context.cancelled().await;
+            return Err(TaskExecutorError::Cancelled);
+        }
+        if self.failing.contains(&name) {
+            return Err(TaskExecutorError::failed(
+                "BUILD_COMMAND_FAILED",
+                format!("the {operation} command failed for '{name}'"),
+            ));
+        }
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .recorded
+            .push(format!("{operation} {name}"));
+        let _ = context
+            .progress()
+            .message(format!("running {operation} for '{name}'"));
+        Ok(TaskOutcome::succeeded(Some(format!(
+            "{operation} completed for '{name}'"
+        ))))
+    }
+}
+
+/// A test-only artifact-verification executor.
+///
+/// It decodes the [`ResolvedArtifact`] from the task parameters and mirrors the
+/// real executor: a present artifact succeeds, a missing one is a structured
+/// `ARTIFACT_NOT_FOUND` failure.
+struct FakeArtifactExecutor {
+    /// The shared fake state.
+    state: Arc<Mutex<FakeState>>,
+}
+
+#[async_trait]
+impl TaskExecutor for FakeArtifactExecutor {
+    async fn execute(&self, context: TaskContext) -> Result<TaskOutcome, TaskExecutorError> {
+        let artifact = ResolvedArtifact::from_parameters(context.parameters())
+            .map_err(|error| TaskExecutorError::internal(error.to_string()))?;
+        let present = self
+            .state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .artifact_present;
+        if present {
+            let _ = context
+                .progress()
+                .message(format!("verified '{}'", artifact.coordinate));
+            Ok(TaskOutcome::succeeded(Some(format!(
+                "artifact '{}' is present",
+                artifact.coordinate
+            ))))
+        } else {
+            Err(TaskExecutorError::failed(
+                "ARTIFACT_NOT_FOUND",
+                format!("artifact '{}' was not found", artifact.coordinate),
+            ))
+        }
+    }
+}
+
+/// Decodes a repository from a task's parameters, as the real executor does.
+fn decode_repository(context: &TaskContext) -> Result<ResolvedRepository, TaskExecutorError> {
+    ResolvedRepository::from_parameters(context.parameters())
+        .map_err(|error| TaskExecutorError::failed("INVALID_TARGET", error.to_string()))
 }
 
 /// A test-only lifecycle executor.
@@ -685,6 +1687,15 @@ fn wait_for_workflow(client: &RemoteClient, workflow_id: &WorkflowId) -> BulkOpe
 fn settle(client: &RemoteClient, outcome: &OperationOutcome) -> Task {
     let task_id = outcome.task_id.as_deref().expect("a task was scheduled");
     wait_for_task(client, task_id)
+}
+
+/// Extracts the workflow id from a workflow-shaped outcome.
+fn workflow_of(outcome: &OperationOutcome) -> WorkflowId {
+    let id = outcome
+        .workflow_id
+        .as_deref()
+        .expect("a workflow was scheduled");
+    WorkflowId::new(id).expect("a valid workflow id")
 }
 
 /// Returns a unique temporary directory for one harness.

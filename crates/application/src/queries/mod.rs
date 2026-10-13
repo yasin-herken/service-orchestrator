@@ -5,6 +5,7 @@
 //! keeps the read path predictable: a status query cannot accidentally fetch a
 //! repository or start a process.
 
+mod build;
 mod git;
 mod health;
 mod library;

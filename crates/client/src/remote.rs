@@ -35,12 +35,13 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use service_orchestrator_application::{
-    ApplicationError, Authorization, BulkOperationSummary, DiffOptions, EnvironmentPlan,
-    HealthCheckScope, LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions,
-    LibraryStatus, LogEntry, LogPage, LogRequest, LogStreamError, LogSubscription, MigrationStatus,
-    OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
-    ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus, ServiceStatus, WorkflowCancellation,
-    WorkflowStatus, WorkspaceStatus, WorkspaceValidationReport,
+    ApplicationError, Authorization, BuildCapabilities, BulkOperationSummary, DiffOptions,
+    EnvironmentPlan, HealthCheckScope, LibraryArtifactVerification, LibraryDependent,
+    LibraryPrepareOptions, LibraryStatus, LogEntry, LogPage, LogRequest, LogStreamError,
+    LogSubscription, MigrationStatus, OperationResult, PrepareEnvironmentRequest,
+    PrepareSelectedLibrariesRequest, ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus,
+    ServiceStatus, WorkflowCancellation, WorkflowStatus, WorkspaceStatus,
+    WorkspaceValidationReport,
 };
 use service_orchestrator_domain::{
     Branch, BranchInfo, GroupId, Library, LibraryId, Profile, ProfileId, RepoDiff,
@@ -890,6 +891,13 @@ impl OrchestratorClient for RemoteClient {
         branch: &Branch,
     ) -> Result<OperationResult, ApplicationError> {
         self.call(ops::CHECKOUT_REPOSITORIES, (workspace_id, services, branch))
+    }
+
+    fn get_build_capabilities(
+        &self,
+        service_id: &ServiceId,
+    ) -> Result<BuildCapabilities, ApplicationError> {
+        self.call(ops::GET_BUILD_CAPABILITIES, (service_id,))
     }
 
     fn build_service(&self, service_id: &ServiceId) -> Result<OperationResult, ApplicationError> {

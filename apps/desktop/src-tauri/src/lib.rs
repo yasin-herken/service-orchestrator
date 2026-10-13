@@ -17,15 +17,19 @@
 //! things it can do are the commands registered in [`run`] and the two events
 //! emitted by [`state::AppState`].
 
+pub mod build;
 mod commands;
 pub mod connection;
 mod daemon_bin;
 pub mod dto;
 mod error;
 mod events;
+pub mod git;
+pub mod library;
 pub mod mutations;
 pub mod queries;
 mod state;
+pub mod tasks;
 mod validation;
 
 use tauri::{Manager, Url};
@@ -101,6 +105,36 @@ pub fn run() {
             commands::restart_services,
             commands::check_service_health,
             commands::get_connection_state,
+            commands::list_repositories,
+            commands::get_git_status,
+            commands::inspect_repositories,
+            commands::list_branches,
+            commands::preview_git_sync,
+            commands::fetch_repository,
+            commands::pull_repository,
+            commands::checkout_repository,
+            commands::sync_repository,
+            commands::fetch_repositories,
+            commands::sync_repositories,
+            commands::checkout_repositories,
+            commands::list_build_targets,
+            commands::get_build_capabilities,
+            commands::build_service,
+            commands::build_services,
+            commands::list_libraries,
+            commands::get_library_dependents,
+            commands::verify_library_artifact,
+            commands::inspect_version_alignment,
+            commands::build_library,
+            commands::install_library,
+            commands::sync_library,
+            commands::prepare_library,
+            commands::prepare_libraries,
+            commands::get_task,
+            commands::summarize_workflow,
+            commands::get_task_logs,
+            commands::cancel_task,
+            commands::cancel_workflow,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the desktop application")

@@ -43,6 +43,8 @@ use service_orchestrator_domain::{
 };
 use thiserror::Error;
 
+use crate::models::BuildCapabilities;
+
 /// Parameter keys used to carry a [`ResolvedBuildTarget`] through the task
 /// engine.
 pub mod parameter {
@@ -392,6 +394,34 @@ impl BuildError {
             Self::InvalidParameter { .. } => "BUILD_INVALID_PARAMETER",
             Self::Internal { .. } => "BUILD_INTERNAL_ERROR",
         }
+    }
+}
+
+/// A read-only view of the build operations each build system supports.
+///
+/// The application never runs a build tool itself; it only needs to *describe*
+/// which operations a configured build system can perform, so interfaces can
+/// render capabilities without hard-coding Maven — or any other provider —
+/// knowledge (`tasks/020.md` §13). The build adapter implements this over its
+/// provider registry; when no adapter is wired, [`NullBuildCapabilityIndex`]
+/// answers "no provider is registered" for every system.
+pub trait BuildCapabilityIndex: Send + Sync {
+    /// Returns the operations `system` supports, or `None` when no provider is
+    /// registered for it.
+    fn capabilities(&self, system: BuildSystem) -> Option<BuildCapabilities>;
+}
+
+/// A [`BuildCapabilityIndex`] with no providers.
+///
+/// Used when the application core is built without a build adapter. Every
+/// lookup returns `None`, so a caller reports that no build provider is
+/// registered rather than fabricating capabilities.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct NullBuildCapabilityIndex;
+
+impl BuildCapabilityIndex for NullBuildCapabilityIndex {
+    fn capabilities(&self, _system: BuildSystem) -> Option<BuildCapabilities> {
+        None
     }
 }
 

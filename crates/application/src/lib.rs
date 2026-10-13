@@ -58,7 +58,7 @@ mod validation;
 pub use app::Application;
 pub use error::ApplicationError;
 pub use models::{
-    AlignmentStatus, BulkOperationSummary, ConsumerAlignment, DiagnosticFailure,
+    AlignmentStatus, BuildCapabilities, BulkOperationSummary, ConsumerAlignment, DiagnosticFailure,
     EnvironmentPhaseKind, EnvironmentPlan, EnvironmentPlanPhase, EnvironmentPlanStep,
     HealthCheckScope, LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions,
     LibraryStatus, MigrationStatus, OperationResult, PrepareEnvironmentRequest,
@@ -76,14 +76,15 @@ pub use validation::{
 // caller-facing authorization keeps every adapter on one import path.
 pub use ports::{
     artifact_parameter, build_parameter, migration_parameter, parameter, service_runtime_parameter,
-    ArtifactInspectionError, ArtifactInspector, ArtifactPresence, BuildError,
+    ArtifactInspectionError, ArtifactInspector, ArtifactPresence, BuildCapabilityIndex, BuildError,
     DependencyVersionInspection, DiffOptions, GitError, GitManager, GitOptions, HealthCheckOutcome,
     HealthIndex, HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogPage, LogRequest,
     LogService, LogServiceError, LogSource, LogStream, LogStreamError, LogSubscription,
-    MigrationError, NullArtifactInspector, NullGitManager, NullHealthIndex, NullLogService,
-    NullServiceRuntimeIndex, ResolvedArtifact, ResolvedBuildCommand, ResolvedBuildTarget,
-    ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository, ResolvedServiceTarget,
-    RuntimeStateStore, ServiceHealth, ServiceProcessInfo, ServiceRuntimeError, ServiceRuntimeIndex,
-    ServiceRuntimeState, WorkspaceProbe, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
+    MigrationError, NullArtifactInspector, NullBuildCapabilityIndex, NullGitManager,
+    NullHealthIndex, NullLogService, NullServiceRuntimeIndex, ResolvedArtifact,
+    ResolvedBuildCommand, ResolvedBuildTarget, ResolvedDependency, ResolvedMigrationTarget,
+    ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore, ServiceHealth,
+    ServiceProcessInfo, ServiceRuntimeError, ServiceRuntimeIndex, ServiceRuntimeState,
+    WorkspaceProbe, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
 };
 pub use service_orchestrator_policy::{Authorization, PolicyDecision, PolicyEngine};

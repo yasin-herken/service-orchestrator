@@ -143,6 +143,8 @@ pub const CHECKOUT_REPOSITORIES: &str = "checkout_repositories";
 
 // -- builds and libraries ---------------------------------------------------
 
+/// Returns the build operations a service's build system supports.
+pub const GET_BUILD_CAPABILITIES: &str = "get_build_capabilities";
 /// Builds a service.
 pub const BUILD_SERVICE: &str = "build_service";
 /// Builds a workspace's services.
