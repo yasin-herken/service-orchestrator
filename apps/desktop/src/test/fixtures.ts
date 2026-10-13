@@ -10,8 +10,14 @@ import type {
   GitStatusView,
   GitSyncPreview,
   GitSyncPreviewEntry,
+  HealthDetailView,
+  HealthOutcomeView,
+  HealthRowView,
   LibrarySummary,
+  LogEntryView,
   LogPageView,
+  MigrationRowView,
+  MigrationStatusView,
   OperationOutcome,
   RepositoryInspectionView,
   RepositorySummary,
@@ -19,6 +25,7 @@ import type {
   ServiceSummary,
   TaskView,
   VersionAlignmentView,
+  WorkflowView,
   WorkspaceStatus,
   WorkspaceSummary,
 } from '../types/models';
@@ -423,6 +430,46 @@ export function makeLibraries(): LibrarySummary[] {
   return [makeLibrary()];
 }
 
+/** A mixed set of tasks covering several statuses, newest first. */
+export function makeTasks(): TaskView[] {
+  return [
+    makeTaskView({
+      id: 'task-3',
+      kind: 'migration_apply',
+      status: 'failed',
+      created_at: 1_700_000_200,
+      started_at: 1_700_000_201,
+      finished_at: 1_700_000_210,
+      duration_ms: 9_000,
+      progress: { current: 1, total: 1, message: null, fraction: 1 },
+      failure: {
+        code: 'MIGRATION_APPLY_FAILED',
+        message: 'changeset 3 was rejected by the database',
+        detail: 'exit 1',
+      },
+    }),
+    makeTaskView({
+      id: 'task-2',
+      kind: 'build_service',
+      status: 'succeeded',
+      created_at: 1_700_000_150,
+      started_at: 1_700_000_151,
+      finished_at: 1_700_000_160,
+      duration_ms: 9_000,
+      progress: { current: 3, total: 3, message: null, fraction: 1 },
+    }),
+    makeTaskView({
+      id: 'task-1',
+      kind: 'start_service',
+      status: 'running',
+      service_id: 'orders-api',
+      created_at: 1_700_000_100,
+      started_at: 1_700_000_101,
+      workflow_id: 'wf-1',
+    }),
+  ];
+}
+
 /** Builds an artifact-verification result. */
 export function makeVerification(
   overrides: Partial<ArtifactVerificationView> = {},
@@ -473,6 +520,7 @@ export function makeTaskView(overrides: Partial<TaskView> = {}): TaskView {
     service_id: 'orders-api',
     library_id: null,
     workflow_id: null,
+    workspace_id: 'demo',
     created_at: 1_700_000_000,
     started_at: 1_700_000_001,
     finished_at: null,
@@ -527,6 +575,184 @@ export function makeLogPage(overrides: Partial<LogPageView> = {}): LogPageView {
     ],
     next_cursor: null,
     truncated: false,
+    ...overrides,
+  };
+}
+
+/** Builds one log entry with sensible defaults. */
+export function makeLogEntry(
+  sequence: number,
+  overrides: Partial<LogEntryView> = {},
+): LogEntryView {
+  return {
+    timestamp: 1_700_000_000 + sequence,
+    level: 'info',
+    message: `line ${sequence}`,
+    source: 'process',
+    stream: 'stdout',
+    service_id: 'orders-api',
+    task_id: null,
+    process_id: 'proc-1',
+    sequence,
+    ...overrides,
+  };
+}
+
+/** Builds `count` consecutive log entries, oldest first. */
+export function makeLogEntries(count: number): LogEntryView[] {
+  return Array.from({ length: count }, (_, index) => makeLogEntry(index + 1));
+}
+
+// -- migrations ----------------------------------------------------------------
+
+/** Builds a configuration-derived migration snapshot (local target). */
+export function makeMigrationStatus(
+  overrides: Partial<MigrationStatusView> = {},
+): MigrationStatusView {
+  return {
+    service_id: 'orders-api',
+    workspace_id: 'demo',
+    enabled: true,
+    provider: 'liquibase',
+    execution_mode: 'maven',
+    environment: 'local',
+    database_identity: 'jdbc:postgresql://localhost:5432/orders',
+    requires_authorization: false,
+    timeout_seconds: 300,
+    pending: null,
+    locked: null,
+    ...overrides,
+  };
+}
+
+/** One migration row: a local service plus a staging service. */
+export function makeMigrationRows(): MigrationRowView[] {
+  return [
+    {
+      status: makeMigrationStatus(),
+      latest_task: makeTaskView({
+        id: 'task-mig-1',
+        kind: 'migration_apply',
+        status: 'succeeded',
+        created_at: 1_700_000_100,
+        started_at: 1_700_000_101,
+        finished_at: 1_700_000_105,
+        duration_ms: 4_000,
+        progress: { current: 1, total: 1, message: null, fraction: 1 },
+      }),
+    },
+    {
+      status: makeMigrationStatus({
+        service_id: 'billing-api',
+        environment: 'staging',
+        execution_mode: 'cli',
+        database_identity: 'jdbc:postgresql://staging-db:5432/billing',
+        requires_authorization: true,
+      }),
+      latest_task: null,
+    },
+  ];
+}
+
+// -- health --------------------------------------------------------------------
+
+/** Builds one observed health-check outcome. */
+export function makeHealthOutcome(
+  overrides: Partial<HealthOutcomeView> = {},
+): HealthOutcomeView {
+  return {
+    check_type: 'http',
+    target: 'http://localhost:8081/actuator/health',
+    required: true,
+    state: 'healthy',
+    duration_ms: 12,
+    message: null,
+    checked_at: 1_700_000_000,
+    ...overrides,
+  };
+}
+
+/** Builds one health row with sensible defaults. */
+export function makeHealthRow(overrides: Partial<HealthRowView> = {}): HealthRowView {
+  return {
+    service_id: 'orders-api',
+    display_name: 'orders-api',
+    workspace_id: 'demo',
+    process_state: 'running',
+    health_state: 'healthy',
+    checked_at: 1_700_000_000,
+    last_healthy_at: 1_700_000_000,
+    last_unhealthy_at: 1_699_999_000,
+    consecutive_failures: 0,
+    process_check: makeHealthOutcome({ check_type: 'process', target: null }),
+    tcp_check: makeHealthOutcome({ check_type: 'tcp', target: 'localhost:8081' }),
+    http_check: makeHealthOutcome(),
+    ...overrides,
+  };
+}
+
+/** The demo workspace's two health rows. */
+export function makeHealthRows(): HealthRowView[] {
+  return [
+    makeHealthRow(),
+    makeHealthRow({
+      service_id: 'admin-ui',
+      display_name: 'admin-ui',
+      process_state: 'not_running',
+      health_state: 'unknown',
+      checked_at: null,
+      last_healthy_at: null,
+      last_unhealthy_at: null,
+      consecutive_failures: 0,
+      process_check: null,
+      tcp_check: null,
+      http_check: null,
+    }),
+  ];
+}
+
+/** Builds a detailed health view for one service. */
+export function makeHealthDetail(
+  overrides: Partial<HealthDetailView> = {},
+): HealthDetailView {
+  return {
+    row: makeHealthRow(),
+    checks: [
+      makeHealthOutcome({ check_type: 'process', target: null }),
+      makeHealthOutcome({ check_type: 'tcp', target: 'localhost:8081' }),
+      makeHealthOutcome(),
+    ],
+    managed: true,
+    pid: 4321,
+    ports: [8081],
+    last_failure: null,
+    recent_errors: [],
+    ...overrides,
+  };
+}
+
+// -- workflows -----------------------------------------------------------------
+
+/** Builds a workflow with real step ids and dependency edges. */
+export function makeWorkflow(overrides: Partial<WorkflowView> = {}): WorkflowView {
+  return {
+    id: 'wf-1',
+    kind: 'prepare_environment',
+    steps: [
+      { id: 'step-1', description: 'sync repository', task_kind: 'git_sync', depends_on: [] },
+      {
+        id: 'step-2',
+        description: 'apply migrations',
+        task_kind: 'migration_apply',
+        depends_on: ['step-1'],
+      },
+      {
+        id: 'step-3',
+        description: 'build service',
+        task_kind: 'build_service',
+        depends_on: ['step-2'],
+      },
+    ],
     ...overrides,
   };
 }

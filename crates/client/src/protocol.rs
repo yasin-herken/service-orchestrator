@@ -39,9 +39,10 @@ pub const MAX_FRAME_BYTES: usize = 8 * 1024 * 1024;
 /// Which interface a client is.
 ///
 /// The daemon uses this to decide whether a request may carry an
-/// `allow_destructive` flag: only an interactive (`Tui`) client can, and even
-/// then the request still passes through the policy engine. MCP and future
-/// non-interactive clients can never self-confirm (`tasks/015.md` §23).
+/// `allow_destructive` flag: only an interactive (`Tui` or `Desktop`) client
+/// can, and even then the request still passes through the policy engine. MCP
+/// and non-interactive CLI clients can never self-confirm (`tasks/015.md` §23;
+/// `tasks/021.md` §23).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum ClientKind {
@@ -51,6 +52,8 @@ pub enum ClientKind {
     Mcp,
     /// A command-line client (for example `daemon status`).
     Cli,
+    /// The Tauri desktop GUI adapter.
+    Desktop,
 }
 
 impl ClientKind {
@@ -61,6 +64,7 @@ impl ClientKind {
             Self::Tui => "tui",
             Self::Mcp => "mcp",
             Self::Cli => "cli",
+            Self::Desktop => "desktop",
         }
     }
 
@@ -68,7 +72,7 @@ impl ClientKind {
     /// destructive confirmation.
     #[must_use]
     pub const fn is_interactive(self) -> bool {
-        matches!(self, Self::Tui)
+        matches!(self, Self::Tui | Self::Desktop)
     }
 }
 
@@ -318,13 +322,33 @@ mod tests {
     }
 
     #[test]
-    fn client_kinds_are_labeled_and_only_the_tui_is_interactive() {
+    fn client_kinds_are_labeled_and_only_interactive_interfaces_confirm() {
         assert_eq!(ClientKind::Tui.label(), "tui");
         assert_eq!(ClientKind::Mcp.label(), "mcp");
         assert_eq!(ClientKind::Cli.label(), "cli");
+        assert_eq!(ClientKind::Desktop.label(), "desktop");
         assert!(ClientKind::Tui.is_interactive());
+        assert!(ClientKind::Desktop.is_interactive());
         assert!(!ClientKind::Mcp.is_interactive());
         assert!(!ClientKind::Cli.is_interactive());
+    }
+
+    #[test]
+    fn the_desktop_kind_serializes_as_a_stable_wire_label() {
+        let request = RequestEnvelope {
+            protocol: PROTOCOL_VERSION,
+            request_id: "req-5".to_owned(),
+            client: ClientKind::Desktop,
+            allow_destructive: true,
+            method: "apply_migration".to_owned(),
+            params: serde_json::json!(["orders-api"]),
+        };
+        let value = serde_json::to_value(&request).expect("a request serializes");
+        assert_eq!(value["client"], serde_json::json!("desktop"));
+        let decoded: RequestEnvelope =
+            serde_json::from_value(value).expect("the request round-trips");
+        assert_eq!(decoded.client, ClientKind::Desktop);
+        assert!(decoded.client.is_interactive());
     }
 
     #[test]

@@ -598,6 +598,11 @@ select {
   gap: 8px;
 }
 
+.toolbar__title {
+  font-size: 13px;
+  font-weight: 600;
+}
+
 .toolbar__field-label {
   color: var(--text-muted);
   font-size: 12px;
@@ -884,6 +889,11 @@ select {
   border-radius: 999px;
   background: var(--tone-neutral-soft);
   font-size: 11.5px;
+}
+
+.tag--warning {
+  background: var(--tone-warning-soft);
+  color: var(--tone-warning);
 }
 
 .detail-list {
@@ -1358,4 +1368,47 @@ select {
 
 .log-viewer__message {
   flex: 1;
+}
+
+/* -- SQL preview ---------------------------------------------------------- */
+
+.sql-preview {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-width: 0;
+}
+
+.sql-preview__toolbar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.sql-preview__code {
+  max-height: 320px;
+  overflow: auto;
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-small);
+  background: var(--bg-sunken);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  white-space: pre;
+  user-select: text;
+}
+
+.sql-preview__code--wrap {
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.sql-preview__line {
+  display: block;
+}
+
+.sql-preview__code mark {
+  background: var(--tone-warning-soft);
+  color: inherit;
 }

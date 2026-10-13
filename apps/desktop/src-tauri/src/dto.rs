@@ -8,14 +8,14 @@
 use serde::Serialize;
 use service_orchestrator_application::{
     BuildCapabilities, BulkOperationSummary, HealthCheckOutcome, LibraryArtifactVerification,
-    LibraryDependent, LibraryStatus, LogEntry, LogPage, OperationResult, ServiceDiagnostics,
-    ServiceStatus, VersionAlignmentPlan, WorkflowCancellation,
+    LibraryDependent, LibraryStatus, LogEntry, LogPage, MigrationStatus, OperationResult,
+    ServiceDiagnostics, ServiceHealth, ServiceStatus, VersionAlignmentPlan, WorkflowCancellation,
     WorkspaceStatus as CoreWorkspaceStatus,
 };
 use service_orchestrator_domain::{
     ArtifactCoordinate, BranchInfo, BuildOperation, Dependency, DependencyTarget, HealthCheck,
     Library, Repository, RepositoryStatus, Runtime, Service, Task, TaskProgress, Timestamp,
-    Workspace,
+    Workflow, Workspace,
 };
 
 /// A workspace as shown in the selector and the dashboard.
@@ -419,7 +419,7 @@ impl ServiceDetail {
 }
 
 /// Converts a domain timestamp to whole seconds since the Unix epoch.
-fn timestamp_seconds(timestamp: Timestamp) -> i64 {
+pub(crate) fn timestamp_seconds(timestamp: Timestamp) -> i64 {
     i64::try_from(timestamp.epoch_millis() / 1000).unwrap_or(0)
 }
 
@@ -1025,6 +1025,9 @@ pub struct TaskView {
     pub library_id: Option<String>,
     /// The workflow the task belongs to, when any.
     pub workflow_id: Option<String>,
+    /// The workspace that owns the task's service or library, when it could be
+    /// resolved from configuration (`tasks/021.md` §10).
+    pub workspace_id: Option<String>,
     /// When the task was created, seconds since the Unix epoch.
     pub created_at: i64,
     /// When the task started running, seconds since the Unix epoch.
@@ -1050,6 +1053,7 @@ impl From<&Task> for TaskView {
             service_id: task.service.as_ref().map(ToString::to_string),
             library_id: task.library.as_ref().map(ToString::to_string),
             workflow_id: task.workflow.as_ref().map(ToString::to_string),
+            workspace_id: None,
             created_at: timestamp_seconds(task.created_at),
             started_at: task.started_at.map(timestamp_seconds),
             finished_at: task.finished_at.map(timestamp_seconds),
@@ -1062,6 +1066,15 @@ impl From<&Task> for TaskView {
             }),
             dependencies: task.dependencies.iter().map(ToString::to_string).collect(),
         }
+    }
+}
+
+impl TaskView {
+    /// Records the resolved owning workspace on a task row.
+    #[must_use]
+    pub fn with_workspace(mut self, workspace_id: impl Into<String>) -> Self {
+        self.workspace_id = Some(workspace_id.into());
+        self
     }
 }
 
@@ -1207,6 +1220,267 @@ impl From<LogPage> for LogPageView {
             entries: page.entries.iter().map(LogEntryView::from).collect(),
             next_cursor: page.next_cursor,
             truncated: page.truncated,
+        }
+    }
+}
+
+/// A service's migration setup in display form.
+///
+/// The snapshot is configuration-derived and performs no database operation:
+/// [`pending`](Self::pending) and [`locked`](Self::locked) are explicit unknowns
+/// (`null` on the wire) until a real provider inspection task answers
+/// (`tasks/021.md` §4, §6).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MigrationStatusView {
+    /// The service whose migrations are described.
+    pub service_id: String,
+    /// The workspace that owns the service.
+    pub workspace_id: String,
+    /// Whether migrations are enabled for the service.
+    pub enabled: bool,
+    /// The configured migration provider (`liquibase`, …).
+    pub provider: String,
+    /// How the provider is invoked (`cli`, `maven`, …).
+    pub execution_mode: String,
+    /// The declared environment of the target database (`local`, `staging`, …).
+    pub environment: String,
+    /// A display-safe identity of the target database (never credentials).
+    pub database_identity: String,
+    /// Whether applying to the target requires explicit authorization.
+    pub requires_authorization: bool,
+    /// The configured migration timeout, in seconds.
+    pub timeout_seconds: Option<u64>,
+    /// The number of pending changesets, when known — always `null` from the
+    /// configuration snapshot.
+    pub pending: Option<u32>,
+    /// Whether the target is locked by another migration, when known — always
+    /// `null` from the configuration snapshot.
+    pub locked: Option<bool>,
+}
+
+impl From<&MigrationStatus> for MigrationStatusView {
+    fn from(status: &MigrationStatus) -> Self {
+        Self {
+            service_id: status.service_id.to_string(),
+            workspace_id: status.workspace_id.to_string(),
+            enabled: status.enabled,
+            provider: enum_value(&status.provider),
+            execution_mode: enum_value(&status.execution_mode),
+            environment: enum_value(&status.environment),
+            database_identity: status.database_identity.clone(),
+            requires_authorization: status.requires_authorization,
+            timeout_seconds: status.timeout_seconds,
+            pending: status.pending,
+            locked: status.locked,
+        }
+    }
+}
+
+/// One row of the Migrations table: configuration plus the latest task.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MigrationRowView {
+    /// The configuration-derived migration setup.
+    pub status: MigrationStatusView,
+    /// The most recent migration task observed for the service, when any.
+    pub latest_task: Option<TaskView>,
+}
+
+// -- workflows ----------------------------------------------------------------
+
+/// One step of a workflow, in display form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkflowStepView {
+    /// The step identifier, unique within its workflow.
+    pub id: String,
+    /// The step description, when one is configured.
+    pub description: Option<String>,
+    /// The kind of task the step performs (`migration_apply`, …).
+    pub task_kind: String,
+    /// The ids of the steps that must complete before this one.
+    pub depends_on: Vec<String>,
+}
+
+/// A workflow's declared structure, in display form.
+///
+/// Relationships come from real step ids, task kinds, and dependency edges —
+/// never from parsing task names (`tasks/021.md` §16).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkflowView {
+    /// The workflow identifier.
+    pub id: String,
+    /// The workflow kind label (`prepare_environment`, …).
+    pub kind: String,
+    /// The declared steps, in order.
+    pub steps: Vec<WorkflowStepView>,
+}
+
+impl From<&Workflow> for WorkflowView {
+    fn from(workflow: &Workflow) -> Self {
+        Self {
+            id: workflow.id.to_string(),
+            kind: workflow.kind.label().to_owned(),
+            steps: workflow
+                .steps
+                .iter()
+                .map(|step| WorkflowStepView {
+                    id: step.id.to_string(),
+                    description: step.description.clone(),
+                    task_kind: step.task.label().to_owned(),
+                    depends_on: step.depends_on.iter().map(ToString::to_string).collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+// -- health -------------------------------------------------------------------
+
+/// One row of the Health table: runtime state plus last observed health.
+///
+/// Runtime state and health state are deliberately kept distinct: a `running`
+/// process may be `unhealthy`, and a starting process is `checking`
+/// (`tasks/021.md` §17, §18).
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HealthRowView {
+    /// The service identifier.
+    pub service_id: String,
+    /// The human-readable service name.
+    pub display_name: String,
+    /// The workspace that owns the service.
+    pub workspace_id: String,
+    /// The last observed process state (snake_case).
+    pub process_state: String,
+    /// The last observed aggregated health state (snake_case).
+    pub health_state: String,
+    /// When the service was last checked, seconds since the Unix epoch.
+    pub checked_at: Option<i64>,
+    /// When the service was last observed healthy.
+    pub last_healthy_at: Option<i64>,
+    /// When the service was last observed unhealthy.
+    pub last_unhealthy_at: Option<i64>,
+    /// How many consecutive observations have failed.
+    pub consecutive_failures: u32,
+    /// The latest process-liveness check outcome, when one was observed.
+    pub process_check: Option<HealthOutcomeView>,
+    /// The latest TCP/port reachability check outcome, when one was observed.
+    pub tcp_check: Option<HealthOutcomeView>,
+    /// The latest HTTP (or actuator) readiness check outcome, when observed.
+    pub http_check: Option<HealthOutcomeView>,
+}
+
+impl HealthRowView {
+    /// Builds a row from the observed service status and health index entry.
+    ///
+    /// A service that has never been checked gets an explicit `unknown` health
+    /// state rather than an invented one (`tasks/021.md` §22).
+    #[must_use]
+    pub fn new(status: &ServiceStatus, health: &ServiceHealth) -> Self {
+        let check = |kind: &str| {
+            health
+                .checks
+                .iter()
+                .find(|outcome| outcome.check_type == kind)
+                .map(HealthOutcomeView::from)
+        };
+        Self {
+            service_id: status.service_id.to_string(),
+            display_name: status.display_name.clone(),
+            workspace_id: status.workspace_id.to_string(),
+            process_state: enum_value(&status.process_state),
+            health_state: enum_value(&health.state),
+            checked_at: health.checked_at.map(timestamp_seconds),
+            last_healthy_at: health.last_healthy_at.map(timestamp_seconds),
+            last_unhealthy_at: health.last_unhealthy_at.map(timestamp_seconds),
+            consecutive_failures: health.consecutive_failures,
+            process_check: check("process"),
+            tcp_check: check("tcp"),
+            http_check: check("http"),
+        }
+    }
+}
+
+/// The detailed health view of one service.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct HealthDetailView {
+    /// The dashboard row this detail expands.
+    pub row: HealthRowView,
+    /// The latest outcome of every configured check, with duration and reason.
+    pub checks: Vec<HealthOutcomeView>,
+    /// Whether the service is currently tracked as a managed process.
+    pub managed: bool,
+    /// The operating-system process id, while the process is alive.
+    pub pid: Option<u32>,
+    /// The ports the service declares.
+    pub ports: Vec<u16>,
+    /// The most recent structured failure, when one was observed.
+    pub last_failure: Option<DiagnosticFailureView>,
+    /// The most recent error-level log lines for the service, oldest first.
+    pub recent_errors: Vec<String>,
+}
+
+// -- realtime log streaming ---------------------------------------------------
+
+/// A realtime log-stream event pushed to the frontend.
+///
+/// The `kind` discriminates: `entry` carries a log line, `lagged` reports
+/// entries the daemon dropped for this subscriber, and `closed` ends the
+/// stream. A lagging stream is reported honestly rather than silently
+/// shrinking (`tasks/021.md` §28).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct LogStreamEvent {
+    /// The frontend-generated subscription id this event belongs to.
+    pub subscription_id: String,
+    /// The service whose stream produced the event.
+    pub service_id: String,
+    /// `entry`, `lagged`, or `closed`.
+    pub kind: String,
+    /// The log entry, for `entry` events.
+    pub entry: Option<LogEntryView>,
+    /// How many entries the daemon dropped, for `lagged` events.
+    pub dropped: Option<u64>,
+    /// A short, human-readable explanation for `lagged` and `closed` events.
+    pub message: Option<String>,
+}
+
+impl LogStreamEvent {
+    /// Creates an `entry` event for one subscription.
+    #[must_use]
+    pub fn entry(subscription_id: &str, service_id: &str, entry: &LogEntry) -> Self {
+        Self {
+            subscription_id: subscription_id.to_owned(),
+            service_id: service_id.to_owned(),
+            kind: "entry".to_owned(),
+            entry: Some(LogEntryView::from(entry)),
+            dropped: None,
+            message: None,
+        }
+    }
+
+    /// Creates a `lagged` event reporting dropped entries.
+    #[must_use]
+    pub fn lagged(subscription_id: &str, service_id: &str, dropped: u64) -> Self {
+        Self {
+            subscription_id: subscription_id.to_owned(),
+            service_id: service_id.to_owned(),
+            kind: "lagged".to_owned(),
+            entry: None,
+            dropped: Some(dropped),
+            message: Some(format!(
+                "the log stream fell behind; {dropped} entries were dropped and this view may be incomplete"
+            )),
+        }
+    }
+
+    /// Creates a `closed` event ending a subscription's stream.
+    #[must_use]
+    pub fn closed(subscription_id: &str, service_id: &str, message: &str) -> Self {
+        Self {
+            subscription_id: subscription_id.to_owned(),
+            service_id: service_id.to_owned(),
+            kind: "closed".to_owned(),
+            entry: None,
+            dropped: None,
+            message: Some(message.to_owned()),
         }
     }
 }

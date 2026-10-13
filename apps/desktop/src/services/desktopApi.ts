@@ -12,9 +12,14 @@ import type {
   GitStatusView,
   GitSyncMode,
   GitSyncPreview,
+  HealthDetailView,
+  HealthRowView,
   LibraryDependentView,
   LibrarySummary,
   LogPageView,
+  LogStreamEvent,
+  MigrationRowView,
+  MigrationStatusView,
   OperationOutcome,
   RepositoryInspectionView,
   RepositorySummary,
@@ -25,8 +30,14 @@ import type {
   WorkflowCancellationView,
   WorkspaceStatus,
   WorkspaceSummary,
+  WorkflowView,
 } from '../types/models';
-import { DAEMON_CONNECTION_EVENT, TASK_EVENT, type TaskEvent } from '../types/models';
+import {
+  DAEMON_CONNECTION_EVENT,
+  LOG_EVENT,
+  TASK_EVENT,
+  type TaskEvent,
+} from '../types/models';
 import { toDesktopError } from './errors';
 
 /** The options for the prepare-library workflows. */
@@ -50,6 +61,29 @@ export interface TaskLogsQuery {
   minimumLevel?: string;
   /** Only return entries whose message contains this text. */
   text?: string;
+}
+
+/**
+ * A bounded, filterable request for the unified Logs screen.
+ *
+ * The scope is hierarchical: `taskId` selects that task's logs, otherwise
+ * `serviceId` selects that service's logs, otherwise the workspace-wide
+ * application log is queried (`tasks/021.md` §23).
+ */
+export interface LogsQuery {
+  taskId?: string;
+  serviceId?: string;
+  workspaceId?: string;
+  /** Only return entries from this source (`process`, `task`, `build`, …). */
+  source?: string;
+  /** Only return entries at or above this severity. */
+  minimumLevel?: string;
+  /** Only return entries whose message contains this text. */
+  text?: string;
+  /** Return entries after this sequence cursor (follow mode). */
+  after?: number;
+  /** The maximum number of entries to return (the daemon clamps it). */
+  limit?: number;
 }
 
 /**
@@ -168,12 +202,56 @@ export interface OrchestratorDesktopApi {
   cancelTask(taskId: string): Promise<TaskView>;
   /** Requests cancellation of every active task in a workflow. */
   cancelWorkflow(workflowId: string): Promise<WorkflowCancellationView>;
+  /** Active tasks plus a bounded slice of recent history, newest first. */
+  listTasks(limit?: number): Promise<TaskView[]>;
+  /** One workflow's declared steps and dependency edges. */
+  getWorkflow(workflowId: string): Promise<WorkflowView>;
+  /** A workspace's migration-enabled services with their latest task. */
+  listMigrations(workspaceId: string): Promise<MigrationRowView[]>;
+  /** One service's configuration-derived migration snapshot. */
+  getMigrationStatus(serviceId: string): Promise<MigrationStatusView>;
+  /** Schedules a migration-configuration validation task. */
+  validateMigration(serviceId: string): Promise<OperationOutcome>;
+  /** Schedules a migration-status inspection task. */
+  inspectMigrationStatus(serviceId: string): Promise<OperationOutcome>;
+  /** Schedules a pending-changeset inspection task. */
+  inspectMigrationPending(serviceId: string): Promise<OperationOutcome>;
+  /** Schedules a read-only SQL preview task. */
+  previewMigration(serviceId: string): Promise<OperationOutcome>;
+  /**
+   * Applies one service's migrations.
+   *
+   * `confirmed` is the user's explicit confirmation; the daemon independently
+   * verifies the client kind and peer identity, and its policy decision is
+   * final (`tasks/021.md` §8).
+   */
+  applyMigration(serviceId: string, confirmed: boolean): Promise<OperationOutcome>;
+  /** Applies the selected services' migrations as one coordinated workflow. */
+  applySelectedMigrations(
+    workspaceId: string,
+    serviceIds: string[],
+    confirmed: boolean,
+  ): Promise<OperationOutcome>;
+  /** A workspace's services with observed runtime and health state. */
+  listHealth(workspaceId: string): Promise<HealthRowView[]>;
+  /** One service's detailed health view, validated against its workspace. */
+  getHealth(workspaceId: string, serviceId: string): Promise<HealthDetailView>;
+  /** Runs only the required readiness checks for one service. */
+  checkServiceReadiness(serviceId: string): Promise<OperationOutcome>;
+  /** One bounded, cursor-paginated unified log query. */
+  getLogs(query?: LogsQuery): Promise<LogPageView>;
+  /** Attaches a realtime subscription to a service's log stream. */
+  subscribeServiceLogs(subscriptionId: string, serviceId: string): Promise<void>;
+  /** Detaches a realtime subscription; unknown ids are ignored. */
+  unsubscribeServiceLogs(subscriptionId: string): Promise<void>;
   /** The adapter's current daemon connection state. */
   getConnectionState(): Promise<ConnectionSnapshot>;
   /** Subscribes to daemon connection changes; resolves to an unsubscriber. */
   onConnectionChanged(handler: (snapshot: ConnectionSnapshot) => void): Promise<UnlistenFn>;
   /** Subscribes to forwarded task-engine events; resolves to an unsubscriber. */
   onTaskEvent(handler: (event: TaskEvent) => void): Promise<UnlistenFn>;
+  /** Subscribes to realtime log-stream events; resolves to an unsubscriber. */
+  onLogEvent(handler: (event: LogStreamEvent) => void): Promise<UnlistenFn>;
 }
 
 /** Invokes a Tauri command, normalizing rejections into `DesktopError`. */
@@ -281,8 +359,51 @@ export const desktopApi: OrchestratorDesktopApi = {
   cancelTask: (taskId) => call<TaskView>('cancel_task', { taskId }),
   cancelWorkflow: (workflowId) =>
     call<WorkflowCancellationView>('cancel_workflow', { workflowId }),
+  listTasks: (limit) => call<TaskView[]>('list_tasks', { limit }),
+  getWorkflow: (workflowId) => call<WorkflowView>('get_workflow', { workflowId }),
+  listMigrations: (workspaceId) =>
+    call<MigrationRowView[]>('list_migrations', { workspaceId }),
+  getMigrationStatus: (serviceId) =>
+    call<MigrationStatusView>('get_migration_status', { serviceId }),
+  validateMigration: (serviceId) =>
+    call<OperationOutcome>('validate_migration', { serviceId }),
+  inspectMigrationStatus: (serviceId) =>
+    call<OperationOutcome>('inspect_migration_status', { serviceId }),
+  inspectMigrationPending: (serviceId) =>
+    call<OperationOutcome>('inspect_migration_pending', { serviceId }),
+  previewMigration: (serviceId) =>
+    call<OperationOutcome>('preview_migration', { serviceId }),
+  applyMigration: (serviceId, confirmed) =>
+    call<OperationOutcome>('apply_migration', { serviceId, confirmed }),
+  applySelectedMigrations: (workspaceId, serviceIds, confirmed) =>
+    call<OperationOutcome>('apply_selected_migrations', {
+      workspaceId,
+      serviceIds,
+      confirmed,
+    }),
+  listHealth: (workspaceId) => call<HealthRowView[]>('list_health', { workspaceId }),
+  getHealth: (workspaceId, serviceId) =>
+    call<HealthDetailView>('get_health', { workspaceId, serviceId }),
+  checkServiceReadiness: (serviceId) =>
+    call<OperationOutcome>('check_service_readiness', { serviceId }),
+  getLogs: (query = {}) =>
+    call<LogPageView>('get_logs', {
+      taskId: query.taskId,
+      serviceId: query.serviceId,
+      workspaceId: query.workspaceId,
+      source: query.source,
+      minimumLevel: query.minimumLevel,
+      text: query.text,
+      after: query.after,
+      limit: query.limit,
+    }),
+  subscribeServiceLogs: (subscriptionId, serviceId) =>
+    call<void>('subscribe_service_logs', { subscriptionId, serviceId }),
+  unsubscribeServiceLogs: (subscriptionId) =>
+    call<void>('unsubscribe_service_logs', { subscriptionId }),
   getConnectionState: () => call<ConnectionSnapshot>('get_connection_state'),
   onConnectionChanged: (handler) =>
     subscribe<ConnectionSnapshot>(DAEMON_CONNECTION_EVENT, handler),
   onTaskEvent: (handler) => subscribe<TaskEvent>(TASK_EVENT, handler),
+  onLogEvent: (handler) => subscribe<LogStreamEvent>(LOG_EVENT, handler),
 };

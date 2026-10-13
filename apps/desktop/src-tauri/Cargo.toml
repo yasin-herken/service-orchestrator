@@ -35,6 +35,11 @@ tokio = { version = "1", features = ["rt", "rt-multi-thread", "time", "macros", 
 [dev-dependencies]
 # The adapter integration tests talk to a real daemon over the real socket.
 service-orchestrator-daemon = { path = "../../../crates/daemon" }
+# The integration harness wires the real log hub and the real health index, so
+# task logs, service log subscriptions, and health observations behave exactly
+# as they do in production (`tasks/021.md` §42).
+service-orchestrator-health = { path = "../../../crates/health" }
+service-orchestrator-logging = { path = "../../../crates/logging" }
 # A test-only executor implementation needs the same object-safe async-trait
 # shim the production executors use.
 async-trait = "0.1"

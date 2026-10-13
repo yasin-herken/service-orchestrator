@@ -25,7 +25,11 @@ pub mod dto;
 mod error;
 mod events;
 pub mod git;
+pub mod health;
 pub mod library;
+pub mod log_fanout;
+pub mod logs;
+pub mod migration;
 pub mod mutations;
 pub mod queries;
 mod state;
@@ -135,6 +139,22 @@ pub fn run() {
             commands::get_task_logs,
             commands::cancel_task,
             commands::cancel_workflow,
+            commands::list_tasks,
+            commands::get_workflow,
+            commands::list_migrations,
+            commands::get_migration_status,
+            commands::validate_migration,
+            commands::inspect_migration_status,
+            commands::inspect_migration_pending,
+            commands::preview_migration,
+            commands::apply_migration,
+            commands::apply_selected_migrations,
+            commands::list_health,
+            commands::get_health,
+            commands::check_service_readiness,
+            commands::get_logs,
+            commands::subscribe_service_logs,
+            commands::unsubscribe_service_logs,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the desktop application")

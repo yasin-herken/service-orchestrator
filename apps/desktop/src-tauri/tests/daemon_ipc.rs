@@ -8,13 +8,16 @@
 //! adapter is mocked here: command mapping, input validation, error shaping,
 //! and the view models are exercised against the real shared core.
 //!
-//! The daemon is wired with **fake lifecycle executors** and only an in-memory
-//! runtime-state store. The fake executors update that store exactly as a real
-//! runtime/health adapter would (process → running/stopped, health → healthy),
-//! so the tests can observe `running`/`stopped` state end-to-end without ever
-//! starting an operating-system process. No Git command, Maven build,
-//! Liquibase migration, or company repository, database, credential, or host is
-//! touched.
+//! The daemon is wired with **fake task executors**, an in-memory runtime-state
+//! store, the real [`LogHub`], and the real [`HealthStore`]. The fake executors
+//! update the runtime store and the health index exactly as a real
+//! runtime/health adapter would (process → running/stopped, health → healthy,
+//! with the configured check outcomes), and the task ingestor correlates task
+//! events into the log hub, so `tasks/021.md` §42 can observe migration
+//! progress, task logs, service log subscriptions, and health changes end-to-end
+//! without ever starting an operating-system process. No Git command, Maven
+//! build, Liquibase migration, database client, or company repository,
+//! database, credential, or host is touched.
 //!
 //! # Why the tests are serialized
 //!
@@ -34,28 +37,32 @@ use async_trait::async_trait;
 use service_orchestrator_application::{
     build_parameter, parameter, Application, ArtifactInspectionError, ArtifactInspector,
     ArtifactPresence, BuildCapabilities, BuildCapabilityIndex, BulkOperationSummary,
-    DependencyVersionInspection, DiffOptions, GitError, GitManager, GitOptions, HealthState,
-    InMemoryRuntimeStateStore, NullLogService, ResolvedArtifact, ResolvedDependency,
-    ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore,
+    DependencyVersionInspection, DiffOptions, GitError, GitManager, GitOptions, HealthCheckOutcome,
+    HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogSource, ResolvedArtifact,
+    ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository, ResolvedServiceTarget,
+    RuntimeStateStore, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
 };
 use service_orchestrator_client::{
     socket_path, ClientKind, OrchestratorClient, RemoteClient, PROTOCOL_VERSION, SOCKET_ENV,
 };
-use service_orchestrator_config::load_from_str;
+use service_orchestrator_config::{load_from_str, Config};
 use service_orchestrator_daemon::{Daemon, DaemonError, DaemonOptions};
 use service_orchestrator_desktop_lib::{
     build,
-    dto::{OperationOutcome, OperationStatus},
-    git, library, mutations, queries, tasks,
+    dto::{LogEntryView, OperationOutcome, OperationStatus},
+    git, health, library, logs, migration, mutations, queries, tasks,
 };
 use service_orchestrator_domain::{
     AbsolutePath, Branch, BranchInfo, BranchKind, BuildOperation, BuildSystem, GitOperation,
-    GitOperationResult, ProcessState, RepoDiff, RepositoryLifecycle, RepositoryStatus, ServiceId,
-    Task, TaskKind, TaskStatus, Version, WorkflowId,
+    GitOperationResult, HealthCheckKind, MigrationOperation, ProcessState, RepoDiff,
+    RepositoryLifecycle, RepositoryStatus, ServiceId, Task, TaskKind, TaskStatus, Timestamp,
+    Version, WorkflowId,
 };
 use service_orchestrator_execution::{
     TaskContext, TaskEngine, TaskExecutor, TaskExecutorError, TaskOutcome,
 };
+use service_orchestrator_health::HealthStore;
+use service_orchestrator_logging::{spawn_task_ingestor, LogHub};
 
 /// The fixture configuration, shared with the daemon and MCP adapter tests.
 const FIXTURE: &str = include_str!("../../../../crates/mcp/tests/fixtures/config.toml");
@@ -65,6 +72,89 @@ static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 /// How long a test waits for the daemon to become reachable or to stop.
 const DEADLINE: Duration = Duration::from_secs(15);
+
+/// How many health observations the index retains per service.
+const HEALTH_HISTORY: usize = 8;
+
+/// Everything a test can turn when building the shared core.
+#[derive(Clone)]
+struct CoreSpec {
+    /// The configuration text the core is built from.
+    config: String,
+    /// Service ids whose lifecycle operation must fail.
+    failing_starts: BTreeSet<String>,
+    /// Entity ids whose build task must fail.
+    failing_builds: BTreeSet<String>,
+    /// Entity ids whose Git, build, or migration task blocks until cancelled.
+    blocking: BTreeSet<String>,
+}
+
+impl Default for CoreSpec {
+    fn default() -> Self {
+        Self {
+            config: FIXTURE.to_owned(),
+            failing_starts: BTreeSet::new(),
+            failing_builds: BTreeSet::new(),
+            blocking: BTreeSet::new(),
+        }
+    }
+}
+
+impl CoreSpec {
+    /// The fixture with its migration target moved to `environment`.
+    ///
+    /// Only the Liquibase database environment is rewritten, so the resulting
+    /// configuration differs exactly in the declared environment the shared
+    /// migration policy reads (`tasks/021.md` §8, §9).
+    fn with_environment(environment: &str) -> Self {
+        let config = FIXTURE.replace(
+            r#"environment = "local""#,
+            &format!(r#"environment = "{environment}""#),
+        );
+        assert_ne!(
+            config, FIXTURE,
+            "the fixture must declare a migration environment"
+        );
+        Self {
+            config,
+            ..Self::default()
+        }
+    }
+
+    /// Adds the services whose lifecycle operations must fail.
+    fn failing_starts(mut self, ids: &[&str]) -> Self {
+        self.failing_starts = ids.iter().map(|id| (*id).to_owned()).collect();
+        self
+    }
+
+    /// Adds the entities whose build tasks must fail.
+    fn failing_builds(mut self, ids: &[&str]) -> Self {
+        self.failing_builds = ids.iter().map(|id| (*id).to_owned()).collect();
+        self
+    }
+
+    /// Adds the entities whose Git, build, or migration tasks block.
+    fn blocking(mut self, ids: &[&str]) -> Self {
+        self.blocking = ids.iter().map(|id| (*id).to_owned()).collect();
+        self
+    }
+}
+
+/// The shared application core one daemon serves.
+struct Core {
+    /// The application every interface reaches over IPC.
+    application: Application,
+    /// The single authoritative task engine.
+    engine: Arc<TaskEngine>,
+    /// Test-only fake infrastructure state.
+    fakes: Arc<Mutex<FakeState>>,
+    /// The real log hub behind task logs and service subscriptions.
+    hub: Arc<LogHub>,
+    /// The real health index behind the Health screen's observations.
+    health: Arc<HealthStore>,
+    /// The task-event ingestor correlating engine events into the hub.
+    ingestor: tokio::task::JoinHandle<()>,
+}
 
 /// A daemon and the temporary directory it owns.
 struct Harness {
@@ -79,18 +169,24 @@ struct Harness {
     daemon: Option<tokio::task::JoinHandle<Result<(), DaemonError>>>,
     /// The configuration file the socket path is derived from.
     config_path: PathBuf,
+    /// The socket the daemon binds.
+    socket: PathBuf,
     /// The throwaway directory that holds the configuration, socket, and lock.
     root: PathBuf,
     /// Test-only port state shared with the fake Git manager, artifact
     /// inspector, and task executors, so a test can observe and steer what the
     /// "infrastructure" reports without any real Git, Maven, or npm execution.
     fakes: Arc<Mutex<FakeState>>,
+    /// The spec the core was built from, so a restart rebuilds the same core.
+    spec: CoreSpec,
+    /// The core the running daemon serves.
+    core: Core,
 }
 
 impl Harness {
     /// Starts an isolated daemon over a fresh temporary directory.
     fn start() -> Self {
-        Self::start_with(&[], &[], &[])
+        Self::start_with_spec(CoreSpec::default())
     }
 
     /// Starts an isolated daemon whose start executor fails for the named
@@ -102,16 +198,33 @@ impl Harness {
     /// Starts an isolated daemon with configurable fake-port behaviour.
     ///
     /// `failing_starts` fails service lifecycle operations, `failing_builds`
-    /// fails service/library build tasks, and `blocking` makes a Git or build
-    /// task on that entity wait until it is cancelled, so cancellation can be
-    /// observed without any real long-running process.
+    /// fails service/library build tasks, and `blocking` makes a Git, build, or
+    /// migration task on that entity wait until it is cancelled, so
+    /// cancellation can be observed without any real long-running process.
     fn start_with(failing_starts: &[&str], failing_builds: &[&str], blocking: &[&str]) -> Self {
+        Self::start_with_spec(
+            CoreSpec::default()
+                .failing_starts(failing_starts)
+                .failing_builds(failing_builds)
+                .blocking(blocking),
+        )
+    }
+
+    /// Starts an isolated daemon whose migration target declares `environment`,
+    /// so the destructive-authorization policy can be exercised
+    /// (`tasks/021.md` §42 items 4–5).
+    fn start_with_environment(environment: &str) -> Self {
+        Self::start_with_spec(CoreSpec::with_environment(environment))
+    }
+
+    /// Starts an isolated daemon over an explicit core specification.
+    fn start_with_spec(spec: CoreSpec) -> Self {
         let lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
 
         let root = unique_root();
         std::fs::create_dir_all(&root).expect("the temporary directory is created");
         let config_path = root.join("config.toml");
-        std::fs::write(&config_path, FIXTURE).expect("the fixture configuration is written");
+        std::fs::write(&config_path, &spec.config).expect("the configuration is written");
 
         let socket = root.join("run/daemon.sock");
         let previous_socket = std::env::var_os(SOCKET_ENV);
@@ -127,15 +240,10 @@ impl Harness {
             .enable_all()
             .build()
             .expect("a Tokio runtime is built");
-        let failing: BTreeSet<String> = failing_starts.iter().map(|id| (*id).to_owned()).collect();
-        let failing_builds: BTreeSet<String> =
-            failing_builds.iter().map(|id| (*id).to_owned()).collect();
-        let blocking: BTreeSet<String> = blocking.iter().map(|id| (*id).to_owned()).collect();
-        let (application, engine, fakes) =
-            runtime.block_on(build_core(failing, failing_builds, blocking));
+        let core = runtime.block_on(build_core(&spec));
         let daemon = Daemon::new(
-            application,
-            engine,
+            core.application.clone(),
+            Arc::clone(&core.engine),
             DaemonOptions {
                 socket_path: socket.clone(),
             },
@@ -148,20 +256,85 @@ impl Harness {
             runtime,
             daemon: Some(handle),
             config_path,
+            socket,
             root,
-            fakes,
+            fakes: Arc::clone(&core.fakes),
+            spec,
+            core,
         };
         harness.wait_ready();
         harness
     }
 
-    /// Connects a fresh client, never starting a daemon of its own.
+    /// Connects a fresh desktop (GUI) client, never starting a daemon of its
+    /// own.
     ///
     /// This is also the transport the GUI adapter uses in production when no
     /// daemon binary could be resolved: attach to what is already running.
     fn client(&self) -> RemoteClient {
-        RemoteClient::connect_existing(&self.config_path, ClientKind::Cli)
-            .expect("the daemon is reachable")
+        self.client_of(ClientKind::Desktop)
+    }
+
+    /// Connects a fresh client presenting `kind`, so one test can act as the
+    /// GUI, the TUI, and MCP against the same daemon.
+    fn client_of(&self, kind: ClientKind) -> RemoteClient {
+        RemoteClient::connect_existing(&self.config_path, kind).expect("the daemon is reachable")
+    }
+
+    /// Connects a fresh client standing in for the TUI.
+    fn tui_client(&self) -> RemoteClient {
+        self.client_of(ClientKind::Tui)
+    }
+
+    /// Connects a fresh client standing in for an MCP agent.
+    fn mcp_client(&self) -> RemoteClient {
+        self.client_of(ClientKind::Mcp)
+    }
+
+    /// Restarts the daemon over the same configuration, as a reconnecting GUI
+    /// does (`tasks/021.md` §42 item 12).
+    ///
+    /// The running daemon shuts down gracefully — releasing the socket and the
+    /// single-instance lock — its core is torn down, and a fresh core is built
+    /// from the same spec. Configuration-backed state returns; in-memory task
+    /// history, log history, and health observations do not, exactly as they do
+    /// not across a real daemon restart.
+    fn restart(&mut self) {
+        let client = RemoteClient::connect_existing(&self.config_path, ClientKind::Cli)
+            .expect("the daemon is reachable");
+        client.shutdown_daemon().expect("shutdown is accepted");
+        if let Some(handle) = self.daemon.take() {
+            let stopped = self
+                .runtime
+                .block_on(async { tokio::time::timeout(Duration::from_secs(10), handle).await });
+            assert!(
+                stopped.is_ok_and(|inner| inner.is_ok_and(|outcome| outcome.is_ok())),
+                "the daemon stopped cleanly"
+            );
+        }
+
+        // Tear down the old core: the ingestor first so no further log entry is
+        // produced, then the engine so no stale task survives into the rebuild.
+        self.core.ingestor.abort();
+        let previous = Arc::clone(&self.core.engine);
+        let _ = self.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(10), previous.shutdown()).await
+        });
+
+        let spec = self.spec.clone();
+        let core = self.runtime.block_on(build_core(&spec));
+        let daemon = Daemon::new(
+            core.application.clone(),
+            Arc::clone(&core.engine),
+            DaemonOptions {
+                socket_path: self.socket.clone(),
+            },
+        );
+        let handle = self.runtime.spawn(daemon.run());
+        self.fakes = Arc::clone(&core.fakes);
+        self.core = core;
+        self.daemon = Some(handle);
+        self.wait_ready();
     }
 
     /// Polls until the daemon accepts a connection.
@@ -739,7 +912,13 @@ fn build_targets_carry_provider_capabilities_and_builds_run() {
     );
     let logs = tasks::get_task_logs(&client, task.id.as_str(), &tasks::TaskLogsQuery::default())
         .expect("logs");
-    assert!(logs.entries.is_empty(), "the harness wires no log service");
+    assert!(!logs.entries.is_empty(), "the task ingestor recorded logs");
+    assert!(
+        logs.entries
+            .iter()
+            .any(|entry| entry.task_id.as_deref() == Some(task.id.as_str())),
+        "the entries are correlated with the task"
+    );
 
     // A single npm build is one task.
     let admin = build::build_service(&client, "admin-ui").expect("build scheduled");
@@ -1045,55 +1224,733 @@ fn git_build_and_library_inputs_are_validated() {
     assert_eq!(error.code, "INVALID_INPUT");
 }
 
-/// Builds a real application core with fake Git, artifact, build-capability,
-/// and task executors and in-memory state, so Git, build, and library tasks
-/// settle without ever touching an operating-system process, a real Git
-/// repository, a Maven/npm project, a company database, or the network
-/// (`tasks/020.md` §40).
+// -- `tasks/021.md` §42: migration, task, health, and log integration --------
+
+/// The Migration screen's read path against a real daemon: the desktop client
+/// attaches (§42 item 1), migration-enabled services are listed (item 2), the
+/// configuration snapshot is inspected (item 3), and a SQL preview runs as a
+/// task whose SQL is readable from the task's own logs (items 4, 7).
+#[test]
+fn the_desktop_client_connects_and_the_migration_screen_reads_the_shared_core() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    // Item 1: a desktop-kind client attaches to the already-running daemon.
+    let status = client.daemon_status().expect("the daemon answers");
+    assert_eq!(status.protocol_version, PROTOCOL_VERSION);
+    assert_eq!(status.socket_path, harness.socket.display().to_string());
+    assert!(status.clients >= 1);
+    assert_eq!(
+        queries::list_workspaces(&client)
+            .expect("workspaces load")
+            .len(),
+        1
+    );
+
+    // Item 2: only services with migration configuration appear, and the row
+    // reflects configuration — never an assumed database state.
+    let rows = migration::list_migrations(&client, "demo").expect("migrations load");
+    assert_eq!(rows.len(), 1, "only orders-api declares Liquibase");
+    let row = &rows[0];
+    assert_eq!(row.status.service_id, "orders-api");
+    assert_eq!(row.status.workspace_id, "demo");
+    assert!(row.status.enabled);
+    assert_eq!(row.status.provider, "liquibase");
+    assert_eq!(row.status.execution_mode, "maven");
+    assert_eq!(row.status.environment, "local");
+    assert!(
+        !row.status.requires_authorization,
+        "a local target needs no confirmation"
+    );
+    assert_eq!(row.status.pending, None, "live state is never fabricated");
+    assert_eq!(row.status.locked, None, "a lock is never assumed");
+    assert!(row.status.timeout_seconds.is_some());
+    assert!(!row.status.database_identity.is_empty());
+    assert!(row.latest_task.is_none(), "nothing has run yet");
+    assert_eq!(
+        migration::list_migrations(&client, "")
+            .expect_err("an empty workspace is invalid")
+            .code,
+        "INVALID_INPUT"
+    );
+
+    // Item 3: a service without migration configuration is an explicit error,
+    // not a silently missing row.
+    let error = migration::get_migration_status(&client, "admin-ui")
+        .expect_err("admin-ui declares no migrations");
+    assert_eq!(error.code, "InvalidOperation");
+    assert!(
+        error.message.contains("migration configuration"),
+        "{}",
+        error.message
+    );
+
+    let snapshot = migration::get_migration_status(&client, "orders-api").expect("status loads");
+    assert_eq!(snapshot.service_id, "orders-api");
+    assert_eq!(snapshot.workspace_id, "demo");
+    assert_eq!(snapshot.environment, "local");
+    assert_eq!(snapshot.pending, None);
+    assert!(
+        !snapshot.database_identity.contains("super-secret"),
+        "the database identity never carries a credential"
+    );
+
+    // Every migration operation the core defines is one task.
+    let validated = migration::validate_migration(&client, "orders-api").expect("validate runs");
+    assert_eq!(validated.status, OperationStatus::Task);
+    assert_eq!(validated.kind, "migration_validate");
+    assert_eq!(settle(&client, &validated).status, TaskStatus::Succeeded);
+
+    let inspected = migration::inspect_status(&client, "orders-api").expect("status runs");
+    assert_eq!(inspected.kind, "migration_status");
+    assert_eq!(settle(&client, &inspected).status, TaskStatus::Succeeded);
+
+    let pending = migration::inspect_pending(&client, "orders-api").expect("pending runs");
+    assert_eq!(pending.kind, "migration_pending");
+    assert_eq!(settle(&client, &pending).status, TaskStatus::Succeeded);
+
+    // Items 4 and 7: the preview is a task, and its SQL is in the task logs.
+    let preview = migration::preview(&client, "orders-api").expect("preview scheduled");
+    assert_eq!(preview.status, OperationStatus::Task);
+    assert_eq!(preview.kind, "migration_preview");
+    let preview_id = preview.task_id.clone().expect("a task id");
+    assert_eq!(settle(&client, &preview).status, TaskStatus::Succeeded);
+
+    let entries = wait_for_task_logs(&client, &preview_id, |entries| {
+        entries.iter().any(|entry| entry.source == "migration")
+    });
+    let sql = entries
+        .iter()
+        .find(|entry| entry.source == "migration")
+        .expect("the preview SQL is recorded");
+    assert!(sql.message.contains("CREATE TABLE"), "{}", sql.message);
+    assert_eq!(sql.service_id.as_deref(), Some("orders-api"));
+    assert_eq!(sql.task_id.as_deref(), Some(preview_id.as_str()));
+
+    // The listing reports the newest migration task of the service.
+    let rows = migration::list_migrations(&client, "demo").expect("migrations reload");
+    let latest = rows[0].latest_task.as_ref().expect("a latest task");
+    assert_eq!(latest.kind, "migration_preview");
+    assert_eq!(latest.service_id.as_deref(), Some("orders-api"));
+    assert_eq!(latest.workspace_id.as_deref(), Some("demo"));
+}
+
+/// Applying migrations is authorized by the daemon, never by the frontend
+/// (`tasks/021.md` §8, §9, §39; §42 item 5 of the harness contract: no real
+/// database is touched, so the authorization boundary itself is asserted).
+#[test]
+fn migration_apply_honors_only_the_daemon_verified_confirmation() {
+    let harness = Harness::start_with_environment("staging");
+    let gui = harness.client();
+    let mcp = harness.mcp_client();
+    let cli = harness.client_of(ClientKind::Cli);
+
+    // The declared environment is what the shared policy reads.
+    let status = migration::get_migration_status(&gui, "orders-api").expect("status loads");
+    assert_eq!(status.environment, "staging");
+    assert!(status.requires_authorization);
+
+    // An unconfirmed request is refused with an actionable explanation.
+    let error = migration::apply(&gui, "orders-api", false).expect_err("not confirmed");
+    assert_eq!(error.code, "PermissionDenied");
+    assert!(
+        error.message.contains("explicit confirmation"),
+        "{}",
+        error.message
+    );
+
+    // A non-interactive interface can never self-confirm, however it asks.
+    let error = migration::apply(&mcp, "orders-api", true).expect_err("MCP is not interactive");
+    assert_eq!(error.code, "PermissionDenied");
+    let error = migration::apply(&cli, "orders-api", true).expect_err("CLI is not interactive");
+    assert_eq!(error.code, "PermissionDenied");
+
+    // Bulk migration runs only through the coordinated backend workflow, and
+    // only when the same policy has authorized it.
+    let selection = vec!["orders-api".to_owned(), "admin-ui".to_owned()];
+    let error =
+        migration::apply_selected(&gui, "demo", &selection, false).expect_err("not confirmed");
+    assert_eq!(error.code, "PermissionDenied");
+
+    // The desktop's confirmation is honored for this same-user interactive peer
+    // — the daemon decided that, not the frontend.
+    let applied = migration::apply(&gui, "orders-api", true).expect("the confirmed apply runs");
+    assert_eq!(applied.status, OperationStatus::Task);
+    assert_eq!(applied.kind, "migration_apply");
+    assert_eq!(settle(&gui, &applied).status, TaskStatus::Succeeded);
+
+    let bulk = migration::apply_selected(&gui, "demo", &selection, true).expect("bulk apply");
+    assert_eq!(bulk.status, OperationStatus::Workflow);
+    assert_eq!(bulk.kind, "apply_migrations");
+    let summary = wait_for_workflow(&gui, &workflow_of(&bulk));
+    assert_eq!(
+        summary.total, 1,
+        "admin-ui declares no migrations and is skipped"
+    );
+    assert_eq!(summary.succeeded, 1);
+
+    // Exactly two applies reached the migration executor; every refused request
+    // scheduled nothing at all.
+    let state = harness
+        .fakes
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let applies = state
+        .recorded
+        .iter()
+        .filter(|entry| entry.starts_with("apply "))
+        .count();
+    assert_eq!(applies, 2, "{:?}", state.recorded);
+}
+
+/// Migration progress, logs, and cancellation are reported honestly
+/// (`tasks/021.md` §6, §7, §14; §42 items 6, 7, 9).
+#[test]
+fn migration_progress_logs_and_cancellation_are_reported_honestly() {
+    let harness = Harness::start_with(&[], &[], &["orders-api"]);
+    let client = harness.client();
+
+    // A local target needs no confirmation, so this apply is scheduled at all.
+    let outcome = migration::apply(&client, "orders-api", false).expect("the apply is scheduled");
+    assert_eq!(outcome.kind, "migration_apply");
+    let task_id = outcome.task_id.clone().expect("a task id");
+
+    // Item 6: progress is observable while the migration runs.
+    let deadline = Instant::now() + DEADLINE;
+    let running_message = loop {
+        let task = tasks::get_task(&client, &task_id).expect("the task loads");
+        assert!(
+            !matches!(task.status.as_str(), "succeeded" | "failed" | "cancelled"),
+            "the blocked migration settled early ({})",
+            task.status
+        );
+        if task.status == "running" {
+            if let Some(message) = task.progress.message.clone() {
+                break message;
+            }
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no running progress was ever observed"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    assert!(running_message.contains("orders-api"), "{running_message}");
+
+    // Item 7: the migration's own log lines are readable while it runs, and
+    // every line is correlated with the task.
+    let during = wait_for_task_logs(&client, &task_id, |entries| {
+        entries
+            .iter()
+            .any(|entry| entry.message.contains("is running"))
+    });
+    assert!(during
+        .iter()
+        .all(|entry| entry.task_id.as_deref() == Some(task_id.as_str())));
+
+    // Item 9: cancellation settles the task, and nothing claims a rollback.
+    let cancelled = tasks::cancel_task(&client, &task_id).expect("cancel is accepted");
+    assert_eq!(cancelled.kind, "migration_apply");
+    let settled = wait_for_task(&client, &task_id);
+    assert_eq!(settled.status, TaskStatus::Cancelled);
+    {
+        let state = harness
+            .fakes
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        assert!(
+            !state
+                .recorded
+                .iter()
+                .any(|entry| entry == "apply orders-api"),
+            "a cancelled apply never reports an applied migration"
+        );
+    }
+    let after = wait_for_task_logs(&client, &task_id, |entries| {
+        entries
+            .iter()
+            .any(|entry| entry.message.contains("cancelled"))
+    });
+    assert!(!after.is_empty());
+}
+
+/// The Tasks screen reads active and completed tasks from one bounded,
+/// newest-first, workspace-scoped query (`tasks/021.md` §10, §12, §15, §38;
+/// §42 item 8).
+#[test]
+fn task_listing_is_bounded_newest_first_and_workspace_scoped() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    // A fresh daemon has no history to show.
+    assert!(tasks::list_tasks(&client, None)
+        .expect("an empty list")
+        .is_empty());
+
+    let first = build::build_service(&client, "orders-api").expect("build scheduled");
+    assert_eq!(settle(&client, &first).status, TaskStatus::Succeeded);
+    let second = build::build_service(&client, "admin-ui").expect("build scheduled");
+    assert_eq!(settle(&client, &second).status, TaskStatus::Succeeded);
+    let third = library::build_library(&client, "shared-kit").expect("build scheduled");
+    assert_eq!(settle(&client, &third).status, TaskStatus::Succeeded);
+
+    let all = tasks::list_tasks(&client, None).expect("tasks load");
+    assert_eq!(all.len(), 3, "one row per observed task");
+    let expected: BTreeSet<String> = [first, second, third]
+        .map(|outcome| outcome.task_id.expect("a task id"))
+        .into_iter()
+        .collect();
+    let actual: BTreeSet<String> = all.iter().map(|row| row.id.clone()).collect();
+    assert_eq!(actual, expected);
+
+    // Newest first, with the documented tie-break on the id.
+    for pair in all.windows(2) {
+        assert!(
+            pair[0].created_at > pair[1].created_at
+                || (pair[0].created_at == pair[1].created_at && pair[0].id >= pair[1].id),
+            "rows are newest first"
+        );
+    }
+
+    // Every row resolves its owning workspace from configuration.
+    assert!(all
+        .iter()
+        .all(|row| row.workspace_id.as_deref() == Some("demo")));
+    assert!(all.iter().all(|row| row.finished_at.is_some()));
+
+    // The limit bounds the recent slice, and the hard cap is enforced.
+    let limited = tasks::list_tasks(&client, Some(2)).expect("bounded");
+    assert_eq!(limited.len(), 2);
+    let single = tasks::list_tasks(&client, Some(1)).expect("bounded");
+    assert_eq!(single.len(), 1);
+    let capped = tasks::list_tasks(&client, Some(usize::MAX)).expect("clamped");
+    assert_eq!(capped.len(), 3, "the cap never exceeds the retention");
+}
+
+/// The Health screen reflects real observations, keeps health distinct from
+/// process state, and never invents a check
+/// (`tasks/021.md` §17–§22; §42 item 10).
+#[test]
+fn health_observations_are_reflected_and_stay_distinct_from_process_state() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    // Nothing has been checked yet: explicitly unknown, no fabricated checks.
+    let rows = health::list_health(&client, "demo").expect("health loads");
+    assert_eq!(rows.len(), 2);
+    let orders = rows
+        .iter()
+        .find(|row| row.service_id == "orders-api")
+        .expect("orders-api is listed");
+    assert_eq!(orders.health_state, "unknown");
+    assert!(orders.checked_at.is_none());
+    assert!(orders.process_check.is_none());
+    assert!(orders.tcp_check.is_none());
+    assert!(orders.http_check.is_none());
+    assert_eq!(orders.process_state, "not_running");
+
+    // A health check is exactly one task that refreshes the observation.
+    let outcome = mutations::check_service_health(&client, "orders-api").expect("check scheduled");
+    assert_eq!(outcome.status, OperationStatus::Task);
+    assert_eq!(settle(&client, &outcome).status, TaskStatus::Succeeded);
+
+    let detail = health::get_health(&client, "orders-api", "demo").expect("detail loads");
+    assert_eq!(detail.row.health_state, "healthy");
+    assert!(detail.row.checked_at.is_some());
+    assert_eq!(detail.checks.len(), 1, "the configured http check");
+    let check = &detail.checks[0];
+    assert_eq!(check.check_type, "http");
+    assert_eq!(check.state, "healthy");
+    assert!(check.required);
+    assert_eq!(
+        check.target.as_deref(),
+        Some("http://localhost:8081/actuator/health")
+    );
+    assert!(detail.last_failure.is_none());
+
+    // Each service reports its own configured probe type.
+    let outcome = mutations::check_service_health(&client, "admin-ui").expect("check scheduled");
+    assert_eq!(settle(&client, &outcome).status, TaskStatus::Succeeded);
+    let admin = health::get_health(&client, "admin-ui", "demo").expect("detail loads");
+    assert_eq!(admin.checks.len(), 1);
+    assert_eq!(admin.checks[0].check_type, "tcp");
+    assert_eq!(admin.checks[0].target.as_deref(), Some("localhost:3000"));
+
+    // Process state and health remain distinct states (§18): a stopped process
+    // does not rewrite the last observation.
+    let started = mutations::start_service(&client, "orders-api").expect("start scheduled");
+    assert_eq!(settle(&client, &started).status, TaskStatus::Succeeded);
+    wait_for_process_state(&client, "orders-api", ProcessState::Running);
+    let stopped = mutations::stop_service(&client, "orders-api").expect("stop scheduled");
+    assert_eq!(settle(&client, &stopped).status, TaskStatus::Succeeded);
+    wait_for_process_state(&client, "orders-api", ProcessState::Stopped);
+
+    let detail = health::get_health(&client, "orders-api", "demo").expect("detail reloads");
+    assert_eq!(detail.row.process_state, "stopped");
+    assert_eq!(
+        detail.row.health_state, "healthy",
+        "the last observation is reported, not invented"
+    );
+
+    // The health index is the real store, and its history is bounded.
+    let service = ServiceId::new("orders-api").expect("a valid service id");
+    let retained = harness.core.health.history_len(&service);
+    assert!(retained >= 1, "the observation was published");
+    assert!(
+        retained <= HEALTH_HISTORY,
+        "health history stays bounded, got {retained}"
+    );
+
+    // A detail view may never cross a workspace boundary.
+    let error = health::get_health(&client, "orders-api", "other-workspace")
+        .expect_err("the service belongs to another workspace");
+    assert_eq!(error.code, "NOT_FOUND");
+}
+
+/// Realtime subscriptions and historical queries answer from one bounded log
+/// store, and secrets are scrubbed before storage — not by the GUI
+/// (`tasks/021.md` §23–§29, §39; §42 item 11).
+#[test]
+fn realtime_and_historical_logs_are_served_from_one_bounded_store() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    // Subscribe before producing anything, exactly as the Logs screen does.
+    let service_id = ServiceId::new("orders-api").expect("a valid service id");
+    let mut subscription = client
+        .subscribe_service_logs(&service_id)
+        .expect("the subscription is accepted");
+
+    let preview = migration::preview(&client, "orders-api").expect("preview scheduled");
+    let task_id = preview.task_id.clone().expect("a task id");
+    assert_eq!(settle(&client, &preview).status, TaskStatus::Succeeded);
+
+    // Item 11: the realtime stream delivers the correlated entry as it is
+    // recorded; task lifecycle lines may arrive first, so follow until the SQL.
+    let mut streamed_sql = None;
+    let deadline = Instant::now() + DEADLINE;
+    while Instant::now() < deadline && streamed_sql.is_none() {
+        let received = harness.runtime.block_on(async {
+            tokio::time::timeout(Duration::from_secs(5), subscription.recv()).await
+        });
+        match received {
+            Ok(Ok(entry)) if entry.message.contains("CREATE TABLE") => {
+                streamed_sql = Some(entry);
+            }
+            Ok(Ok(_)) => {}
+            _ => break,
+        }
+    }
+    let streamed = streamed_sql.expect("the preview SQL reached the subscriber");
+    assert_eq!(streamed.service_id, Some(service_id.clone()));
+    assert_eq!(
+        streamed.task_id.as_ref().map(ToString::to_string),
+        Some(task_id.clone())
+    );
+    assert_eq!(streamed.source, LogSource::Migration);
+
+    // Dropping the subscription unsubscribes (§34 cleanup).
+    drop(subscription);
+
+    // Task scope answers the task's own page, oldest first.
+    let task_logs = logs::get_logs(
+        &client,
+        &logs::LogQuery {
+            task_id: Some(task_id.clone()),
+            ..logs::LogQuery::default()
+        },
+    )
+    .expect("task logs");
+    assert!(!task_logs.entries.is_empty());
+    assert!(task_logs
+        .entries
+        .iter()
+        .all(|entry| entry.task_id.as_deref() == Some(task_id.as_str())));
+
+    // Service scope answers the service's page and pages forward by cursor.
+    let service_logs = logs::get_logs(
+        &client,
+        &logs::LogQuery {
+            service_id: Some("orders-api".to_owned()),
+            limit: Some(1),
+            ..logs::LogQuery::default()
+        },
+    )
+    .expect("service logs");
+    assert_eq!(service_logs.entries.len(), 1);
+    assert!(service_logs.truncated, "the service has more than one line");
+    let cursor = service_logs.next_cursor.expect("a continuation cursor");
+    let next = logs::get_logs(
+        &client,
+        &logs::LogQuery {
+            service_id: Some("orders-api".to_owned()),
+            limit: Some(1),
+            after: Some(cursor),
+            ..logs::LogQuery::default()
+        },
+    )
+    .expect("the next page");
+    assert_eq!(next.entries.len(), 1);
+    assert!(
+        next.entries[0].sequence > cursor,
+        "the cursor pages strictly forward"
+    );
+
+    // Workspace scope is bounded, oldest-first, and honest about truncation.
+    let page = logs::get_logs(
+        &client,
+        &logs::LogQuery {
+            workspace_id: Some("demo".to_owned()),
+            limit: Some(3),
+            ..logs::LogQuery::default()
+        },
+    )
+    .expect("workspace logs");
+    assert_eq!(page.entries.len(), 3);
+    assert!(page.truncated, "more entries exist than the limit allows");
+    let cursor = page.next_cursor.expect("a continuation cursor");
+    assert_eq!(
+        cursor,
+        page.entries.last().expect("entries").sequence,
+        "the cursor is the newest returned sequence"
+    );
+    for pair in page.entries.windows(2) {
+        assert!(pair[0].sequence < pair[1].sequence, "oldest first");
+    }
+
+    // Severity filtering and the hard limit are enforced by the store.
+    let capped = logs::get_logs(
+        &client,
+        &logs::LogQuery {
+            limit: Some(usize::MAX),
+            ..logs::LogQuery::default()
+        },
+    )
+    .expect("logs");
+    assert!(capped.entries.len() <= 1_000);
+    let errors = logs::get_logs(
+        &client,
+        &logs::LogQuery {
+            minimum_level: Some("error".to_owned()),
+            limit: Some(50),
+            ..logs::LogQuery::default()
+        },
+    )
+    .expect("error logs");
+    assert!(errors
+        .entries
+        .iter()
+        .all(|entry| entry.level == "error" || entry.level == "fatal"));
+
+    // §39: a secret recorded anywhere is scrubbed by the store before any
+    // interface can read it — redaction is never a frontend concern.
+    harness.core.hub.record(
+        LogEntry::new(
+            LogLevel::Error,
+            "connection failed: DB_PASSWORD=super-secret-value",
+        )
+        .with_service(ServiceId::new("orders-api").expect("a valid service id")),
+    );
+    let observed = logs::get_logs(
+        &client,
+        &logs::LogQuery {
+            limit: Some(1_000),
+            ..logs::LogQuery::default()
+        },
+    )
+    .expect("logs");
+    assert!(observed
+        .entries
+        .iter()
+        .any(|entry| entry.message.contains("DB_PASSWORD=***")));
+    assert!(observed
+        .entries
+        .iter()
+        .all(|entry| !entry.message.contains("super-secret-value")));
+}
+
+/// A restarted daemon restores configuration-backed state while in-memory
+/// history stays gone — no stale task or health claim is replayed
+/// (`tasks/021.md` §35, §36; §42 item 12).
+#[test]
+fn a_daemon_restart_restores_configuration_backed_state() {
+    let mut harness = Harness::start();
+    let client = harness.client();
+
+    // Produce the in-memory history a restart must not replay.
+    let built = build::build_service(&client, "orders-api").expect("build scheduled");
+    assert_eq!(settle(&client, &built).status, TaskStatus::Succeeded);
+    let checked = mutations::check_service_health(&client, "orders-api").expect("check scheduled");
+    assert_eq!(settle(&client, &checked).status, TaskStatus::Succeeded);
+    assert!(!tasks::list_tasks(&client, None)
+        .expect("task history")
+        .is_empty());
+    assert!(health::list_health(&client, "demo")
+        .expect("health")
+        .iter()
+        .any(|row| row.health_state == "healthy"));
+
+    harness.restart();
+
+    // A fresh client reattaches; configuration-backed state is restored.
+    let client = harness.client();
+    let workspaces = queries::list_workspaces(&client).expect("workspaces return");
+    assert_eq!(workspaces.len(), 1);
+    let services = queries::list_services(&client, "demo").expect("services return");
+    assert_eq!(services.len(), 2);
+    let migrations = migration::list_migrations(&client, "demo").expect("migration rows return");
+    assert_eq!(migrations.len(), 1);
+    assert!(
+        migrations[0].latest_task.is_none(),
+        "no stale task is replayed"
+    );
+
+    // In-memory history does not come back, and nothing is invented for it.
+    assert!(tasks::list_tasks(&client, None)
+        .expect("fresh task history")
+        .is_empty());
+    let health_rows = health::list_health(&client, "demo").expect("fresh health");
+    assert!(health_rows
+        .iter()
+        .all(|row| row.health_state == "unknown" && row.checked_at.is_none()));
+
+    // The restarted daemon serves new work normally.
+    let rebuilt = build::build_service(&client, "admin-ui").expect("build scheduled");
+    assert_eq!(settle(&client, &rebuilt).status, TaskStatus::Succeeded);
+}
+
+/// The GUI, the TUI, and MCP observe one authoritative daemon for tasks, health,
+/// cancellation, and logs (`tasks/021.md` §43).
+#[test]
+fn gui_tui_and_mcp_observe_the_same_authoritative_state() {
+    let harness = Harness::start_with(&[], &[], &["admin-ui"]);
+    let gui = harness.client();
+    let tui = harness.tui_client();
+    let mcp = harness.mcp_client();
+
+    // GUI migration task → the TUI observes the same task.
+    let preview = migration::preview(&gui, "orders-api").expect("preview scheduled");
+    let task_id = preview.task_id.clone().expect("a task id");
+    assert_eq!(settle(&gui, &preview).status, TaskStatus::Succeeded);
+    let observed = tasks::get_task(&tui, &task_id).expect("the TUI sees the task");
+    assert_eq!(observed.kind, "migration_preview");
+    assert_eq!(observed.status, "succeeded");
+
+    // MCP task submission → the GUI observes the same task.
+    let built = build::build_service(&mcp, "orders-api").expect("build scheduled");
+    let build_id = built.task_id.clone().expect("a task id");
+    assert_eq!(settle(&mcp, &built).status, TaskStatus::Succeeded);
+    let listed = tasks::list_tasks(&gui, None).expect("tasks load");
+    assert!(listed.iter().any(|row| row.id == build_id));
+
+    // TUI service startup → the GUI's health view updates.
+    let started = mutations::start_service(&tui, "orders-api").expect("start scheduled");
+    assert_eq!(settle(&tui, &started).status, TaskStatus::Succeeded);
+    wait_for_process_state(&gui, "orders-api", ProcessState::Running);
+    let rows = health::list_health(&gui, "demo").expect("health loads");
+    let orders = rows
+        .iter()
+        .find(|row| row.service_id == "orders-api")
+        .expect("orders-api is listed");
+    assert_eq!(orders.process_state, "running");
+    assert_eq!(orders.health_state, "healthy");
+    assert!(orders.checked_at.is_some());
+
+    // GUI cancellation → MCP observes the cancellation.
+    let blocked = git::fetch_repository(&gui, "admin-ui").expect("fetch scheduled");
+    let blocked_id = blocked.task_id.clone().expect("a task id");
+    let cancelled = tasks::cancel_task(&gui, &blocked_id).expect("cancel is accepted");
+    assert_eq!(cancelled.kind, "git_fetch");
+    assert_eq!(
+        wait_for_task(&gui, &blocked_id).status,
+        TaskStatus::Cancelled
+    );
+    let seen = tasks::get_task(&mcp, &blocked_id).expect("MCP sees the task");
+    assert_eq!(seen.status, "cancelled");
+
+    // Logs come from one store, so both interfaces read the same lines.
+    let gui_logs = wait_for_task_logs(&gui, &task_id, |entries| !entries.is_empty());
+    let mcp_logs = wait_for_task_logs(&mcp, &task_id, |entries| !entries.is_empty());
+    assert_eq!(gui_logs[0].sequence, mcp_logs[0].sequence);
+    assert_eq!(gui_logs[0].message, mcp_logs[0].message);
+    assert!(gui_logs
+        .iter()
+        .all(|entry| entry.task_id.as_deref() == Some(task_id.as_str())));
+}
+
+/// Builds the real application core the daemon serves: fake task executors, an
+/// in-memory runtime-state store, the real [`LogHub`], and the real
+/// [`HealthStore`].
 ///
-/// Returns the shared [`FakeState`] so a test can observe and steer what the
-/// fake "infrastructure" reports.
-async fn build_core(
-    failing_starts: BTreeSet<String>,
-    failing_builds: BTreeSet<String>,
-    blocking: BTreeSet<String>,
-) -> (Application, Arc<TaskEngine>, Arc<Mutex<FakeState>>) {
-    let config = load_from_str(FIXTURE, "<desktop-test>").expect("the fixture is valid");
+/// Everything a screen reads — workspaces, services, migration configuration,
+/// task state, task logs, service log subscriptions, health observations — is
+/// answered by that core over the real IPC protocol, so Git, build, library,
+/// migration, health, and log flows settle without ever touching an
+/// operating-system process, a real Git repository, a Maven/npm project, a
+/// database, or the network (`tasks/020.md` §40, `tasks/021.md` §42).
+///
+/// Returns the [`Core`] the harness owns for the daemon's lifetime.
+async fn build_core(spec: &CoreSpec) -> Core {
+    let config = load_from_str(&spec.config, "<desktop-test>").expect("the fixture is valid");
+    // Both maps are derived from configuration before it moves into the
+    // application: the health probe reports the checks a real probe would run,
+    // and the migration executor re-checks the declared environment exactly as
+    // the real migration manager does.
+    let checks = check_descriptors(&config);
+    let migration_requires_authorization = migration_targets_requiring_authorization(&config);
     let store = Arc::new(InMemoryRuntimeStateStore::new());
     let fakes = Arc::new(Mutex::new(FakeState::seeded()));
+    let hub = Arc::new(LogHub::new());
+    let health_index = Arc::new(HealthStore::new(HEALTH_HISTORY));
 
     // Start/restart observe a running, healthy process; stop observes a stopped
-    // process with unknown health. Health checks refresh health only.
+    // process and leaves the last health observation untouched, exactly as the
+    // real health index does. Health checks refresh the observation.
     let starting = Arc::new(FakeLifecycleExecutor {
         store: Arc::clone(&store),
         process: Some(ProcessState::Running),
         health: HealthState::Healthy,
-        failing: failing_starts,
+        failing: spec.failing_starts.clone(),
+        health_index: Arc::clone(&health_index),
+        checks: Arc::clone(&checks),
+        observes: true,
     });
     let stopping = Arc::new(FakeLifecycleExecutor {
         store: Arc::clone(&store),
         process: Some(ProcessState::Stopped),
         health: HealthState::Unknown,
         failing: BTreeSet::new(),
+        health_index: Arc::clone(&health_index),
+        checks: Arc::clone(&checks),
+        observes: false,
     });
-    let health = Arc::new(FakeLifecycleExecutor {
+    let health_check = Arc::new(FakeLifecycleExecutor {
         store: Arc::clone(&store),
         process: None,
         health: HealthState::Healthy,
         failing: BTreeSet::new(),
+        health_index: Arc::clone(&health_index),
+        checks,
+        observes: true,
     });
 
     let git_executor = Arc::new(FakeGitExecutor {
         state: Arc::clone(&fakes),
-        blocking: blocking.clone(),
+        blocking: spec.blocking.clone(),
     });
     let build_executor = Arc::new(FakeBuildExecutor {
         state: Arc::clone(&fakes),
-        failing: failing_builds,
-        blocking,
+        failing: spec.failing_builds.clone(),
+        blocking: spec.blocking.clone(),
     });
     let verify_executor = Arc::new(FakeArtifactExecutor {
         state: Arc::clone(&fakes),
+    });
+    let migration_executor = Arc::new(FakeMigrationExecutor {
+        state: Arc::clone(&fakes),
+        hub: Arc::clone(&hub),
+        blocking: spec.blocking.clone(),
+        requires_authorization: migration_requires_authorization,
     });
 
     let engine = Arc::new(
@@ -1102,10 +1959,11 @@ async fn build_core(
             .executor(TaskKind::StartService, starting.clone())
             .executor(TaskKind::RestartService, starting)
             .executor(TaskKind::StopService, stopping)
-            .executor(TaskKind::HealthCheck, health.clone())
-            .executor(TaskKind::ProcessHealthCheck, health.clone())
-            .executor(TaskKind::TcpHealthCheck, health.clone())
-            .executor(TaskKind::HttpHealthCheck, health)
+            .executor(TaskKind::HealthCheck, health_check.clone())
+            .executor(TaskKind::ProcessHealthCheck, health_check.clone())
+            .executor(TaskKind::TcpHealthCheck, health_check.clone())
+            .executor(TaskKind::HttpHealthCheck, health_check.clone())
+            .executor(TaskKind::ReadinessCheck, health_check)
             .executor(TaskKind::GitSync, git_executor.clone())
             .executor(TaskKind::GitFetch, git_executor.clone())
             .executor(TaskKind::GitPull, git_executor.clone())
@@ -1114,21 +1972,102 @@ async fn build_core(
             .executor(TaskKind::BuildLibrary, build_executor.clone())
             .executor(TaskKind::LibraryInstall, build_executor)
             .executor(TaskKind::ArtifactVerification, verify_executor)
+            .executor(TaskKind::MigrationValidate, migration_executor.clone())
+            .executor(TaskKind::MigrationStatus, migration_executor.clone())
+            .executor(TaskKind::MigrationPending, migration_executor.clone())
+            .executor(TaskKind::MigrationPreview, migration_executor.clone())
+            .executor(TaskKind::MigrationApply, migration_executor.clone())
+            .executor(TaskKind::Liquibase, migration_executor)
             .build()
             .expect("a Tokio runtime is active"),
     );
-    // The read-only Git/build/library queries reach the fake ports directly,
-    // exactly as they reach the real adapters in production; the mutating
-    // operations go through the fake task executors above.
-    let application = Application::new(config, engine.clone(), store, Arc::new(NullLogService))
+    // Task events become correlated log entries in the hub, exactly as
+    // `spawn_task_ingestor` does in production, so task logs and service log
+    // subscriptions are populated over IPC. The spawn happens inside the
+    // runtime context the harness drives `build_core` on.
+    let ingestor = spawn_task_ingestor(Arc::clone(&hub), engine.subscribe());
+
+    // The read-only Git/build/library/migration queries reach the fake ports or
+    // validated configuration directly, exactly as they reach the real adapters
+    // in production; the mutating operations go through the fake task executors
+    // above.
+    let application = Application::new(config, engine.clone(), store, hub.clone())
         .with_git_manager(Arc::new(FakeGitManager {
             state: Arc::clone(&fakes),
         }))
         .with_artifact_inspector(Arc::new(FakeArtifactInspector {
             state: Arc::clone(&fakes),
         }))
-        .with_build_capabilities(Arc::new(FakeBuildCapabilityIndex));
-    (application, engine, fakes)
+        .with_build_capabilities(Arc::new(FakeBuildCapabilityIndex))
+        .with_health_index(health_index.clone());
+
+    Core {
+        application,
+        engine,
+        fakes,
+        hub,
+        health: health_index,
+        ingestor,
+    }
+}
+
+/// One configured health check, described the way a completed probe reports it.
+struct CheckDescriptor {
+    /// The probe type label (`process`, `tcp`, `http`, …).
+    check_type: String,
+    /// What the probe targets (`localhost:8081`, an HTTP URL), if anything.
+    target: Option<String>,
+    /// Whether the check is required for the service to be healthy.
+    required: bool,
+}
+
+/// Reads every service's configured health checks from configuration.
+fn check_descriptors(config: &Config) -> Arc<BTreeMap<String, Vec<CheckDescriptor>>> {
+    let mut descriptors: BTreeMap<String, Vec<CheckDescriptor>> = BTreeMap::new();
+    for workspace in &config.workspaces {
+        for service in &workspace.workspace.services {
+            let checks = service
+                .health_checks
+                .iter()
+                .map(|check| {
+                    let (check_type, target) = match &check.kind {
+                        HealthCheckKind::Process => (CHECK_PROCESS.to_owned(), None),
+                        HealthCheckKind::Port(port) => (
+                            CHECK_TCP.to_owned(),
+                            Some(format!("localhost:{}", port.value())),
+                        ),
+                        HealthCheckKind::Http(http) => {
+                            (CHECK_HTTP.to_owned(), Some(http.url.clone()))
+                        }
+                        HealthCheckKind::Other(name) => (name.clone(), None),
+                    };
+                    CheckDescriptor {
+                        check_type,
+                        target,
+                        required: check.required,
+                    }
+                })
+                .collect();
+            descriptors.insert(service.id.to_string(), checks);
+        }
+    }
+    Arc::new(descriptors)
+}
+
+/// The services whose declared migration environment requires authorization.
+///
+/// A mutating operation against one of these targets reaches the database only
+/// when the caller explicitly authorized it (`tasks/021.md` §8, §9).
+fn migration_targets_requiring_authorization(config: &Config) -> BTreeSet<String> {
+    config
+        .workspaces
+        .iter()
+        .flat_map(|workspace| workspace.liquibase.iter())
+        .filter(|(_, liquibase)| {
+            liquibase.enabled && liquibase.database.environment.requires_authorization()
+        })
+        .map(|(service_id, _)| service_id.to_string())
+        .collect()
 }
 
 /// The test-only "infrastructure" state the fake ports and executors share.
@@ -1566,11 +2505,14 @@ fn decode_repository(context: &TaskContext) -> Result<ResolvedRepository, TaskEx
         .map_err(|error| TaskExecutorError::failed("INVALID_TARGET", error.to_string()))
 }
 
-/// A test-only lifecycle executor.
+/// A test-only lifecycle and health executor.
 ///
 /// It decodes the workspace-aware [`ResolvedServiceTarget`] from the task's
 /// parameters (exactly as the real runtime executors do) and records the
-/// resulting process/health observation into the shared in-memory store. A
+/// resulting process/health observation into the shared in-memory store. When
+/// it `observes`, it also publishes the health observation — with the
+/// service's configured checks — into the real [`HealthStore`] the Health
+/// screen reads, exactly as the health adapter publishes a completed probe. A
 /// service named in `failing` fails the task with a structured runtime code, so
 /// bulk partial-failure handling can be asserted.
 struct FakeLifecycleExecutor {
@@ -1582,6 +2524,47 @@ struct FakeLifecycleExecutor {
     health: HealthState,
     /// Service ids whose lifecycle operation must fail.
     failing: BTreeSet<String>,
+    /// The health index the observation is published to.
+    health_index: Arc<HealthStore>,
+    /// The configured checks of each service, in probe-report shape.
+    checks: Arc<BTreeMap<String, Vec<CheckDescriptor>>>,
+    /// Whether this executor publishes a health observation.
+    ///
+    /// Stopping a service does not: the index keeps the last observation it
+    /// actually made (`tasks/021.md` §18, §22).
+    observes: bool,
+}
+
+impl FakeLifecycleExecutor {
+    /// Publishes one health observation into the real health index.
+    fn record_observation(&self, target: &ResolvedServiceTarget) {
+        let checked_at = Timestamp::now();
+        let outcomes: Vec<HealthCheckOutcome> = self
+            .checks
+            .get(target.service_id.as_str())
+            .map(|descriptors| {
+                descriptors
+                    .iter()
+                    .map(|descriptor| HealthCheckOutcome {
+                        check_type: descriptor.check_type.clone(),
+                        target: descriptor.target.clone(),
+                        required: descriptor.required,
+                        status: self.health,
+                        duration_ms: 1,
+                        message: None,
+                        checked_at,
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        self.health_index.record(
+            target.workspace_id.clone(),
+            target.service_id.clone(),
+            self.health,
+            outcomes,
+            checked_at,
+        );
+    }
 }
 
 #[async_trait]
@@ -1611,6 +2594,9 @@ impl TaskExecutor for FakeLifecycleExecutor {
         }
         state = state.with_health(self.health);
         self.store.set_service_state(&target.service_id, state);
+        if self.observes {
+            self.record_observation(&target);
+        }
         let _ = context.progress().message(format!(
             "applied lifecycle state to '{}'",
             target.service_id
@@ -1626,6 +2612,95 @@ impl TaskExecutor for FakeLifecycleExecutor {
 fn decode_target(context: &TaskContext) -> Result<ResolvedServiceTarget, TaskExecutorError> {
     ResolvedServiceTarget::from_parameters(context.parameters())
         .map_err(|error| TaskExecutorError::failed("INVALID_TARGET", error.to_string()))
+}
+
+/// A test-only migration executor.
+///
+/// It decodes the [`ResolvedMigrationTarget`] from the task parameters exactly
+/// as the real migration manager does, and then:
+///
+/// * re-checks the declared environment, so a hand-crafted mutating task that
+///   reached the executor without the required authorization still fails;
+/// * reflects the operation into the shared [`FakeState`], so a later
+///   `list_migrations` sees the task it ran;
+/// * writes the SQL a provider would print for a preview into the log hub, so
+///   SQL preview and log inspection can be observed over IPC.
+///
+/// An entity named in `blocking` waits for cancellation, so a long-running
+/// migration can be cancelled. No database, migration provider, or network is
+/// ever touched (`tasks/021.md` §42 items 4–7, §5 of the harness contract).
+struct FakeMigrationExecutor {
+    /// The shared fake state.
+    state: Arc<Mutex<FakeState>>,
+    /// The log hub the preview SQL is recorded into.
+    hub: Arc<LogHub>,
+    /// Service ids whose migration task must block until cancelled.
+    blocking: BTreeSet<String>,
+    /// Services whose declared database environment requires authorization.
+    requires_authorization: BTreeSet<String>,
+}
+
+#[async_trait]
+impl TaskExecutor for FakeMigrationExecutor {
+    async fn execute(&self, context: TaskContext) -> Result<TaskOutcome, TaskExecutorError> {
+        let target = ResolvedMigrationTarget::from_parameters(context.parameters())
+            .map_err(|error| TaskExecutorError::failed("INVALID_TARGET", error.to_string()))?;
+        let service = target.service_id.to_string();
+        let operation = target.operation;
+
+        // The manager re-checks authorization at execution time; a task that
+        // arrives without it never reaches the database.
+        if operation.is_mutating()
+            && self.requires_authorization.contains(service.as_str())
+            && !target.non_local_authorized
+        {
+            return Err(TaskExecutorError::failed(
+                "MIGRATION_AUTHORIZATION_REQUIRED",
+                format!("applying migrations for '{service}' requires explicit confirmation"),
+            ));
+        }
+
+        if self.blocking.contains(service.as_str()) {
+            let _ = context.progress().message(format!(
+                "{} for '{}' is running",
+                operation.label(),
+                service
+            ));
+            context.cancelled().await;
+            return Err(TaskExecutorError::Cancelled);
+        }
+
+        self.state
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .recorded
+            .push(format!("{} {service}", operation.label()));
+        let _ = context
+            .progress()
+            .message(format!("{} for '{service}'", operation.label()));
+
+        if matches!(operation, MigrationOperation::Preview) {
+            self.hub.record(
+                LogEntry::new(LogLevel::Info, preview_sql(&service))
+                    .with_task(context.task_id().clone())
+                    .with_service(target.service_id.clone())
+                    .with_source(LogSource::Migration),
+            );
+        }
+
+        Ok(TaskOutcome::succeeded(Some(format!(
+            "{} completed for '{service}'",
+            operation.label()
+        ))))
+    }
+}
+
+/// The SQL a provider would print for a read-only preview of `service`.
+fn preview_sql(service: &str) -> String {
+    format!(
+        "-- service-orchestrator preview for {service}\n\
+         CREATE TABLE {service}_audit (\n    id BIGSERIAL PRIMARY KEY,\n    recorded_at TIMESTAMP NOT NULL\n);\n"
+    )
 }
 
 /// Waits until a service reports `expected` as its process state.
@@ -1687,6 +2762,30 @@ fn wait_for_workflow(client: &RemoteClient, workflow_id: &WorkflowId) -> BulkOpe
 fn settle(client: &RemoteClient, outcome: &OperationOutcome) -> Task {
     let task_id = outcome.task_id.as_deref().expect("a task was scheduled");
     wait_for_task(client, task_id)
+}
+
+/// Waits until a task's log page matches `expect`, then returns the entries.
+///
+/// The task ingestor runs concurrently with task settlement, so a test that
+/// asserts on task logs polls instead of assuming the entry is already there.
+fn wait_for_task_logs(
+    client: &RemoteClient,
+    task_id: &str,
+    expect: impl Fn(&[LogEntryView]) -> bool,
+) -> Vec<LogEntryView> {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let page = tasks::get_task_logs(client, task_id, &tasks::TaskLogsQuery::default())
+            .expect("task logs answer");
+        if expect(&page.entries) {
+            return page.entries;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "the logs of task '{task_id}' never matched"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
 }
 
 /// Extracts the workflow id from a workflow-shaped outcome.

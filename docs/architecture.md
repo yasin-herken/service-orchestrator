@@ -246,8 +246,10 @@ Instead:
   directly.
 - The desktop GUI validates its inputs, applies policy, and forwards calls to the
   same use cases for reads, service lifecycle, Git, build, and library
-  management, then renders the answers; it holds no second client, task engine,
-  or process manager.
+  management, migration management, task browsing and cancellation, health
+  queries and checks, and unified logs, then renders the answers; it holds no
+  second client, task engine, migration manager, health manager, log system, or
+  process manager.
 
 All speak to the application core through the same `OrchestratorClient` boundary
 and, in production, through the same local daemon. They are therefore not only
@@ -1075,18 +1077,40 @@ deliberately its own Cargo workspace, excluded from the root one, so the
   reconnect-retry, exactly as the TUI and MCP behave while attached.
 - **Mutations pass through the policy engine.** Starting, stopping, and
   restarting a service, Git synchronization, builds, and library preparation are
-  `SafeWrite` operations submitted as a `Cli` client, exactly as the TUI and MCP
-  do; a confirmation dialog in the webview is a usability affordance and never
-  substitutes for the daemon's authorization. The frontend's pending state and
-  the daemon's own operation coordination together prevent duplicate requests
-  (`tasks/019.md` §28, `tasks/020.md` §31).
+  `SafeWrite` operations submitted with the `Desktop` client kind, exactly as
+  the TUI and MCP submit their own kinds; a confirmation dialog in the webview
+  is a usability affordance and never substitutes for the daemon's
+  authorization. Protected operations such as applying migrations forward the
+  confirmation as intent (`confirmed: true`) and are upgraded to
+  `Authorization::allow_destructive()` by the daemon only when all three trust
+  signals hold — the request asks for it, the declared client kind is
+  interactive, and the kernel-verified peer UID matches the daemon's
+  (`crates/daemon/src/dispatch.rs`). A refusal surfaces as the structured
+  `PermissionDenied` code. The frontend's pending state and the daemon's own
+  operation coordination together prevent duplicate requests (`tasks/019.md`
+  §28, `tasks/020.md` §31, `tasks/021.md` §8).
+- **Migration, task, health, and log commands.** The adapter additionally
+  exposes migration reads and task-producing operations (`list_migrations`,
+  `get_migration_status`, `validate_migration`, `inspect_migration_status`,
+  `inspect_migration_pending`, `preview_migration`, `apply_migration`,
+  `apply_selected_migrations`), task browsing and cancellation (`list_tasks`,
+  `get_workflow`, plus the existing `get_task`/`cancel_task`/`cancel_workflow`),
+  health reads and checks (`list_health`, `get_health`,
+  `check_service_health`, `check_service_readiness`), and unified logs
+  (`get_logs` with task/service/workspace scope, cursor pagination, and
+  truncation flags; `subscribe_service_logs`/`unsubscribe_service_logs` with
+  `daemon://log` events). Each maps onto an existing core capability: there is
+  no second migration manager, health manager, task engine, or log storage, and
+  the TUI and MCP observe the same authoritative state (`tasks/021.md` §2, §43).
 - **Forwarded events.** The adapter subscribes to the daemon's task-event
   stream and re-emits events verbatim as `daemon://task`, plus a synthetic
   `Lagged` payload when the subscription falls behind; the frontend never polls
-  for task state. The stream carries task, log, and shutdown events only, so the
-  GUI refreshes service runtime/health state when a task settles (or after a
-  command) rather than on a dedicated service event — a documented limitation
-  of the current daemon event surface (`docs/desktop-gui.md` §15).
+  for task state. Per-service log subscriptions are forwarded as `daemon://log`
+  (`entry`, `lagged`, `closed`). The task stream carries task, log, and
+  shutdown events only, so the GUI refreshes service runtime/health state when a
+  task settles (or after a command) rather than on a dedicated service event —
+  a documented limitation of the current daemon event surface
+  (`docs/desktop-gui.md` §26).
 - **Minimal capabilities.** The webview is granted `core:default` only — no
   shell, filesystem, HTTP, or process plugin — behind a strict CSP and a
   navigation filter that accepts the `tauri:` scheme plus the Vite dev server in
