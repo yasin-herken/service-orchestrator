@@ -193,8 +193,8 @@ impl EngineInner {
             TaskStatus::Running => {
                 let kind = self
                     .store
-                    .task(&change.id)
-                    .map_or(TaskKind::Custom("unknown".to_owned()), |task| task.kind);
+                    .task_kind(&change.id)
+                    .unwrap_or(TaskKind::Custom("unknown".to_owned()));
                 self.publish(TaskEvent::TaskStarted {
                     id: change.id.clone(),
                     kind,
@@ -451,13 +451,17 @@ impl TaskEngine {
         });
 
         // Publish a created event for every task, then any initial blocked or
-        // skipped transitions.
-        for task in self.inner.store.list() {
-            if task.workflow.as_ref() == Some(&workflow_id) {
-                self.inner.publish(TaskEvent::TaskCreated {
-                    task: Box::new(task),
-                });
-            }
+        // skipped transitions. Reading only this workflow's tasks keeps the
+        // work proportional to the workflow size rather than the whole store.
+        for task in self
+            .inner
+            .store
+            .workflow_tasks(&workflow_id)
+            .unwrap_or_default()
+        {
+            self.inner.publish(TaskEvent::TaskCreated {
+                task: Box::new(task),
+            });
         }
         for change in initial_changes {
             self.inner.publish_status_change(&change);

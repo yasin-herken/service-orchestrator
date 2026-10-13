@@ -22,7 +22,7 @@
 //! (`queued`, `blocked`, or `skipped`) and the state of dependent tasks once a
 //! dependency settles.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -71,6 +71,16 @@ pub(crate) struct StatusChange {
 struct Inner {
     tasks: BTreeMap<TaskId, TaskRecord>,
     order: BTreeMap<u64, TaskId>,
+    /// Sequences of tasks that are currently `Queued` and whose dependencies
+    /// are satisfied, ordered by sequence. Because a task only enters `Queued`
+    /// once its dependencies are met and dependencies never un-satisfy, the
+    /// lowest sequence here is always the FIFO-ready task. This replaces a full
+    /// `order` scan on every dispatch with an O(log n) minimum lookup.
+    queued: BTreeSet<u64>,
+    /// Sequences of tasks whose cancellation has been signalled but not yet
+    /// honoured. Keeping a dedicated index means the per-wake cancellation step
+    /// visits only signalled tasks instead of scanning all retained history.
+    cancel_requests: BTreeSet<u64>,
     dependents: BTreeMap<TaskId, Vec<TaskId>>,
     workflows: BTreeMap<WorkflowId, Workflow>,
     workflow_tasks: BTreeMap<WorkflowId, Vec<TaskId>>,
@@ -92,6 +102,8 @@ impl TaskStore {
             inner: Mutex::new(Inner {
                 tasks: BTreeMap::new(),
                 order: BTreeMap::new(),
+                queued: BTreeSet::new(),
+                cancel_requests: BTreeSet::new(),
                 dependents: BTreeMap::new(),
                 workflows: BTreeMap::new(),
                 workflow_tasks: BTreeMap::new(),
@@ -110,6 +122,21 @@ impl TaskStore {
             .tasks
             .get(id)
             .map(|record| record.task.clone())
+    }
+
+    /// Returns only a task's kind.
+    ///
+    /// Publishing a `Running` event needs the kind and nothing else, so this
+    /// avoids cloning the whole [`Task`] (its dependency list, progress, and
+    /// error) just to read one field.
+    #[must_use]
+    pub(crate) fn task_kind(&self, id: &TaskId) -> Option<TaskKind> {
+        self.inner
+            .lock()
+            .expect("task store mutex poisoned")
+            .tasks
+            .get(id)
+            .map(|record| record.task.kind.clone())
     }
 
     /// Returns a snapshot of a task together with a revision subscriber.
@@ -174,9 +201,13 @@ impl TaskStore {
     /// Returns every task that is currently running.
     #[must_use]
     pub fn running(&self) -> Vec<Task> {
-        self.list()
-            .into_iter()
-            .filter(|task| task.status == TaskStatus::Running)
+        let inner = self.inner.lock().expect("task store mutex poisoned");
+        inner
+            .order
+            .values()
+            .filter_map(|id| inner.tasks.get(id))
+            .filter(|record| record.task.status == TaskStatus::Running)
+            .map(|record| record.task.clone())
             .collect()
     }
 
@@ -254,6 +285,9 @@ impl TaskStore {
         }
 
         let snapshot = record.task.clone();
+        if initial == TaskStatus::Queued {
+            inner.queued.insert(record.sequence);
+        }
         inner.order.insert(record.sequence, id.clone());
         inner.tasks.insert(id.clone(), record);
         bump_revision(&mut inner);
@@ -360,12 +394,18 @@ impl TaskStore {
 
     /// Cancels a task's cancellation token.
     pub(crate) fn signal_cancel(&self, id: &TaskId) -> Result<(), TaskEngineError> {
-        let inner = self.inner.lock().expect("task store mutex poisoned");
-        let record = inner
-            .tasks
-            .get(id)
-            .ok_or_else(|| TaskEngineError::TaskNotFound(id.clone()))?;
-        record.cancellation.cancel();
+        let mut inner = self.inner.lock().expect("task store mutex poisoned");
+        let sequence = {
+            let record = inner
+                .tasks
+                .get(id)
+                .ok_or_else(|| TaskEngineError::TaskNotFound(id.clone()))?;
+            record.cancellation.cancel();
+            record.sequence
+        };
+        // Index the request so the next scheduler wake considers only signalled
+        // tasks instead of scanning all retained history.
+        inner.cancel_requests.insert(sequence);
         Ok(())
     }
 
@@ -383,28 +423,45 @@ impl TaskStore {
     /// (`tasks/016.md` §25).
     pub(crate) fn cancel_queued_signalled(&self) -> Vec<StatusChange> {
         let mut inner = self.inner.lock().expect("task store mutex poisoned");
-        let cancelled: Vec<TaskId> = inner
-            .order
-            .values()
-            .filter(|id| {
-                inner.tasks.get(id).is_some_and(|record| {
-                    matches!(record.task.status, TaskStatus::Queued | TaskStatus::Blocked)
-                        && record.cancellation.is_cancelled()
-                })
-            })
-            .cloned()
-            .collect();
-
+        if inner.cancel_requests.is_empty() {
+            return Vec::new();
+        }
+        // Visit only the signalled tasks, in task-insertion (sequence) order so
+        // the emitted transitions keep the same order as a full scan would.
+        let requests: Vec<u64> = inner.cancel_requests.iter().copied().collect();
         let mut changes = Vec::new();
-        for id in cancelled {
-            if let Some(record) = inner.tasks.get_mut(&id) {
-                if record.task.transition(TaskStatus::Cancelled).is_ok() {
-                    changes.push(StatusChange {
-                        id,
-                        to: TaskStatus::Cancelled,
-                        failure: None,
-                    });
+        for sequence in requests {
+            // The request is consumed here whether or not it settles a task: a
+            // task that is already running observes cancellation cooperatively,
+            // and re-checking it on every wake would be wasted work.
+            inner.cancel_requests.remove(&sequence);
+            let Some(id) = inner.order.get(&sequence).cloned() else {
+                continue;
+            };
+            let was_queued = {
+                let Some(record) = inner.tasks.get(&id) else {
+                    continue;
+                };
+                if !matches!(record.task.status, TaskStatus::Queued | TaskStatus::Blocked)
+                    || !record.cancellation.is_cancelled()
+                {
+                    continue;
                 }
+                record.task.status == TaskStatus::Queued
+            };
+            let transitioned = inner
+                .tasks
+                .get_mut(&id)
+                .is_some_and(|record| record.task.transition(TaskStatus::Cancelled).is_ok());
+            if transitioned {
+                if was_queued {
+                    inner.queued.remove(&sequence);
+                }
+                changes.push(StatusChange {
+                    id,
+                    to: TaskStatus::Cancelled,
+                    failure: None,
+                });
             }
         }
         if !changes.is_empty() {
@@ -417,21 +474,16 @@ impl TaskStore {
     ///
     /// Selection is FIFO by insertion sequence, which keeps scheduling
     /// predictable and starvation-free for the MVP.
+    ///
+    /// The ready-set index ([`Inner::queued`]) holds exactly the queued,
+    /// dependency-satisfied tasks, so the oldest one is its lowest sequence:
+    /// selection is O(log n) rather than a scan that grows with retained
+    /// history.
     #[must_use]
     pub(crate) fn next_ready(&self) -> Option<TaskId> {
         let inner = self.inner.lock().expect("task store mutex poisoned");
-        for id in inner.order.values() {
-            let record = match inner.tasks.get(id) {
-                Some(record) => record,
-                None => continue,
-            };
-            if record.task.status == TaskStatus::Queued
-                && dependencies_satisfied(record, &inner.tasks)
-            {
-                return Some(id.clone());
-            }
-        }
-        None
+        let sequence = *inner.queued.iter().next()?;
+        inner.order.get(&sequence).cloned()
     }
 
     /// Settles tasks that depend on `completed` now that it is terminal.
@@ -471,6 +523,7 @@ impl TaskStore {
                 };
 
                 if let Some(record) = inner.tasks.get_mut(&dependent) {
+                    let sequence = record.sequence;
                     if let Err(error) = record.task.transition(next) {
                         // A rejected transition here would indicate a logic error;
                         // surface it as an internal failure rather than panicking.
@@ -483,6 +536,9 @@ impl TaskStore {
                                 detail: None,
                             }),
                         }];
+                    }
+                    if next == TaskStatus::Queued {
+                        inner.queued.insert(sequence);
                     }
                 }
                 changes.push(StatusChange {
@@ -568,13 +624,34 @@ impl TaskStore {
         f: impl FnOnce(&mut Task) -> Result<T, TaskEngineError>,
     ) -> Result<T, TaskEngineError> {
         let mut inner = self.inner.lock().expect("task store mutex poisoned");
-        let record = inner
-            .tasks
-            .get_mut(id)
-            .ok_or_else(|| TaskEngineError::TaskNotFound(id.clone()))?;
-        let result = f(&mut record.task)?;
+        let (result, sequence, was, now) = {
+            let record = inner
+                .tasks
+                .get_mut(id)
+                .ok_or_else(|| TaskEngineError::TaskNotFound(id.clone()))?;
+            let sequence = record.sequence;
+            let was = record.task.status;
+            let result = f(&mut record.task)?;
+            (result, sequence, was, record.task.status)
+        };
+        inner.reconcile_ready(sequence, was, now);
         bump_revision(&mut inner);
         Ok(result)
+    }
+}
+
+impl Inner {
+    /// Keeps the ready-set index consistent with a task's status change.
+    ///
+    /// A task is ready exactly while it is `Queued` (its dependencies are
+    /// satisfied by construction), so the index is updated only on the boundary
+    /// crossing into or out of that state.
+    fn reconcile_ready(&mut self, sequence: u64, was: TaskStatus, now: TaskStatus) {
+        if was != TaskStatus::Queued && now == TaskStatus::Queued {
+            self.queued.insert(sequence);
+        } else if was == TaskStatus::Queued && now != TaskStatus::Queued {
+            self.queued.remove(&sequence);
+        }
     }
 }
 
@@ -756,5 +833,175 @@ mod tests {
             .unwrap();
         assert_eq!(store.bump_attempt(&tid("a")).unwrap(), 1);
         assert_eq!(store.bump_attempt(&tid("a")).unwrap(), 2);
+    }
+
+    /// Fills the store with `count` terminal tasks to model retained history.
+    fn seed_history(store: &TaskStore, count: usize) {
+        for index in 0..count {
+            let name = format!("h{index}");
+            let id = tid(&name);
+            store
+                .insert_task(record(&name, vec![], DependencyPolicy::AllSucceeded))
+                .unwrap();
+            store.transition(&id, TaskStatus::Running).unwrap();
+            store.transition(&id, TaskStatus::Succeeded).unwrap();
+        }
+    }
+
+    // -- ready-set and cancellation-index regression tests -------------------
+    //
+    // These lock in the behaviour of the O(log n) scheduling index introduced
+    // in `tasks/025.md` §12: FIFO selection by *submission* sequence (not by
+    // readiness time), and cancellation that settles exactly the signalled
+    // queued/blocked tasks.
+
+    #[test]
+    fn ready_selection_is_fifo_by_submission_not_readiness() {
+        let store = TaskStore::new();
+        // `a` (seq 0) and `b` (seq 1) are ready now; `c` (seq 2) waits on `a`.
+        store
+            .insert_task(record("a", vec![], DependencyPolicy::AllSucceeded))
+            .unwrap();
+        store
+            .insert_task(record("b", vec![], DependencyPolicy::AllSucceeded))
+            .unwrap();
+        store
+            .insert_task(record("c", vec![tid("a")], DependencyPolicy::AllSucceeded))
+            .unwrap();
+
+        assert_eq!(store.next_ready(), Some(tid("a")));
+        store.transition(&tid("a"), TaskStatus::Running).unwrap();
+        // `c` is still blocked, so `b` is the only ready task.
+        assert_eq!(store.next_ready(), Some(tid("b")));
+
+        store.transition(&tid("a"), TaskStatus::Succeeded).unwrap();
+        store.settle_dependents(&tid("a"));
+        // `c` is now ready, but `b` was submitted earlier and must win.
+        assert_eq!(store.next_ready(), Some(tid("b")));
+
+        store.transition(&tid("b"), TaskStatus::Running).unwrap();
+        assert_eq!(store.next_ready(), Some(tid("c")));
+    }
+
+    #[test]
+    fn cancelling_a_queued_task_removes_it_from_readiness() {
+        let store = TaskStore::new();
+        store
+            .insert_task(record("a", vec![], DependencyPolicy::AllSucceeded))
+            .unwrap();
+        store
+            .insert_task(record("b", vec![], DependencyPolicy::AllSucceeded))
+            .unwrap();
+
+        store.signal_cancel(&tid("a")).unwrap();
+        let changes = store.cancel_queued_signalled();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].id, tid("a"));
+        assert_eq!(store.task(&tid("a")).unwrap().status, TaskStatus::Cancelled);
+        // The cancelled task is skipped, and the index no longer offers it.
+        assert_eq!(store.next_ready(), Some(tid("b")));
+        // The request was consumed: a further wake has nothing to do.
+        assert!(store.cancel_queued_signalled().is_empty());
+    }
+
+    #[test]
+    fn cancelling_a_blocked_task_settles_it_and_skips_dependents() {
+        let store = TaskStore::new();
+        store
+            .insert_task(record("a", vec![], DependencyPolicy::AllSucceeded))
+            .unwrap();
+        store
+            .insert_task(record("b", vec![tid("a")], DependencyPolicy::AllSucceeded))
+            .unwrap();
+        store
+            .insert_task(record("c", vec![tid("b")], DependencyPolicy::AllSucceeded))
+            .unwrap();
+
+        store.signal_cancel(&tid("b")).unwrap();
+        let changes = store.cancel_queued_signalled();
+        assert_eq!(changes.len(), 1);
+        assert_eq!(changes[0].id, tid("b"));
+        assert_eq!(store.task(&tid("b")).unwrap().status, TaskStatus::Cancelled);
+
+        // Settling the cancelled task propagates to its dependent.
+        let settled = store.settle_dependents(&tid("b"));
+        assert_eq!(settled.len(), 1);
+        assert_eq!(settled[0].to, TaskStatus::Skipped);
+        // The skipped task is never offered as ready.
+        assert_eq!(store.task(&tid("c")).unwrap().status, TaskStatus::Skipped);
+    }
+
+    #[test]
+    fn a_cancellation_signal_for_a_running_task_is_consumed_once() {
+        let store = TaskStore::new();
+        store
+            .insert_task(record("a", vec![], DependencyPolicy::AllSucceeded))
+            .unwrap();
+        store.transition(&tid("a"), TaskStatus::Running).unwrap();
+
+        // A running task observes cancellation cooperatively; the scan must not
+        // force a transition and must not retain the request forever.
+        store.signal_cancel(&tid("a")).unwrap();
+        assert!(store.cancel_queued_signalled().is_empty());
+        assert_eq!(store.task(&tid("a")).unwrap().status, TaskStatus::Running);
+        assert!(store.cancel_queued_signalled().is_empty());
+    }
+
+    #[test]
+    fn settling_a_failed_dependency_does_not_mark_it_ready() {
+        let store = TaskStore::new();
+        store
+            .insert_task(record("a", vec![], DependencyPolicy::AllSucceeded))
+            .unwrap();
+        store
+            .insert_task(record("b", vec![tid("a")], DependencyPolicy::AllSucceeded))
+            .unwrap();
+        store.transition(&tid("a"), TaskStatus::Running).unwrap();
+        store
+            .fail(&tid("a"), TaskFailure::new("BOOM", "failed", None).unwrap())
+            .unwrap();
+        store.settle_dependents(&tid("a"));
+        // `b` settled as skipped, so it must never be scheduled.
+        assert_eq!(store.next_ready(), None);
+    }
+
+    /// Measures readiness selection as retained history grows (`tasks/025.md`
+    /// §12, §38). `#[ignore]`d; run with `--ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn measure_next_ready_scaling() {
+        for history in [0usize, 1_000, 5_000, 20_000] {
+            let store = TaskStore::new();
+            seed_history(&store, history);
+            store
+                .insert_task(record("ready", vec![], DependencyPolicy::AllSucceeded))
+                .unwrap();
+            const CALLS: u32 = 10_000;
+            let started = std::time::Instant::now();
+            for _ in 0..CALLS {
+                let selected = store.next_ready();
+                assert_eq!(selected, Some(tid("ready")));
+            }
+            let per_call = started.elapsed() / CALLS;
+            eprintln!("next_ready: history={history:>6} -> {per_call:?} per call");
+        }
+    }
+
+    /// Measures the per-wake cancellation scan as history grows.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn measure_cancel_scan_scaling() {
+        for history in [0usize, 1_000, 5_000, 20_000] {
+            let store = TaskStore::new();
+            seed_history(&store, history);
+            const CALLS: u32 = 10_000;
+            let started = std::time::Instant::now();
+            for _ in 0..CALLS {
+                let changes = store.cancel_queued_signalled();
+                assert!(changes.is_empty());
+            }
+            let per_call = started.elapsed() / CALLS;
+            eprintln!("cancel_queued_signalled: history={history:>6} -> {per_call:?} per call");
+        }
     }
 }

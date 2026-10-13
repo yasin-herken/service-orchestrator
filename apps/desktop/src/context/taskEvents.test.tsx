@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { flush } from '../test/harness';
 import { emitTaskEvent, resetMockDesktopApi } from '../test/mocks';
-import { TaskEventsProvider, useTaskEvents } from './TaskEventsContext';
+import { TaskEventsProvider, useTaskEvents, useTaskRevision } from './TaskEventsContext';
 
 vi.mock('../services/desktopApi', async () => ({
   desktopApi: (await import('../test/mocks')).mockDesktopApi,
@@ -105,5 +105,48 @@ describe('task event tracking', () => {
       }),
     );
     expect(screen.getByTestId('revision')).toHaveTextContent('1');
+  });
+
+  it('does not re-render a revision-only consumer on progress events', async () => {
+    // Regression guard for `tasks/025.md` §24: consumers that only reload on a
+    // terminal settle must not be re-rendered by every progress frame. Before
+    // the context split, `terminalRevision` shared one context value with the
+    // per-event task data, so every consumer re-rendered on every event.
+    let revisionRenders = 0;
+    function RevisionProbe() {
+      const revision = useTaskRevision();
+      revisionRenders += 1;
+      return <span data-testid="revision-only">{revision}</span>;
+    }
+
+    render(
+      <TaskEventsProvider>
+        <Probe />
+        <RevisionProbe />
+      </TaskEventsProvider>,
+    );
+    await flush();
+    const baseline = revisionRenders;
+
+    act(() =>
+      emitTaskEvent({
+        TaskCreated: { task: { id: 't9', kind: 'build_service', status: 'running' } },
+      }),
+    );
+    for (let step = 1; step <= 20; step += 1) {
+      act(() =>
+        emitTaskEvent({
+          TaskProgress: { id: 't9', progress: { current: step, total: 20 } },
+        }),
+      );
+    }
+    // Twenty progress frames caused zero re-renders of the revision consumer.
+    expect(screen.getByTestId('task-t9')).toHaveTextContent('running:20');
+    expect(revisionRenders).toBe(baseline);
+
+    act(() => emitTaskEvent({ TaskSucceeded: { id: 't9' } }));
+    // Exactly one terminal settle re-renders it, and the revision advanced.
+    expect(revisionRenders).toBe(baseline + 1);
+    expect(screen.getByTestId('revision-only')).toHaveTextContent('1');
   });
 });

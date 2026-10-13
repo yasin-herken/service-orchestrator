@@ -46,7 +46,7 @@ pub(crate) const fn destructive_allowed(request: &RequestEnvelope, same_user: bo
 /// Returns a structured [`ApplicationError`] for unknown methods, invalid
 /// parameters, or a failed use case.
 pub(crate) async fn route(
-    application: &Application,
+    application: Application,
     engine: &Arc<TaskEngine>,
     request: &RequestEnvelope,
     same_user: bool,
@@ -57,7 +57,9 @@ pub(crate) async fn route(
     } else {
         Authorization::standard()
     };
-    let app = application.clone().with_authorization(authorization);
+    // The caller already holds an owned snapshot, so authorization is applied in
+    // place instead of cloning the application a second time.
+    let app = application.with_authorization(authorization);
     let params = request.params.clone();
 
     match request.method.as_str() {

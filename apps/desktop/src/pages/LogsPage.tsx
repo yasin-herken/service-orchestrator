@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { UnifiedLogViewer, type LogScope } from '../components/logs/UnifiedLogViewer';
 import { EmptyState, ErrorState, LoadingState } from '../components/StateViews';
 import { useConnection } from '../context/ConnectionContext';
-import { useTaskEvents } from '../context/TaskEventsContext';
+import { useTaskRevision } from '../context/TaskEventsContext';
 import { useWorkspaces } from '../context/WorkspaceContext';
 import { useAsync } from '../hooks/useAsync';
 import { desktopApi } from '../services/desktopApi';
@@ -43,7 +43,7 @@ export function LogsPage({ intent }: { intent?: NavIntent | null }) {
   } = useWorkspaces();
   const { snapshot } = useConnection();
   const connected = snapshot.state === 'connected';
-  const { terminalRevision } = useTaskEvents();
+  const terminalRevision = useTaskRevision();
 
   const services = useAsync<ServiceSummary[]>(
     () => {

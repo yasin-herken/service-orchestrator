@@ -47,44 +47,56 @@ export function LogViewer({
   live?: boolean;
 }) {
   const [entries, setEntries] = useState<LogEntryView[]>([]);
-  const [cursor, setCursor] = useState<number | null>(null);
   const [following, setFollowing] = useState(live);
   const [level, setLevel] = useState<(typeof LEVELS)[number]>('all');
   const [search, setSearch] = useState('');
   const [error, setError] = useState<DesktopError | null>(null);
   const [loading, setLoading] = useState(true);
   const containerRef = useRef<HTMLDivElement>(null);
+  // The pagination cursor lives in a ref, so `load` is stable across polls and
+  // the follow interval is never torn down and recreated on every fetch.
+  const cursorRef = useRef<number | null>(null);
+  const disposedRef = useRef(false);
 
   const load = useCallback(
     async (reset: boolean) => {
       try {
         const page = await desktopApi.getTaskLogs(taskId, {
-          ...(reset ? {} : { after: cursor ?? undefined }),
+          ...(reset || cursorRef.current === null ? {} : { after: cursorRef.current }),
           limit: PAGE_LIMIT,
           minimumLevel: level === 'all' ? undefined : level,
           text: search.trim() || undefined,
         });
+        if (disposedRef.current) {
+          return;
+        }
         setError(null);
         setEntries((current) => (reset ? bounded(page.entries) : append(current, page.entries)));
-        setCursor(page.next_cursor);
+        cursorRef.current = page.next_cursor;
       } catch (cause) {
-        setError(toDesktopError(cause));
+        if (!disposedRef.current) {
+          setError(toDesktopError(cause));
+        }
       } finally {
-        setLoading(false);
+        if (!disposedRef.current) {
+          setLoading(false);
+        }
       }
     },
-    [taskId, cursor, level, search],
+    [taskId, level, search],
   );
 
   // Reload from the start whenever the filters change.
   useEffect(() => {
+    disposedRef.current = false;
+    cursorRef.current = null;
     setEntries([]);
-    setCursor(null);
     setLoading(true);
     void load(true);
-    // Intentionally keyed on the filters and task, not on `load`'s cursor.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [taskId, level, search]);
+    return () => {
+      disposedRef.current = true;
+    };
+  }, [load]);
 
   // Follow mode: poll for new entries while enabled.
   useEffect(() => {

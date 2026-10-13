@@ -32,6 +32,7 @@
 //! [`LogStreamError::Lagged`]: service_orchestrator_application::LogStreamError::Lagged
 
 use std::collections::{BTreeMap, HashMap, VecDeque};
+use std::ops::Bound::{Excluded, Unbounded};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, PoisonError};
 
@@ -327,8 +328,10 @@ impl LogService for LogHub {
         let inner = self.lock();
         let mut entries = Vec::new();
         let mut truncated = false;
-        for entry in inner.entries.values() {
-            if entry.sequence <= after || !matches_request(entry, request) {
+        // Seek straight to the first entry past the cursor instead of scanning
+        // and discarding all older retained entries on every page.
+        for (_, entry) in inner.entries.range((Excluded(after), Unbounded)) {
+            if !matches_request(entry, request) {
                 continue;
             }
             if entries.len() >= limit {
@@ -444,11 +447,22 @@ fn validate_request(request: &LogRequest) -> Result<(), LogServiceError> {
 }
 
 /// Returns `true` when `haystack` contains `needle`, ignoring ASCII case.
+///
+/// Implemented as a windowed, allocation-free comparison: the previous
+/// `to_lowercase` on both sides allocated two strings for every retained entry
+/// on every query.
 fn contains_ignore_case(haystack: &str, needle: &str) -> bool {
     if needle.is_empty() {
         return true;
     }
-    haystack.to_lowercase().contains(&needle.to_lowercase())
+    let haystack = haystack.as_bytes();
+    let needle = needle.as_bytes();
+    if needle.len() > haystack.len() {
+        return false;
+    }
+    haystack
+        .windows(needle.len())
+        .any(|window| window.eq_ignore_ascii_case(needle))
 }
 
 /// Truncates `message` to at most `max_chars` characters, marking the cut.
@@ -602,6 +616,84 @@ mod tests {
             .unwrap();
         assert_eq!(second.entries[0].message, "line 1");
         assert_eq!(second.entries[1].message, "line 2");
+    }
+
+    #[test]
+    fn page_seeks_from_the_cursor_over_large_history() {
+        let hub = small_hub(1_000, 1_000);
+        for index in 0..200 {
+            hub.record(entry(&service("a"), &format!("line {index}")));
+        }
+        let first = hub
+            .page(&LogRequest::new(service("a")).with_limit(5))
+            .unwrap();
+        assert_eq!(first.entries[0].message, "line 0");
+        assert_eq!(first.entries[4].message, "line 4");
+        assert!(first.truncated);
+        let cursor = first.next_cursor.unwrap();
+
+        let second = hub
+            .page(&LogRequest::new(service("a")).after(cursor).with_limit(5))
+            .unwrap();
+        // The range seek must skip every retained entry at or before the
+        // cursor, not just filter them out after scanning.
+        assert_eq!(second.entries[0].message, "line 5");
+        assert_eq!(second.entries[4].message, "line 9");
+        assert!(second.truncated);
+    }
+
+    #[test]
+    fn text_filter_matches_ignoring_ascii_case() {
+        assert!(contains_ignore_case("Connection Refused", "refused"));
+        assert!(contains_ignore_case("Connection Refused", "CONNECTION"));
+        assert!(!contains_ignore_case("all good", "refused"));
+        assert!(contains_ignore_case("anything", ""));
+        assert!(!contains_ignore_case("short", "longer than the haystack"));
+        // A multi-byte needle matches only its exact bytes (ASCII case folding
+        // leaves non-ASCII bytes unchanged) and never panics.
+        assert!(contains_ignore_case("héllo wörld", "wörld"));
+        assert!(!contains_ignore_case("hello world", "wörld"));
+    }
+
+    /// Measures historical paging at increasing cursor depth, with and without
+    /// a text filter (`tasks/025.md` §17, §22). `#[ignore]`d; run with
+    /// `--ignored --nocapture`.
+    #[test]
+    #[ignore = "measurement; run with --ignored --nocapture"]
+    fn measure_page_seek_scaling() {
+        const TOTAL: usize = 20_000;
+        const CALLS: u32 = 2_000;
+        let hub = small_hub(TOTAL, TOTAL);
+        for index in 0..TOTAL {
+            hub.record(entry(&service("a"), &format!("connection line {index}")));
+        }
+
+        for after in [0u64, (TOTAL as u64) / 2, (TOTAL as u64) - 50] {
+            let request = LogRequest::new(service("a")).after(after).with_limit(50);
+            let started = std::time::Instant::now();
+            for _ in 0..CALLS {
+                let page = hub.page(&request).unwrap();
+                assert!(page.entries.len() <= 50);
+            }
+            eprintln!(
+                "page(no text filter): after={after:>6} -> {:?} per call",
+                started.elapsed() / CALLS
+            );
+
+            let filtered = LogRequest::new(service("a"))
+                .after(after)
+                .with_limit(50)
+                .matching("CONNECTION");
+            let started = std::time::Instant::now();
+            for _ in 0..CALLS {
+                let page = hub.page(&filtered).unwrap();
+                assert!(page.entries.len() <= 50);
+            }
+            eprintln!(
+                "page(text filter):    after={after:>6} -> {:?} per call",
+                started.elapsed() / CALLS
+            );
+        }
     }
 
     #[test]
