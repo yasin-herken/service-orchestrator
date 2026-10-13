@@ -105,6 +105,20 @@ cargo test --workspace
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 ```
 
+Convenience scripts wrap these into test categories:
+
+```bash
+./scripts/test-unit.sh          # fast Rust unit tests
+./scripts/test-integration.sh   # Rust integration tests
+./scripts/test-security.sh      # security regression suite
+./scripts/test-frontend.sh      # desktop type check + Vitest
+./scripts/test-e2e.sh           # real binaries and daemon (see the script for opt-ins)
+./scripts/test-all.sh           # the full local gate
+```
+
+See [docs/testing.md](docs/testing.md) and
+[docs/test-coverage-report.md](docs/test-coverage-report.md).
+
 ## License
 
 Apache-2.0. See [LICENSE](LICENSE).

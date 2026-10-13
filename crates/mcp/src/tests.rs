@@ -666,6 +666,92 @@ fn a_prompt_renders_guidance_and_requires_its_argument() {
     }
 }
 
+// -- untrusted input: security regressions (`tasks/027.md` §29) --------------
+
+/// Hostile strings that are *not* valid domain identifiers. Identifiers are
+/// deliberately restricted to `[A-Za-z0-9-_.:]`, so none of these can be a
+/// path, a glob, or an argument fragment.
+const HOSTILE_IDENTIFIERS: &[&str] = &[
+    "../etc/passwd",
+    "..%2f..%2fetc",
+    "/etc/passwd",
+    "a/../../b",
+    "a b",
+    "orders-api\u{0}",
+    "*.toml",
+    "orders\napi",
+];
+
+#[tokio::test]
+async fn path_traversal_identifiers_are_rejected_before_dispatch() {
+    let harness = Harness::new();
+    for hostile in HOSTILE_IDENTIFIERS {
+        match harness
+            .call("get_service", json!({ "serviceId": hostile }))
+            .await
+        {
+            Err(ToolError::InvalidArgument { message }) => assert!(!message.is_empty()),
+            other => panic!("get_service accepted hostile id {hostile:?}: {other:?}"),
+        }
+        for tool in ["get_workspace_status", "validate_workspace"] {
+            match harness.call(tool, json!({ "workspaceId": hostile })).await {
+                Err(ToolError::InvalidArgument { message }) => assert!(!message.is_empty()),
+                other => panic!("{tool} accepted hostile id {hostile:?}: {other:?}"),
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_branch_name_that_looks_like_a_git_flag_is_rejected() {
+    // A branch that began with `-` could be mistaken for a Git CLI flag; the
+    // domain rejects those before any command is built (`AGENTS.md` §32).
+    let harness = Harness::new();
+    for hostile in [
+        "--upload-pack=touch /tmp/pwned",
+        "-D",
+        "--exec=evil",
+        "main; rm -rf /",
+        "main\n--force",
+        "-",
+    ] {
+        match harness
+            .call(
+                "git_checkout",
+                json!({ "serviceId": "orders-api", "branch": hostile }),
+            )
+            .await
+        {
+            Err(ToolError::InvalidArgument { message }) => assert!(!message.is_empty()),
+            other => panic!("git_checkout accepted hostile branch {hostile:?}: {other:?}"),
+        }
+    }
+}
+
+#[tokio::test]
+async fn an_enormous_log_limit_is_clamped_not_rejected() {
+    // A caller may request an unbounded number of log entries; the core must
+    // bound the response rather than allocate it (`tasks/026.md`).
+    let harness = Harness::new();
+    let entries = harness
+        .call_ok("get_logs", json!({ "limit": 10_000_000 }))
+        .await;
+    let entries = entries.as_array().expect("get_logs returns an array");
+    assert!(
+        entries.len() <= 1000,
+        "the default maximum query limit bounds the response"
+    );
+}
+
+#[tokio::test]
+async fn a_negative_limit_is_a_protocol_error() {
+    let harness = Harness::new();
+    match harness.call("get_logs", json!({ "limit": -1 })).await {
+        Err(ToolError::Protocol(error)) => assert_eq!(error.code, ErrorCode::INVALID_PARAMS),
+        other => panic!("expected a protocol error, got {other:?}"),
+    }
+}
+
 // -- envelope shape ----------------------------------------------------------
 
 #[test]

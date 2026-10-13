@@ -1250,4 +1250,8 @@ deliberately its own Cargo workspace, excluded from the root one, so the
   scales, methodology, and bottlenecks.
 - `docs/reliability-report.md` — the reliability audit, defects found and fixed,
   regression tests, and remaining risks.
+- `docs/testing.md` — the automated testing system: layers, categories, local
+  scripts, fixtures, isolation, determinism, and how to add a test.
+- `docs/test-coverage-report.md` — the coverage inventory, the category-to-test
+  mapping, ignored tests, and the remaining coverage gaps.
 - `AGENTS.md` — the full engineering guidance and product philosophy.
