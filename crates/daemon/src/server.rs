@@ -433,7 +433,7 @@ async fn handle_request(
             // the duration of the operation and a commit is always applied to a
             // fresh snapshot (`tasks/023.md` §38, §40).
             let application = shared.application.read().await.clone();
-            let result = dispatch::route(&application, &shared.engine, &request, same_user).await;
+            let result = dispatch::route(application, &shared.engine, &request, same_user).await;
             respond(out, &request, result).await;
         }
     }

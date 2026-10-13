@@ -14,7 +14,7 @@ import { GroupSelector } from '../components/workflow/GroupSelector';
 import { ProfileSelector } from '../components/workflow/ProfileSelector';
 import { ServiceSelection } from '../components/workflow/ServiceSelection';
 import { useConnection } from '../context/ConnectionContext';
-import { useTaskEvents } from '../context/TaskEventsContext';
+import { useTaskRevision } from '../context/TaskEventsContext';
 import { useWorkspaces } from '../context/WorkspaceContext';
 import { useAsync } from '../hooks/useAsync';
 import { desktopApi } from '../services/desktopApi';
@@ -65,7 +65,7 @@ export function WorkflowsPage({
   } = useWorkspaces();
   const { snapshot } = useConnection();
   const connected = snapshot.state === 'connected';
-  const { terminalRevision } = useTaskEvents();
+  const terminalRevision = useTaskRevision();
 
   const [mode, setMode] = useState<WorkflowMode>('configure');
   const [source, setSource] = useState<SelectionSource>('services');

@@ -883,3 +883,100 @@ fn reload_validation_reports_the_active_revision() {
     assert_eq!(reload.revision, before);
     harness.shutdown().expect("the daemon stops");
 }
+
+// -- performance measurement -------------------------------------------------
+
+/// Measures daemon startup and steady-state IPC round-trip latency over the
+/// real Unix-socket transport (`tasks/025.md` §7, §16, §18, §28).
+///
+/// `#[ignore]`d so the normal suite stays fast; run with
+/// `--ignored --nocapture --test-threads=1`. The measurement launches its own
+/// daemons with a 1 ms readiness poll so startup is not quantised to the shared
+/// harness's slower loop.
+#[test]
+#[ignore = "measurement; run with --ignored --nocapture --test-threads=1"]
+fn measure_daemon_startup_and_ipc_latency() {
+    let _lock = ENV_LOCK.lock().unwrap_or_else(|error| error.into_inner());
+    const LAUNCHES: usize = 5;
+    const CALLS: usize = 500;
+
+    let mut startups = Vec::with_capacity(LAUNCHES);
+    for sample in 0..LAUNCHES {
+        let root = unique_root();
+        std::fs::create_dir_all(&root).expect("the temporary directory is created");
+        let config_path = root.join("config.toml");
+        std::fs::write(&config_path, FIXTURE).expect("the fixture configuration is written");
+        let socket = root.join("run/daemon.sock");
+        let previous_socket = std::env::var_os(SOCKET_ENV);
+        std::env::set_var(SOCKET_ENV, &socket);
+
+        let runtime = tokio::runtime::Builder::new_multi_thread()
+            .worker_threads(2)
+            .enable_all()
+            .build()
+            .expect("a Tokio runtime is built");
+        let (application, engine) = runtime.block_on(build_core(&config_path));
+        let daemon = Daemon::new(
+            application,
+            engine,
+            DaemonOptions {
+                socket_path: socket.clone(),
+            },
+        );
+
+        let started = Instant::now();
+        let handle = runtime.spawn(daemon.run());
+        let deadline = Instant::now() + DEADLINE;
+        loop {
+            if RemoteClient::connect_existing(&config_path, ClientKind::Cli).is_ok() {
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "the daemon never became reachable"
+            );
+            std::thread::sleep(Duration::from_millis(1));
+        }
+        let startup = started.elapsed();
+        startups.push(startup);
+
+        // Steady-state round-trip latency over one persistent client.
+        let client = RemoteClient::connect_existing(&config_path, ClientKind::Cli)
+            .expect("the daemon is reachable");
+        let ws = demo_workspace();
+        let _ = client.list_services(&ws);
+        let mut latencies = Vec::with_capacity(CALLS);
+        for _ in 0..CALLS {
+            let called = Instant::now();
+            let listed = client.list_services(&ws).expect("list_services succeeds");
+            assert!(!listed.is_empty(), "the fixture declares services");
+            latencies.push(called.elapsed());
+        }
+        latencies.sort();
+        let at = |values: &[Duration], q: f64| -> Duration {
+            values[((values.len() as f64 - 1.0) * q).round() as usize]
+        };
+        eprintln!(
+            "launch {sample}: startup={startup:?}  list_services median={:?} p95={:?} max={:?}",
+            at(&latencies, 0.5),
+            at(&latencies, 0.95),
+            at(&latencies, 1.0),
+        );
+
+        let _ = client.shutdown_daemon();
+        let _ = runtime.block_on(async { tokio::time::timeout(DEADLINE, handle).await });
+        match previous_socket {
+            Some(value) => std::env::set_var(SOCKET_ENV, value),
+            None => std::env::remove_var(SOCKET_ENV),
+        }
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    startups.sort();
+    eprintln!(
+        "daemon startup over {LAUNCHES} launches: min={:?} median={:?} max={:?}",
+        startups[0],
+        startups[LAUNCHES / 2],
+        startups[LAUNCHES - 1],
+    );
+}

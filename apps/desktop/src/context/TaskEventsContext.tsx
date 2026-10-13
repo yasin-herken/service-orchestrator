@@ -78,6 +78,16 @@ export interface TaskEventsContextValue {
   terminalRevision: number;
 }
 
+/**
+ * The high-frequency tracking data (`recent`, `tasks`, `workflows`).
+ *
+ * It changes on every task event, including progress and message frames, so it
+ * is kept separate from {@link TaskRevisionContext}: a view that only reacts to
+ * terminal settles subscribes to the revision alone and does not re-render for
+ * every progress tick (`tasks/025.md` §24, §27).
+ */
+type TaskEventsData = Pick<TaskEventsContextValue, 'recent' | 'tasks' | 'workflows'>;
+
 /** How many activity entries the feed retains. */
 const MAX_ENTRIES = 50;
 /** How many task records are retained. */
@@ -97,7 +107,13 @@ interface TaskTrackingState {
   revision: number;
 }
 
-const TaskEventsContext = createContext<TaskEventsContextValue | null>(null);
+const TaskEventsContext = createContext<TaskEventsData | null>(null);
+
+/**
+ * The low-frequency reload revision, kept in its own context so terminal-settle
+ * consumers do not re-render for every progress event.
+ */
+const TaskRevisionContext = createContext<number | null>(null);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null;
@@ -382,25 +398,50 @@ export function TaskEventsProvider({ children }: { children: ReactNode }) {
     () => [...workflows.values()].sort((a, b) => b.updatedAt - a.updatedAt),
     [workflows],
   );
+  const revision = tracking.revision;
 
-  const value = useMemo<TaskEventsContextValue>(
+  const data = useMemo<TaskEventsData>(
     () => ({
       recent,
       tasks: taskList,
       workflows: workflowList,
-      terminalRevision: tracking.revision,
     }),
-    [recent, taskList, workflowList, tracking.revision],
+    [recent, taskList, workflowList],
   );
 
-  return <TaskEventsContext.Provider value={value}>{children}</TaskEventsContext.Provider>;
+  return (
+    <TaskEventsContext.Provider value={data}>
+      <TaskRevisionContext.Provider value={revision}>
+        {children}
+      </TaskRevisionContext.Provider>
+    </TaskEventsContext.Provider>
+  );
+}
+
+/**
+ * Reads the terminal-state reload revision only.
+ *
+ * Views that refresh authoritative state when a task settles — but do not
+ * render per-task progress — should prefer this over {@link useTaskEvents} so
+ * they are not re-rendered by every progress or message frame.
+ */
+export function useTaskRevision(): number {
+  const value = useContext(TaskRevisionContext);
+  if (value === null) {
+    throw new Error('useTaskRevision must be used within a TaskEventsProvider');
+  }
+  return value;
 }
 
 /** Reads the task-activity feed and tracked tasks. Must be used under the provider. */
 export function useTaskEvents(): TaskEventsContextValue {
-  const value = useContext(TaskEventsContext);
-  if (!value) {
+  const data = useContext(TaskEventsContext);
+  const revision = useContext(TaskRevisionContext);
+  if (!data || revision === null) {
     throw new Error('useTaskEvents must be used within a TaskEventsProvider');
   }
-  return value;
+  return useMemo(
+    () => ({ ...data, terminalRevision: revision }),
+    [data, revision],
+  );
 }
