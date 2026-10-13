@@ -6,6 +6,11 @@ import {
   makeBranches,
   makeBulkSummary,
   makeBuildTargets,
+  makeConfigurationCommit,
+  makeConfigurationPreview,
+  makeConfigurationReload,
+  makeConfigurationSnapshot,
+  makeConfigurationValidation,
   makeConnected,
   makeDaemonStatus,
   makeEnvironmentPlan,
@@ -21,7 +26,9 @@ import {
   makeMigrationStatus,
   makeOperationOutcome,
   makeProfile,
+  makeProjectSuggestion,
   makeRepositories,
+  makeRepositoryProbe,
   makeServiceDetail,
   makeServices,
   makeTaskView,
@@ -219,4 +226,11 @@ export function happyPathDefaults(): void {
   );
   mockDesktopApi.getWorkflowStatus.mockResolvedValue(makeWorkflowStatus());
   mockDesktopApi.listWorkflows.mockResolvedValue(makeWorkflowHistory());
+  mockDesktopApi.getConfiguration.mockResolvedValue(makeConfigurationSnapshot());
+  mockDesktopApi.validateConfiguration.mockResolvedValue(makeConfigurationValidation());
+  mockDesktopApi.previewConfiguration.mockResolvedValue(makeConfigurationPreview());
+  mockDesktopApi.commitConfiguration.mockResolvedValue(makeConfigurationCommit());
+  mockDesktopApi.reloadConfiguration.mockResolvedValue(makeConfigurationReload());
+  mockDesktopApi.inspectRepository.mockResolvedValue(makeRepositoryProbe());
+  mockDesktopApi.detectProjectConfiguration.mockResolvedValue(makeProjectSuggestion());
 }

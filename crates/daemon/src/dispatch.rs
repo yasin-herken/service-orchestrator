@@ -18,6 +18,7 @@ use service_orchestrator_application::{
 };
 use service_orchestrator_client::ops;
 use service_orchestrator_client::{codes, unavailable, DiffParams, RequestEnvelope};
+use service_orchestrator_config::ConfigChange;
 use service_orchestrator_domain::{
     Branch, GroupId, LibraryId, ProfileId, ServiceId, TaskId, WorkspaceId,
 };
@@ -74,6 +75,24 @@ pub(crate) async fn route(
         ops::LIST_RECENT_TASKS => {
             let (limit,): (usize,) = decode(params)?;
             encode(engine.list_recent_tasks(limit))
+        }
+
+        // -- configuration management (read-only) ---------------------------
+        // Commit and reload are handled by the server, which owns the write
+        // lock and the change-event broadcast (`tasks/023.md` §38).
+        ops::CONFIGURATION_SNAPSHOT => encode(app.configuration_snapshot()?),
+        ops::VALIDATE_CONFIGURATION => encode(app.validate_configuration()?),
+        ops::PREVIEW_CONFIGURATION => {
+            let (change, revision): (ConfigChange, String) = decode(params)?;
+            encode(app.preview_configuration(&change, &revision)?)
+        }
+        ops::INSPECT_REPOSITORY => {
+            let (path,): (String,) = decode(params)?;
+            encode(app.inspect_repository(&path)?)
+        }
+        ops::DETECT_PROJECT_CONFIGURATION => {
+            let (path,): (String,) = decode(params)?;
+            encode(app.detect_project_configuration(&path)?)
         }
 
         // -- workspaces, groups, profiles ----------------------------------

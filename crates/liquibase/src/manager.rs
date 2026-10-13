@@ -39,7 +39,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use service_orchestrator_application::{MigrationError, ResolvedMigrationTarget};
-use service_orchestrator_config::{Config, LiquibaseConfig};
+use service_orchestrator_config::{Config, ConfigManager, LiquibaseConfig, StaticConfigManager};
 use service_orchestrator_domain::{
     CommandKind, Environment, MigrationOperation, MigrationProviderType,
     MigrationTargetEnvironment, ServiceId,
@@ -96,7 +96,7 @@ pub struct MigrationOutcome {
 
 /// Orchestrates migration plans across providers.
 pub struct MigrationManager {
-    config: Arc<Config>,
+    config: Arc<dyn ConfigManager>,
     registry: Arc<MigrationProviderRegistry>,
     host: Arc<dyn BuildHost>,
     runner: MigrationRunner,
@@ -109,7 +109,11 @@ impl MigrationManager {
     /// The standard provider registry (Liquibase) and the system host are used.
     #[must_use]
     pub fn new(processes: ProcessManager, config: Arc<Config>) -> Self {
-        Self::with_providers(processes, config, MigrationProviderRegistry::standard())
+        Self::with_config_manager(
+            processes,
+            Arc::new(StaticConfigManager::new((*config).clone())),
+            MigrationProviderRegistry::standard(),
+        )
     }
 
     /// Creates a manager over an explicit provider registry.
@@ -117,6 +121,34 @@ impl MigrationManager {
     pub fn with_providers(
         processes: ProcessManager,
         config: Arc<Config>,
+        registry: MigrationProviderRegistry,
+    ) -> Self {
+        Self::with_config_manager(
+            processes,
+            Arc::new(StaticConfigManager::new((*config).clone())),
+            registry,
+        )
+    }
+
+    /// Replaces the configuration manager with a shared, live one.
+    ///
+    /// The daemon wires the single configuration manager here so a committed
+    /// change is observed by the next migration operation
+    /// (`tasks/023.md` §39, §40).
+    #[must_use]
+    pub fn with_shared_config(mut self, config: Arc<dyn ConfigManager>) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Creates a manager over a shared, live configuration.
+    ///
+    /// Every operation reads the manager's current snapshot, so a committed
+    /// configuration change is honoured immediately (`tasks/023.md` §39, §40).
+    #[must_use]
+    pub fn with_config_manager(
+        processes: ProcessManager,
+        config: Arc<dyn ConfigManager>,
         registry: MigrationProviderRegistry,
     ) -> Self {
         Self {
@@ -169,7 +201,8 @@ impl MigrationManager {
         target: &ResolvedMigrationTarget,
     ) -> Result<MigrationContext, MigrationError> {
         let service_id = &target.service_id;
-        let workspace = self.config.workspace(&target.workspace_id).ok_or_else(|| {
+        let config = self.config.current();
+        let workspace = config.workspace(&target.workspace_id).ok_or_else(|| {
             MigrationError::InvalidTarget {
                 service: service_id.clone(),
                 message: format!("workspace '{}' is not configured", target.workspace_id),

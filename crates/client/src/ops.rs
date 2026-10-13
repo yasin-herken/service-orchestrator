@@ -20,6 +20,23 @@ pub const DAEMON_SHUTDOWN: &str = "daemon_shutdown";
 /// Returns the read-only configuration summary.
 pub const CONFIG_SUMMARY: &str = "config_summary";
 
+// -- configuration management -----------------------------------------------
+
+/// Returns a read-only raw configuration snapshot for editing.
+pub const CONFIGURATION_SNAPSHOT: &str = "configuration_snapshot";
+/// Validates the current configuration file without changing it.
+pub const VALIDATE_CONFIGURATION: &str = "validate_configuration";
+/// Previews a proposed configuration change without committing it.
+pub const PREVIEW_CONFIGURATION: &str = "preview_configuration";
+/// Validates and persists a configuration change.
+pub const COMMIT_CONFIGURATION: &str = "commit_configuration";
+/// Re-reads and validates the configuration file from disk.
+pub const RELOAD_CONFIGURATION: &str = "reload_configuration";
+/// Inspects a local repository directory, read-only.
+pub const INSPECT_REPOSITORY: &str = "inspect_repository";
+/// Detects a suggested service configuration from a repository.
+pub const DETECT_PROJECT_CONFIGURATION: &str = "detect_project_configuration";
+
 // -- task listing and streaming ---------------------------------------------
 
 /// Lists every task the engine knows about.

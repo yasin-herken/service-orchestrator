@@ -29,7 +29,9 @@ use service_orchestrator_application::{
     ResolvedServiceTarget, RuntimeStateStore, ServiceProcessInfo, ServiceRuntimeError,
     ServiceRuntimeIndex,
 };
-use service_orchestrator_config::{Config, ConfiguredWorkspace};
+use service_orchestrator_config::{
+    Config, ConfigManager, ConfiguredWorkspace, StaticConfigManager,
+};
 use service_orchestrator_domain::{
     AbsolutePath, CommandKind, Environment, ProcessState, Service, ServiceId, Timestamp,
     WorkspaceId,
@@ -103,7 +105,7 @@ pub struct RestartOutcome {
 /// Coordinates local service lifecycle over the process manager.
 pub struct ServiceManager {
     processes: ProcessManager,
-    config: Arc<Config>,
+    config: Arc<dyn ConfigManager>,
     runtime_state: Arc<dyn RuntimeStateStore>,
     host: Arc<dyn RuntimeHost>,
     runtimes: Arc<RuntimeRegistry>,
@@ -127,6 +129,36 @@ impl ServiceManager {
     pub fn new(
         processes: ProcessManager,
         config: Arc<Config>,
+        runtime_state: Arc<dyn RuntimeStateStore>,
+    ) -> Self {
+        Self::with_config_manager(
+            processes,
+            Arc::new(StaticConfigManager::new((*config).clone())),
+            runtime_state,
+        )
+    }
+
+    /// Replaces the configuration manager with a shared, live one.
+    ///
+    /// The daemon wires the single [`FileConfigManager`](service_orchestrator_config::FileConfigManager)
+    /// here so a committed configuration change is observed by the next start
+    /// or stop (`tasks/023.md` §39, §40).
+    #[must_use]
+    pub fn with_shared_config(mut self, config: Arc<dyn ConfigManager>) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Creates a manager over a shared, live configuration.
+    ///
+    /// Unlike [`new`](Self::new), the manager observes later configuration
+    /// changes immediately: every operation reads the manager's current
+    /// snapshot, so a committed change is honoured by the next start or stop
+    /// (`tasks/023.md` §39, §40).
+    #[must_use]
+    pub fn with_config_manager(
+        processes: ProcessManager,
+        config: Arc<dyn ConfigManager>,
         runtime_state: Arc<dyn RuntimeStateStore>,
     ) -> Self {
         Self {
@@ -310,11 +342,6 @@ impl ServiceManager {
             .set_service_state(service_id, current.with_process(next));
     }
 
-    /// Returns the configured workspace that owns a service, if any.
-    fn workspace_of(&self, service_id: &ServiceId) -> Option<&ConfiguredWorkspace> {
-        self.config.workspace_of_service(service_id)
-    }
-
     /// Starts a service assuming the per-service lock is already held.
     async fn start_locked(
         &self,
@@ -343,7 +370,8 @@ impl ServiceManager {
             });
         }
 
-        let workspace = self.config.workspace(&target.workspace_id).ok_or_else(|| {
+        let config = self.config.current();
+        let workspace = config.workspace(&target.workspace_id).ok_or_else(|| {
             ServiceRuntimeError::WorkspaceNotFound {
                 workspace: target.workspace_id.clone(),
             }
@@ -491,11 +519,12 @@ impl ServiceManager {
         &self,
         service_id: &ServiceId,
     ) -> Result<StopOutcome, ServiceRuntimeError> {
-        let workspace =
-            self.workspace_of(service_id)
-                .ok_or_else(|| ServiceRuntimeError::ServiceNotFound {
-                    service: service_id.clone(),
-                })?;
+        let config = self.config.current();
+        let workspace = config.workspace_of_service(service_id).ok_or_else(|| {
+            ServiceRuntimeError::ServiceNotFound {
+                service: service_id.clone(),
+            }
+        })?;
         let workspace_id = workspace.workspace.id.clone();
 
         let Some(record) = self.managed.get(service_id) else {

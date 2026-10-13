@@ -30,7 +30,9 @@ use service_orchestrator_build::{
     MavenArtifactInspector,
 };
 use service_orchestrator_client::{socket_path, ClientKind, OrchestratorClient, RemoteClient};
-use service_orchestrator_config::{default_config_file, load_from_path, Config, ConfigError};
+use service_orchestrator_config::{
+    default_config_file, load_from_path, Config, ConfigError, ConfigManager, FileConfigManager,
+};
 use service_orchestrator_daemon::{Daemon, DaemonOptions};
 use service_orchestrator_execution::{ExecutorRegistry, TaskEngine};
 use service_orchestrator_git::{register_git_executors, CliGitManager};
@@ -43,8 +45,10 @@ use service_orchestrator_runtime::{register_service_executors, ServiceManager};
 use service_orchestrator_tui::{RemoteTaskObserver, TaskObserver};
 
 mod probe;
+mod repository;
 
 use probe::SystemWorkspaceProbe;
+use repository::SystemRepositoryInspector;
 
 /// The environment variable that overrides the configuration file location.
 const CONFIG_ENV: &str = "SERVICE_ORCHESTRATOR_CONFIG";
@@ -284,6 +288,14 @@ async fn bootstrap(
     let (config, config_path) = resolve_config(explicit_config)?;
     let config = Arc::new(config);
 
+    // The single configuration manager: the daemon's only configuration writer.
+    // Every manager and the application core share it, so a committed change is
+    // observed by the next operation (`tasks/023.md` §38, §40).
+    let configuration: Arc<dyn ConfigManager> = Arc::new(FileConfigManager::new(
+        config_path.clone(),
+        (*config).clone(),
+    ));
+
     // -- infrastructure adapters --------------------------------------------
     let processes = ProcessManager::new()?;
     let runtime_state = Arc::new(InMemoryRuntimeStateStore::new());
@@ -293,20 +305,22 @@ async fn bootstrap(
     let builds = Arc::new(BuildManager::new(processes.clone()));
     let artifacts: Arc<dyn ArtifactInspector> =
         Arc::new(MavenArtifactInspector::new(processes.clone()));
-    let migrations = Arc::new(MigrationManager::new(
-        processes.clone(),
-        Arc::clone(&config),
-    ));
-    let services = Arc::new(ServiceManager::new(
-        processes.clone(),
-        Arc::clone(&config),
-        runtime_state.clone(),
-    ));
-    let health = Arc::new(HealthManager::new(
-        Arc::clone(&config),
-        services.clone(),
-        runtime_state.clone(),
-    ));
+    let migrations = Arc::new(
+        MigrationManager::new(processes.clone(), Arc::clone(&config))
+            .with_shared_config(Arc::clone(&configuration)),
+    );
+    let services = Arc::new(
+        ServiceManager::new(
+            processes.clone(),
+            Arc::clone(&config),
+            runtime_state.clone(),
+        )
+        .with_shared_config(Arc::clone(&configuration)),
+    );
+    let health = Arc::new(
+        HealthManager::new(Arc::clone(&config), services.clone(), runtime_state.clone())
+            .with_shared_config(Arc::clone(&configuration)),
+    );
 
     // -- task engine ---------------------------------------------------------
     let mut registry = ExecutorRegistry::new();
@@ -357,7 +371,13 @@ async fn bootstrap(
     // The real, read-only environment probe behind `validate_workspace`. The
     // application core never reaches the filesystem, `PATH`, or the network on
     // its own (`tasks/017.md` §7).
-    .with_workspace_probe(Arc::new(SystemWorkspaceProbe));
+    .with_workspace_probe(Arc::new(SystemWorkspaceProbe))
+    // The single configuration manager behind the configuration-management use
+    // cases. The daemon is its only writer (`tasks/023.md` §38).
+    .with_configuration(Arc::clone(&configuration))
+    // The real, read-only repository inspector behind `inspect_repository` and
+    // the service wizard's technology detection (`tasks/023.md` §17, §18).
+    .with_repository_inspector(Arc::new(SystemRepositoryInspector));
 
     Ok(Runtime {
         application,

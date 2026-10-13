@@ -35,14 +35,15 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use service_orchestrator_application::{
-    ApplicationError, Authorization, BuildCapabilities, BulkOperationSummary, DiffOptions,
-    EnvironmentPlan, HealthCheckScope, LibraryArtifactVerification, LibraryDependent,
-    LibraryPrepareOptions, LibraryStatus, LogEntry, LogPage, LogRequest, LogStreamError,
-    LogSubscription, MigrationStatus, OperationResult, PrepareEnvironmentRequest,
-    PrepareSelectedLibrariesRequest, ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus,
-    ServiceStatus, WorkflowCancellation, WorkflowStatus, WorkspaceStatus,
-    WorkspaceValidationReport,
+    ApplicationError, Authorization, BuildCapabilities, BulkOperationSummary, ConfigurationCommit,
+    ConfigurationReload, ConfigurationValidation, DiffOptions, EnvironmentPlan, HealthCheckScope,
+    LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions, LibraryStatus, LogEntry,
+    LogPage, LogRequest, LogStreamError, LogSubscription, MigrationStatus, OperationResult,
+    PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest, ProjectConfigurationSuggestion,
+    RepositoryInspection, ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus, ServiceStatus,
+    WorkflowCancellation, WorkflowStatus, WorkspaceStatus, WorkspaceValidationReport,
 };
+use service_orchestrator_config::{ConfigChange, ConfigurationPreview, ConfigurationSnapshot};
 use service_orchestrator_domain::{
     Branch, BranchInfo, GroupId, Library, LibraryId, Profile, ProfileId, RepoDiff,
     RepositoryStatus, Service, ServiceGroup, ServiceId, Task, TaskId, Workflow, WorkflowId,
@@ -55,8 +56,8 @@ use tokio::sync::mpsc as tokio_mpsc;
 use crate::client::{ConfigSummary, OrchestratorClient};
 use crate::ops;
 use crate::protocol::{
-    codes, read_frame, unavailable, write_frame, ClientKind, DiffParams, RequestEnvelope,
-    ResponseEnvelope, ServerEvent, ServerMessage, PROTOCOL_VERSION,
+    codes, read_frame, unavailable, write_frame, ClientKind, ConfigurationChanged, DiffParams,
+    RequestEnvelope, ResponseEnvelope, ServerEvent, ServerMessage, PROTOCOL_VERSION,
 };
 use crate::socket::{connect_existing, connect_or_start, socket_path};
 
@@ -108,6 +109,8 @@ struct Inner {
     connection: Mutex<Option<Arc<Connection>>>,
     /// Task events republished from the server to local subscribers.
     events: broadcast::Sender<TaskEvent>,
+    /// Configuration-change events republished from the server.
+    config_events: broadcast::Sender<ConfigurationChanged>,
     /// Realtime log subscriptions, by service. Kept here (not on a connection)
     /// so they survive a reconnect.
     logs: Mutex<HashMap<ServiceId, tokio_mpsc::UnboundedSender<LogEntry>>>,
@@ -218,6 +221,7 @@ impl RemoteClient {
     ) -> Result<Self, ApplicationError> {
         let socket = socket_path(&config_path);
         let (events, _receiver) = broadcast::channel(1024);
+        let (config_events, _config_receiver) = broadcast::channel(64);
         let inner = Arc::new(Inner {
             config_path,
             socket_path: socket,
@@ -225,6 +229,7 @@ impl RemoteClient {
             autostart,
             connection: Mutex::new(None),
             events,
+            config_events,
             logs: Mutex::new(HashMap::new()),
         });
         {
@@ -414,6 +419,9 @@ impl Inner {
         match event {
             ServerEvent::Task { event } => {
                 let _ = self.events.send(event);
+            }
+            ServerEvent::ConfigurationChanged(change) => {
+                let _ = self.config_events.send(change);
             }
             ServerEvent::Log { service_id, entry } => {
                 let sender = self
@@ -1098,5 +1106,48 @@ impl OrchestratorClient for RemoteClient {
         profile_id: &ProfileId,
     ) -> Result<OperationResult, ApplicationError> {
         self.call(ops::STOP_PROFILE, (workspace_id, profile_id))
+    }
+
+    fn configuration_snapshot(&self) -> Result<ConfigurationSnapshot, ApplicationError> {
+        self.call(ops::CONFIGURATION_SNAPSHOT, ())
+    }
+
+    fn validate_configuration(&self) -> Result<ConfigurationValidation, ApplicationError> {
+        self.call(ops::VALIDATE_CONFIGURATION, ())
+    }
+
+    fn preview_configuration(
+        &self,
+        change: &ConfigChange,
+        expected_revision: &str,
+    ) -> Result<ConfigurationPreview, ApplicationError> {
+        self.call(ops::PREVIEW_CONFIGURATION, (change, expected_revision))
+    }
+
+    fn commit_configuration(
+        &self,
+        change: &ConfigChange,
+        expected_revision: &str,
+    ) -> Result<ConfigurationCommit, ApplicationError> {
+        self.call(ops::COMMIT_CONFIGURATION, (change, expected_revision))
+    }
+
+    fn reload_configuration(&self) -> Result<ConfigurationReload, ApplicationError> {
+        self.call(ops::RELOAD_CONFIGURATION, ())
+    }
+
+    fn inspect_repository(&self, path: &str) -> Result<RepositoryInspection, ApplicationError> {
+        self.call(ops::INSPECT_REPOSITORY, (path,))
+    }
+
+    fn detect_project_configuration(
+        &self,
+        path: &str,
+    ) -> Result<ProjectConfigurationSuggestion, ApplicationError> {
+        self.call(ops::DETECT_PROJECT_CONFIGURATION, (path,))
+    }
+
+    fn subscribe_configuration_events(&self) -> broadcast::Receiver<ConfigurationChanged> {
+        self.inner.config_events.subscribe()
     }
 }

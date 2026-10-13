@@ -26,6 +26,15 @@ pub const TASK_EVENT: &str = "daemon://task";
 /// the frontend subscription it belongs to (`tasks/021.md` §24).
 pub const LOG_EVENT: &str = "daemon://log";
 
+/// Event name carrying an active-configuration change.
+///
+/// The payload is a
+/// [`ConfigurationChanged`](service_orchestrator_client::ConfigurationChanged):
+/// the new revision and a short description. It never carries the
+/// configuration itself; the Configuration screen re-reads the snapshot it
+/// needs (`tasks/023.md` §39, §40).
+pub const CONFIGURATION_EVENT: &str = "daemon://configuration";
+
 /// Maps a task event onto its JSON payload.
 ///
 /// Returns [`None`] only if serialization fails, which would indicate the
@@ -67,5 +76,6 @@ mod tests {
         assert_eq!(CONNECTION_EVENT, "daemon://connection");
         assert_eq!(TASK_EVENT, "daemon://task");
         assert_eq!(LOG_EVENT, "daemon://log");
+        assert_eq!(CONFIGURATION_EVENT, "daemon://configuration");
     }
 }

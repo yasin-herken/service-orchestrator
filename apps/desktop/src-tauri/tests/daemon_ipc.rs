@@ -37,18 +37,22 @@ use async_trait::async_trait;
 use service_orchestrator_application::{
     build_parameter, parameter, Application, ArtifactInspectionError, ArtifactInspector,
     ArtifactPresence, BuildCapabilities, BuildCapabilityIndex, BulkOperationSummary,
-    DependencyVersionInspection, DiffOptions, GitError, GitManager, GitOptions, HealthCheckOutcome,
-    HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogSource, ResolvedArtifact,
-    ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository, ResolvedServiceTarget,
-    RuntimeStateStore, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
+    DependencyVersionInspection, DetectedBuildSystem, DetectedIntegration, DetectedRuntime,
+    DiffOptions, GitError, GitManager, GitOptions, HealthCheckOutcome, HealthState,
+    InMemoryRuntimeStateStore, LogEntry, LogLevel, LogSource, MavenMetadata, NodeMetadata,
+    ProviderAvailability, RepositoryInspection, RepositoryInspectionError, RepositoryInspector,
+    ResolvedArtifact, ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository,
+    ResolvedServiceTarget, RuntimeStateStore, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
 };
 use service_orchestrator_client::{
     socket_path, ClientKind, OrchestratorClient, RemoteClient, PROTOCOL_VERSION, SOCKET_ENV,
 };
-use service_orchestrator_config::{load_from_str, Config};
+use service_orchestrator_config::{
+    load_from_str, Config, ConfigChange, ConfigManager, EntityChange, FileConfigManager,
+};
 use service_orchestrator_daemon::{Daemon, DaemonError, DaemonOptions};
 use service_orchestrator_desktop_lib::{
-    build,
+    build, configuration,
     dto::{LogEntryView, OperationOutcome, OperationStatus, WorkflowStatusView},
     git, health, library, logs, migration, mutations, queries, tasks, workflow,
 };
@@ -275,7 +279,7 @@ impl Harness {
             .enable_all()
             .build()
             .expect("a Tokio runtime is built");
-        let core = runtime.block_on(build_core(&spec));
+        let core = runtime.block_on(build_core(&spec, &config_path));
         let daemon = Daemon::new(
             core.application.clone(),
             Arc::clone(&core.engine),
@@ -357,7 +361,7 @@ impl Harness {
         });
 
         let spec = self.spec.clone();
-        let core = self.runtime.block_on(build_core(&spec));
+        let core = self.runtime.block_on(build_core(&spec, &self.config_path));
         let daemon = Daemon::new(
             core.application.clone(),
             Arc::clone(&core.engine),
@@ -1925,8 +1929,15 @@ fn gui_tui_and_mcp_observe_the_same_authoritative_state() {
 /// database, or the network (`tasks/020.md` §40, `tasks/021.md` §42).
 ///
 /// Returns the [`Core`] the harness owns for the daemon's lifetime.
-async fn build_core(spec: &CoreSpec) -> Core {
+async fn build_core(spec: &CoreSpec, config_path: &std::path::Path) -> Core {
     let config = load_from_str(&spec.config, "<desktop-test>").expect("the fixture is valid");
+    // The daemon owns the single configuration manager over the harness's file,
+    // so the desktop adapter's configuration commands exercise the real
+    // validate/preview/commit/reload path end to end (`tasks/023.md` §37, §41).
+    let manager: Arc<dyn ConfigManager> = Arc::new(FileConfigManager::new(
+        config_path.to_path_buf(),
+        config.clone(),
+    ));
     // Both maps are derived from configuration before it moves into the
     // application: the health probe reports the checks a real probe would run,
     // and the migration executor re-checks the declared environment exactly as
@@ -2034,7 +2045,9 @@ async fn build_core(spec: &CoreSpec) -> Core {
             state: Arc::clone(&fakes),
         }))
         .with_build_capabilities(Arc::new(FakeBuildCapabilityIndex))
-        .with_health_index(health_index.clone());
+        .with_health_index(health_index.clone())
+        .with_configuration(manager)
+        .with_repository_inspector(Arc::new(FakeRepositoryInspector));
 
     Core {
         application,
@@ -3230,4 +3243,277 @@ fn a_reconnecting_gui_reloads_state_after_a_daemon_restart() {
     // The reconnected GUI can plan again through the same daemon.
     let plan = workflow::plan(&reconnected, &input).expect("a plan is generated");
     assert!(plan.step_count > 0);
+}
+
+// -- configuration management -------------------------------------------------
+
+/// A repository inspector that reports a fixed, structured detection for any
+/// path, without touching the filesystem.
+///
+/// It exercises the adapter's inspection/detection mapping over IPC while
+/// keeping the test hermetic: no real directory, no build, no script
+/// (`tasks/023.md` §42).
+struct FakeRepositoryInspector;
+
+impl RepositoryInspector for FakeRepositoryInspector {
+    fn inspect(&self, path: &str) -> Result<RepositoryInspection, RepositoryInspectionError> {
+        let mut inspection = RepositoryInspection::missing(path);
+        inspection.exists = true;
+        inspection.is_directory = true;
+        inspection.is_git_repository = true;
+        inspection.branch = Some("main".to_owned());
+        inspection.remote = Some("git@example.com:demo/orders-api.git".to_owned());
+        inspection.project_files = vec![
+            "pom.xml".to_owned(),
+            "mvnw".to_owned(),
+            "package.json".to_owned(),
+            "build.gradle.kts".to_owned(),
+        ];
+        inspection.build_systems = vec![
+            DetectedBuildSystem {
+                system: "maven".to_owned(),
+                label: "Maven".to_owned(),
+                availability: ProviderAvailability::Available,
+                evidence: vec!["pom.xml".to_owned()],
+                note: None,
+            },
+            DetectedBuildSystem {
+                system: "npm".to_owned(),
+                label: "npm".to_owned(),
+                availability: ProviderAvailability::Available,
+                evidence: vec!["package.json".to_owned()],
+                note: None,
+            },
+            DetectedBuildSystem {
+                system: "gradle".to_owned(),
+                label: "Gradle".to_owned(),
+                availability: ProviderAvailability::ProviderNotInstalled,
+                evidence: vec!["build.gradle.kts".to_owned()],
+                note: Some("Detected: Gradle — execution provider not installed.".to_owned()),
+            },
+        ];
+        inspection.runtimes = vec![
+            DetectedRuntime {
+                kind: "java".to_owned(),
+                label: "Java".to_owned(),
+                required_version: Some("21".to_owned()),
+                evidence: vec!["pom.xml".to_owned()],
+            },
+            DetectedRuntime {
+                kind: "node".to_owned(),
+                label: "Node.js".to_owned(),
+                required_version: Some("20.19.4".to_owned()),
+                evidence: vec!["package.json".to_owned()],
+            },
+        ];
+        inspection.integrations = vec![DetectedIntegration {
+            kind: "spring_boot".to_owned(),
+            label: "Spring Boot".to_owned(),
+            evidence: vec!["pom.xml".to_owned()],
+        }];
+        inspection.maven = Some(MavenMetadata {
+            group_id: Some("com.demo".to_owned()),
+            artifact_id: Some("orders-api".to_owned()),
+            version: Some("1.0.0".to_owned()),
+            packaging: Some("jar".to_owned()),
+            java_version: Some("21".to_owned()),
+            modules: Vec::new(),
+            wrapper_available: true,
+            spring_boot: true,
+        });
+        inspection.node = Some(NodeMetadata {
+            name: Some("orders-api-ui".to_owned()),
+            version: Some("1.0.0".to_owned()),
+            required_node_version: Some("20.19.4".to_owned()),
+            package_manager: Some("npm".to_owned()),
+            scripts: vec!["build".to_owned(), "start".to_owned()],
+            react: false,
+        });
+        Ok(inspection)
+    }
+}
+
+/// Builds a new, minimal, valid workspace entity.
+fn new_workspace(id: &str) -> service_orchestrator_config::raw::RawWorkspace {
+    service_orchestrator_config::raw::RawWorkspace {
+        id: id.to_owned(),
+        name: Some(id.to_owned()),
+        root: format!("~/Projects/{id}"),
+        environment: BTreeMap::new(),
+    }
+}
+
+#[test]
+fn configuration_snapshot_validation_and_preview_run_over_ipc() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    let snapshot = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert!(!snapshot.revision.is_empty());
+    assert_eq!(snapshot.workspaces.len(), 1);
+    assert_eq!(snapshot.services.len(), 2);
+
+    let validation = configuration::validate(&client).expect("validation runs");
+    assert!(validation.valid);
+    assert!(validation.issues.is_empty());
+
+    // Previewing a create reports a diff and a proposed revision, and writes
+    // nothing: the daemon is the only writer and it has not committed yet.
+    let change = ConfigChange::workspace(EntityChange::Create {
+        entity: new_workspace("payments"),
+    });
+    let preview = configuration::preview(&client, &change, &snapshot.revision)
+        .expect("a preview is returned");
+    assert!(preview.valid);
+    assert_ne!(preview.proposed_revision, snapshot.revision);
+    assert!(!preview.diff.is_empty());
+
+    let after = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert_eq!(after.revision, snapshot.revision, "preview wrote nothing");
+}
+
+#[test]
+fn a_committed_change_persists_and_is_observable_after_reload() {
+    let harness = Harness::start();
+    let client = harness.client();
+    let revision = configuration::snapshot(&client)
+        .expect("a snapshot")
+        .revision;
+
+    let change = ConfigChange::workspace(EntityChange::Create {
+        entity: new_workspace("payments"),
+    });
+    let commit =
+        configuration::commit(&client, &change, &revision, false).expect("the change is committed");
+    assert!(commit.description.contains("payments"));
+
+    let reload = configuration::reload(&client).expect("the file reloads");
+    assert_eq!(reload.revision, commit.revision);
+    assert_eq!(reload.counts.workspaces, 2);
+
+    let snapshot = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert!(snapshot.workspaces.iter().any(|w| w.id == "payments"));
+}
+
+#[test]
+fn a_stale_revision_is_reported_as_a_conflict() {
+    let harness = Harness::start();
+    let client = harness.client();
+    let change = ConfigChange::workspace(EntityChange::Create {
+        entity: new_workspace("payments"),
+    });
+
+    let error = configuration::commit(&client, &change, "not-the-current-revision", false)
+        .expect_err("a stale revision is refused");
+    assert_eq!(error.code, "CONFIG_CONFLICT");
+}
+
+#[test]
+fn an_unconfirmed_removal_is_denied_but_a_confirmed_one_persists() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    // Without confirmation the removal is refused by the daemon's policy.
+    let revision = configuration::snapshot(&client)
+        .expect("a snapshot")
+        .revision;
+    let change = ConfigChange::group(EntityChange::Remove {
+        id: "core".to_owned(),
+    });
+    let denied = configuration::commit(&client, &change, &revision, false)
+        .expect_err("an unconfirmed removal is refused");
+    assert_eq!(denied.code, "PermissionDenied");
+
+    // The file is untouched: the group survives the denial.
+    let snapshot = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert!(snapshot.groups.iter().any(|g| g.id == "core"));
+
+    // With confirmation the interactive desktop client is allowed to remove it.
+    let confirmed = configuration::commit(&client, &change, &snapshot.revision, true)
+        .expect("a confirmed removal commits");
+    let after = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert_eq!(after.revision, confirmed.revision);
+    assert!(!after.groups.iter().any(|g| g.id == "core"));
+}
+
+#[test]
+fn an_invalid_change_is_reported_as_a_validation_failure() {
+    let harness = Harness::start();
+    let client = harness.client();
+    let revision = configuration::snapshot(&client)
+        .expect("a snapshot")
+        .revision;
+    // A service that names a workspace that does not exist fails validation.
+    let change = ConfigChange::service(EntityChange::Create {
+        entity: service_orchestrator_config::raw::RawService {
+            id: "orphan".to_owned(),
+            name: None,
+            service_type: "backend".to_owned(),
+            workspace: "ghost".to_owned(),
+            path: Some("backend/orphan".to_owned()),
+            default_branch: Some("main".to_owned()),
+            repository: None,
+            runtime: None,
+            runtimes: Vec::new(),
+            commands: Default::default(),
+            build_system: None,
+            liquibase: None,
+            health_checks: Vec::new(),
+            ports: Vec::new(),
+            dependencies: Default::default(),
+            environment: BTreeMap::new(),
+            capabilities: Vec::new(),
+        },
+    });
+    let error = configuration::commit(&client, &change, &revision, false)
+        .expect_err("an invalid change is refused");
+    assert_eq!(error.code, "ConfigurationInvalid");
+}
+
+#[test]
+fn repository_inspection_and_detection_are_structured_and_read_only() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    let inspection =
+        configuration::inspect(&client, "/tmp/demo/orders-api").expect("inspection succeeds");
+    assert!(inspection.exists && inspection.is_directory && inspection.is_git_repository);
+    assert_eq!(inspection.branch.as_deref(), Some("main"));
+    assert_eq!(
+        inspection
+            .operational_build_system()
+            .map(|s| s.system.as_str()),
+        Some("maven")
+    );
+    let gradle = inspection
+        .build_systems
+        .iter()
+        .find(|system| system.system == "gradle")
+        .expect("Gradle is detected but not operational");
+    assert_eq!(
+        gradle.availability,
+        ProviderAvailability::ProviderNotInstalled
+    );
+
+    let suggestion =
+        configuration::detect(&client, "/tmp/demo/orders-api").expect("detection succeeds");
+    assert_eq!(suggestion.service_type.as_deref(), Some("backend"));
+    assert_eq!(suggestion.build_system.as_deref(), Some("maven"));
+    assert!(
+        !suggestion.warnings.is_empty(),
+        "the Gradle caveat is surfaced"
+    );
+    assert!(suggestion
+        .warnings
+        .iter()
+        .any(|warning| warning.contains("Gradle")));
+}
+
+#[test]
+fn a_relative_inspection_path_is_rejected_before_any_inspection() {
+    let harness = Harness::start();
+    let client = harness.client();
+    let error =
+        configuration::inspect(&client, "../escape").expect_err("a traversal path is refused");
+    assert_eq!(error.code, "InvalidPath");
 }

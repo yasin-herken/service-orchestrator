@@ -47,16 +47,23 @@
 
 mod error;
 mod loader;
+pub mod management;
 mod migration;
 mod model;
 mod normalize;
-mod raw;
+pub mod raw;
 mod validation;
 
 pub use error::{ConfigError, ValidationError, ValidationErrors};
 pub use loader::{
     default_config_dir, default_config_file, load_default, load_from_path, load_from_str,
     ConfigLoader, TomlFileLoader,
+};
+pub use management::{
+    revision_of, AffectedReference, ConfigChange, ConfigManager, ConfigRepository,
+    ConfigurationDiff, ConfigurationPreview, ConfigurationSnapshot, EntityChange, EntityKind,
+    EntitySummary, FieldChange, FileConfigManager, RunningServiceImpact, StaticConfigManager,
+    UpdatedEntity,
 };
 pub use model::{
     Config, ConfiguredWorkspace, ExecutionSettings, LiquibaseConfig, MigrationCommandSet,

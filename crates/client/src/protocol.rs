@@ -132,11 +132,31 @@ pub enum ServerEvent {
         /// The entry.
         entry: LogEntry,
     },
+    /// The active configuration changed.
+    ///
+    /// Emitted after the daemon commits or reloads configuration, so every
+    /// connected client — TUI, MCP, and the desktop GUI — refreshes its view
+    /// and observes the same revision (`tasks/023.md` §39, §40).
+    ConfigurationChanged(ConfigurationChanged),
     /// The daemon is shutting down.
     Shutdown {
         /// A human-readable reason.
         reason: String,
     },
+}
+
+/// The payload of a [`ServerEvent::ConfigurationChanged`] event.
+///
+/// It carries the new revision and a short, human-readable description of what
+/// changed. It never carries the configuration itself: a client re-reads the
+/// snapshot it needs, so there is no second cache to keep coherent
+/// (`tasks/023.md` §39, §40).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigurationChanged {
+    /// The revision of the file after the change.
+    pub revision: String,
+    /// A short description, for example `create service 'auth-service'`.
+    pub description: String,
 }
 
 /// A serializable projection of
@@ -383,6 +403,26 @@ mod tests {
         let message = ServerMessage::Event(event);
         let value = serde_json::to_value(&message).expect("a message serializes");
         assert_eq!(value["kind"], serde_json::json!("event"));
+    }
+
+    #[test]
+    fn configuration_changed_events_are_tagged_and_carry_a_revision() {
+        let event = ServerEvent::ConfigurationChanged(ConfigurationChanged {
+            revision: "abc123".to_owned(),
+            description: "create service 'auth-service'".to_owned(),
+        });
+        let value = serde_json::to_value(&event).expect("an event serializes");
+        assert_eq!(
+            value["event_type"],
+            serde_json::json!("configuration_changed")
+        );
+        assert_eq!(value["revision"], serde_json::json!("abc123"));
+        let decoded: ServerEvent = serde_json::from_value(value).expect("the event round-trips");
+        assert!(matches!(
+            decoded,
+            ServerEvent::ConfigurationChanged(ConfigurationChanged { revision, .. })
+                if revision == "abc123"
+        ));
     }
 
     #[test]

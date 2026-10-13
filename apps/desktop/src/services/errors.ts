@@ -12,6 +12,12 @@ export const ERROR_CODES = {
   notFound: 'NOT_FOUND',
   /** Unexpected adapter-side failure. */
   internal: 'INTERNAL',
+  /** A configuration edit was based on a stale revision. */
+  configConflict: 'CONFIG_CONFLICT',
+  /** A proposed configuration change does not validate. */
+  configurationInvalid: 'ConfigurationInvalid',
+  /** A repository path was rejected by the daemon. */
+  invalidPath: 'InvalidPath',
 } as const;
 
 /** Type guard for the structured error shape produced by Tauri commands. */

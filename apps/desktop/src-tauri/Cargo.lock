@@ -2824,6 +2824,7 @@ dependencies = [
  "service-orchestrator-domain",
  "thiserror 2.0.21",
  "toml 0.8.23",
+ "toml_edit 0.22.27",
 ]
 
 [[package]]
@@ -2835,6 +2836,7 @@ dependencies = [
  "serde_json",
  "service-orchestrator-application",
  "service-orchestrator-client",
+ "service-orchestrator-config",
  "service-orchestrator-domain",
  "service-orchestrator-execution",
  "thiserror 2.0.21",

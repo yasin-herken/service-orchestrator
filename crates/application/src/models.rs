@@ -12,6 +12,7 @@
 use std::collections::BTreeSet;
 
 use serde::{Deserialize, Serialize};
+use service_orchestrator_config::ValidationError;
 use service_orchestrator_domain::{
     AbsolutePath, ArtifactCoordinate, Branch, BuildOperation, BuildSystem, DependencyKind,
     GitState, GroupId, LibraryId, LiquibaseExecutionMode, MigrationProviderType,
@@ -1040,4 +1041,73 @@ pub struct DiagnosticFailure {
     /// When the failure was observed, if known.
     #[serde(default)]
     pub at: Option<Timestamp>,
+}
+
+/// The outcome of validating the current configuration file.
+///
+/// A file that parses but is invalid is still a *successful* validation query:
+/// [`valid`](Self::valid) is `false` and [`issues`](Self::issues) carries the
+/// structured problems (`tasks/023.md` §38).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigurationValidation {
+    /// The revision the file was validated at.
+    pub revision: String,
+    /// Whether the configuration is valid.
+    pub valid: bool,
+    /// The structured validation problems; empty when valid.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub issues: Vec<ValidationError>,
+}
+
+/// A compact count of the entities a configuration declares.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigurationCounts {
+    /// The number of workspaces.
+    pub workspaces: usize,
+    /// The number of services.
+    pub services: usize,
+    /// The number of libraries.
+    pub libraries: usize,
+    /// The number of profiles.
+    pub profiles: usize,
+    /// The number of groups.
+    pub groups: usize,
+}
+
+/// The outcome of committing a configuration change.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigurationCommit {
+    /// The revision of the file after the commit.
+    pub revision: String,
+    /// A short description of what changed.
+    pub description: String,
+    /// The entity counts after the commit.
+    pub counts: ConfigurationCounts,
+}
+
+/// The outcome of reloading the configuration from disk.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ConfigurationReload {
+    /// The revision of the file that was loaded.
+    pub revision: String,
+    /// The entity counts after the reload.
+    pub counts: ConfigurationCounts,
+}
+
+impl ConfigurationCounts {
+    /// Counts the entities in a validated configuration.
+    #[must_use]
+    pub fn of(config: &service_orchestrator_config::Config) -> Self {
+        let mut counts = Self {
+            workspaces: config.workspaces.len(),
+            ..Self::default()
+        };
+        for workspace in &config.workspaces {
+            counts.services += workspace.workspace.services.len();
+            counts.libraries += workspace.workspace.libraries.len();
+            counts.profiles += workspace.workspace.profiles.len();
+            counts.groups += workspace.workspace.groups.len();
+        }
+        counts
+    }
 }

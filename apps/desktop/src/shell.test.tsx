@@ -35,6 +35,7 @@ describe('application shell', () => {
       'Tasks',
       'Logs',
       'Health',
+      'Configuration',
       'Settings',
     ]) {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument();

@@ -49,6 +49,11 @@ schemars = "1.0"
 time = { version = "0.3.53", features = ["serde", "macros"] }
 tokio = { version = "1.52", features = ["rt", "rt-multi-thread", "sync", "time", "macros", "process", "io-util", "net"] }
 toml = "0.8"
+# Format-preserving TOML editing. Used by the configuration management layer so
+# a mutation rewrites only the edited array of tables and preserves comments and
+# formatting everywhere else (`tasks/023.md` §37). The `serde` feature provides
+# `toml_edit::ser`, used to turn a typed entity back into a TOML table.
+toml_edit = { version = "0.22", features = ["serde"] }
 
 # Internal crates. Path dependencies keep the workspace building offline and
 # make the intended dependency direction explicit and enforceable.
@@ -99,8 +104,6 @@ service-orchestrator-policy.workspace = true
 service-orchestrator-process.workspace = true
 service-orchestrator-runtime.workspace = true
 service-orchestrator-tui.workspace = true
-tokio.workspace = true
-
-[dev-dependencies]
-# Used by the end-to-end MCP stdio test that drives the real binary.
+# Used by the read-only repository inspector to parse `package.json`.
 serde_json.workspace = true
+tokio.workspace = true

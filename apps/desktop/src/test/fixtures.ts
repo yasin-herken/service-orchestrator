@@ -1,10 +1,18 @@
 import type {
+  AffectedReferenceView,
   ArtifactView,
   ArtifactVerificationView,
   BranchView,
   BuildCapabilitiesView,
   BuildTargetSummary,
   BulkSummaryView,
+  ConfigChangeView,
+  ConfigurationCommitView,
+  ConfigurationCountsView,
+  ConfigurationPreviewView,
+  ConfigurationReloadView,
+  ConfigurationSnapshotView,
+  ConfigurationValidationView,
   ConnectionSnapshot,
   DaemonStatus,
   EnvironmentPlanView,
@@ -22,11 +30,20 @@ import type {
   MigrationStatusView,
   OperationOutcome,
   ProfileView,
+  ProjectSuggestionView,
+  RawArtifactView,
+  RawGroupView,
+  RawLibraryView,
+  RawProfileView,
+  RawServiceView,
   RepositoryInspectionView,
+  RepositoryProbeView,
   RepositorySummary,
+  RunningServiceImpactView,
   ServiceDetail,
   ServiceSummary,
   TaskView,
+  ValidationIssueView,
   VersionAlignmentView,
   WorkflowStatusView,
   WorkflowSummaryView,
@@ -929,4 +946,340 @@ export function makeWorkflowHistory(): WorkflowSummaryView[] {
       finished_at: 1_699_999_040,
     }),
   ];
+}
+
+// -- configuration management --------------------------------------------------
+
+/** Builds a raw service mirroring the demo fixture. */
+export function makeRawService(
+  overrides: Partial<RawServiceView> = {},
+): RawServiceView {
+  return {
+    id: 'orders-api',
+    name: 'orders-api',
+    type: 'backend',
+    workspace: 'demo',
+    path: 'backend/orders-api',
+    default_branch: 'main',
+    repository: {
+      url: 'https://example.com/orders-api.git',
+      default_branch: 'main',
+      provider: 'github',
+    },
+    runtime: { type: 'java', version: '21' },
+    commands: { build: './mvnw clean install', start: './mvnw spring-boot:run' },
+    build_system: 'maven',
+    health_checks: [{ type: 'http', url: 'http://localhost:8081/actuator/health' }],
+    ports: [{ port: 8081 }],
+    dependencies: { services: ['admin-ui'] },
+    environment: { LOGGING_LEVEL: 'INFO' },
+    ...overrides,
+  };
+}
+
+/** Builds a raw library mirroring the demo fixture. */
+export function makeRawLibrary(
+  overrides: Partial<RawLibraryView> = {},
+): RawLibraryView {
+  return {
+    id: 'shared-kit',
+    name: 'shared-kit',
+    workspace: 'demo',
+    path: 'libraries/shared-kit',
+    default_branch: 'main',
+    type: 'maven',
+    repository: { url: 'https://example.com/shared-kit.git' },
+    artifact: makeRawArtifact(),
+    commands: { build: './mvnw clean install' },
+    build_system: 'maven',
+    ...overrides,
+  };
+}
+
+/** Builds a raw artifact coordinate. */
+export function makeRawArtifact(
+  overrides: Partial<RawArtifactView> = {},
+): RawArtifactView {
+  return {
+    group_id: 'com.demo',
+    artifact_id: 'shared-kit',
+    version: '1.8.0-SNAPSHOT',
+    packaging: 'jar',
+    ...overrides,
+  };
+}
+
+/** Builds a raw service group. */
+export function makeRawGroup(overrides: Partial<RawGroupView> = {}): RawGroupView {
+  return {
+    id: 'core',
+    name: 'Core services',
+    workspace: 'demo',
+    services: ['admin-ui'],
+    ...overrides,
+  };
+}
+
+/** Builds a raw developer profile. */
+export function makeRawProfile(
+  overrides: Partial<RawProfileView> = {},
+): RawProfileView {
+  return {
+    id: 'full-stack',
+    name: 'Full stack',
+    description: 'Backend plus frontend for local development',
+    workspace: 'demo',
+    services: ['orders-api'],
+    groups: ['core'],
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a raw configuration snapshot matching the demo fixture.
+ *
+ * It is deliberately a *snapshot*: tests that commit a change can resolve the
+ * mock against a new snapshot to model the daemon's single source of truth.
+ */
+export function makeConfigurationSnapshot(
+  overrides: Partial<ConfigurationSnapshotView> = {},
+): ConfigurationSnapshotView {
+  return {
+    revision: 'rev-1',
+    config_version: 1,
+    workspaces: [
+      { id: 'demo', name: 'Demo Platform', root: '~/Projects/demo' },
+    ],
+    services: [makeRawService()],
+    libraries: [makeRawLibrary()],
+    profiles: [makeRawProfile()],
+    groups: [makeRawGroup()],
+    execution: { max_parallel_tasks: 4 },
+    ...overrides,
+  };
+}
+
+/** Builds a compact entity-count summary. */
+export function makeConfigurationCounts(
+  overrides: Partial<ConfigurationCountsView> = {},
+): ConfigurationCountsView {
+  return {
+    workspaces: 1,
+    services: 1,
+    libraries: 1,
+    profiles: 1,
+    groups: 1,
+    ...overrides,
+  };
+}
+
+/** Builds one actionable validation issue. */
+export function makeValidationIssue(
+  overrides: Partial<ValidationIssueView> = {},
+): ValidationIssueView {
+  return {
+    file: '/Users/dev/.service-orchestrator/config.toml',
+    location: 'services[0].workspace',
+    problem: "unknown workspace 'ghost'",
+    expected: 'an existing workspace id',
+    suggested_fix: "declare a workspace with id 'ghost'",
+    ...overrides,
+  };
+}
+
+/** The outcome of validating the active configuration file. */
+export function makeConfigurationValidation(
+  overrides: Partial<ConfigurationValidationView> = {},
+): ConfigurationValidationView {
+  return {
+    revision: 'rev-1',
+    valid: true,
+    issues: [],
+    ...overrides,
+  };
+}
+
+/** Builds a running-service impact entry. */
+export function makeRunningImpact(
+  overrides: Partial<RunningServiceImpactView> = {},
+): RunningServiceImpactView {
+  return {
+    service_id: 'orders-api',
+    running: true,
+    change: 'updated',
+    action_required:
+      'The running process still uses the previous configuration; restart it to apply the change.',
+    ...overrides,
+  };
+}
+
+/** Builds a reference that points at a change target. */
+export function makeAffectedReference(
+  overrides: Partial<AffectedReferenceView> = {},
+): AffectedReferenceView {
+  return {
+    source_kind: 'group',
+    source_id: 'core',
+    relation: 'group',
+    target: 'admin-ui',
+    ...overrides,
+  };
+}
+
+/**
+ * Builds a preview that adds one service.
+ *
+ * `valid` defaults to `true` and every collection is populated so a test can
+ * assert the GUI renders the diff, issues, references, and impact without
+ * configuring each one.
+ */
+export function makeConfigurationPreview(
+  overrides: Partial<ConfigurationPreviewView> = {},
+): ConfigurationPreviewView {
+  return {
+    revision: 'rev-1',
+    proposed_revision: 'rev-2',
+    valid: true,
+    diff: {
+      added: [{ kind: 'service', id: 'billing-api', name: 'billing-api' }],
+      updated: [],
+      removed: [],
+    },
+    issues: [],
+    affected_references: [],
+    running_impact: [],
+    ...overrides,
+  };
+}
+
+/** Builds a preview whose proposal fails validation. */
+export function makeInvalidConfigurationPreview(): ConfigurationPreviewView {
+  return makeConfigurationPreview({
+    valid: false,
+    proposed_revision: 'rev-1',
+    diff: {
+      added: [{ kind: 'service', id: 'billing-api', name: 'billing-api' }],
+      updated: [],
+      removed: [],
+    },
+    issues: [makeValidationIssue()],
+  });
+}
+
+/** Builds the outcome of committing a change. */
+export function makeConfigurationCommit(
+  overrides: Partial<ConfigurationCommitView> = {},
+): ConfigurationCommitView {
+  return {
+    revision: 'rev-2',
+    description: "create service 'billing-api'",
+    counts: makeConfigurationCounts({ services: 2 }),
+    ...overrides,
+  };
+}
+
+/** Builds the outcome of reloading the configuration. */
+export function makeConfigurationReload(
+  overrides: Partial<ConfigurationReloadView> = {},
+): ConfigurationReloadView {
+  return {
+    revision: 'rev-2',
+    counts: makeConfigurationCounts(),
+    ...overrides,
+  };
+}
+
+/** Builds a read-only repository probe with Maven, npm, and Gradle detected. */
+export function makeRepositoryProbe(
+  overrides: Partial<RepositoryProbeView> = {},
+): RepositoryProbeView {
+  return {
+    path: '/Users/dev/Projects/demo/backend/orders-api',
+    exists: true,
+    is_directory: true,
+    is_git_repository: true,
+    branch: 'main',
+    remote: 'https://example.com/orders-api.git',
+    project_files: ['pom.xml', 'mvnw', 'package.json', 'build.gradle.kts'],
+    build_systems: [
+      {
+        system: 'maven',
+        label: 'Maven',
+        availability: 'available',
+        evidence: ['pom.xml'],
+      },
+      {
+        system: 'npm',
+        label: 'npm',
+        availability: 'available',
+        evidence: ['package.json'],
+      },
+      {
+        system: 'gradle',
+        label: 'Gradle',
+        availability: 'provider_not_installed',
+        evidence: ['build.gradle.kts'],
+        note: 'Detected: Gradle — execution provider not installed.',
+      },
+    ],
+    runtimes: [
+      { kind: 'java', label: 'Java', required_version: '21', evidence: ['pom.xml'] },
+      {
+        kind: 'node',
+        label: 'Node.js',
+        required_version: '20.19.4',
+        evidence: ['package.json'],
+      },
+    ],
+    integrations: [{ kind: 'spring_boot', label: 'Spring Boot', evidence: ['pom.xml'] }],
+    maven: {
+      group_id: 'com.demo',
+      artifact_id: 'orders-api',
+      version: '1.0.0',
+      packaging: 'jar',
+      java_version: '21',
+      wrapper_available: true,
+      spring_boot: true,
+    },
+    node: {
+      name: 'orders-api-ui',
+      version: '1.0.0',
+      required_node_version: '20.19.4',
+      package_manager: 'npm',
+      scripts: ['build', 'start'],
+      react: false,
+    },
+    ...overrides,
+  };
+}
+
+/** Builds a suggested service configuration from a Maven repository. */
+export function makeProjectSuggestion(
+  overrides: Partial<ProjectSuggestionView> = {},
+): ProjectSuggestionView {
+  return {
+    path: '/Users/dev/Projects/demo/backend/orders-api',
+    service_type: 'backend',
+    build_system: 'maven',
+    runtimes: [{ kind: 'java', label: 'Java', required_version: '21', evidence: ['pom.xml'] }],
+    build_command: { program: './mvnw', args: ['clean', 'install'] },
+    start_command: { program: './mvnw', args: ['spring-boot:run'] },
+    integrations: [{ kind: 'spring_boot', label: 'Spring Boot', evidence: ['pom.xml'] }],
+    warnings: [
+      'Gradle was detected but its execution provider is not installed; Maven is suggested instead.',
+    ],
+    inspection: makeRepositoryProbe(),
+    ...overrides,
+  };
+}
+
+/** Builds a service-creation change for the demo workspace. */
+export function makeServiceCreateChange(): ConfigChangeView {
+  return {
+    kind: 'service',
+    change: {
+      action: 'create',
+      entity: makeRawService({ id: 'billing-api', name: 'billing-api' }),
+    },
+  };
 }

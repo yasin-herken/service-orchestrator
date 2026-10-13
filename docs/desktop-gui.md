@@ -1223,3 +1223,77 @@ selection, plan, and results. While the daemon is disconnected, execution and
 cancellation are disabled, the workflow id is preserved, and the screen reloads
 its state when the connection returns. A workflow is visible identically through
 the TUI and MCP, because all three observe the one authoritative daemon.
+
+---
+
+## 28. Configuration management (`tasks/023.md`)
+
+The **Configuration** screen (`ConfigurationPage`, `src/pages/ConfigurationPage.tsx`)
+edits the same `config.toml` the daemon serves. The GUI parses no TOML and writes
+no file: it reads a raw **snapshot** from the daemon, builds a typed change,
+reviews the daemon's preview, and commits it. This keeps one source of truth and
+one validation path shared with the TUI and MCP.
+
+### Sections
+
+A tab strip switches between the entity kinds — **Workspaces**, **Services**,
+**Libraries**, **Profiles**, and **Groups** — each listing the entities scoped to
+the active workspace (workspaces list globally). Every entity supports **Add**,
+**Edit**, and **Remove** through the shared editors
+(`src/components/configuration/`): `WorkspaceEditor`, `ServiceEditor`,
+`LibraryEditor`, `ProfileEditor`, `GroupEditor`. Identifiers are immutable once an
+entity exists; every change is reviewed before it is written.
+
+The toolbar shows the current **revision** and the entity counts, with
+**Validate** (validates the active file without changing it) and **Reload**
+(re-reads the file from disk).
+
+### The service wizard and repository detection
+
+Adding a service can start from a local directory. The **Inspect repository** and
+**Detect configuration** actions call the daemon's read-only inspection and show
+what it observed: whether the path is a directory and a Git repository, its
+branch, the project files, detected **build systems** with provider availability,
+runtimes, and integrations. A detected build system with no installed provider is
+shown honestly — **"Detect configuration" on a Gradle project reports
+`provider not installed`**, never that it will work. **Apply suggestion** fills the
+form with the detected type, build system, runtimes, and structured build/start
+commands; the developer reviews and edits them. Inspection runs no build and no
+script.
+
+### Preview, validation, and save
+
+Submitting an editor opens a **review dialog** that renders the daemon's preview:
+the structured **diff** (added / updated with field-level before/after / removed),
+the **validation** result over the whole proposed document, any **affected
+references** (other entities that still point at a removal), and the **running
+impact** (which live processes would need a restart — the daemon never restarts
+them for you). Save is disabled while the proposal is invalid. The dialog is a
+review affordance, not authorization: the daemon independently verifies the
+client kind and the peer user, and its decision is final.
+
+### Removal
+
+Removing an entity is a destructive-tone review. A removal that would orphan a
+reference is surfaced (the daemon reports the affected references and validation
+fails) rather than cascaded, and no source repository is ever deleted. The
+frontend forwards the confirmation as intent only; the daemon re-checks and may
+still refuse.
+
+### Secrets
+
+Environment variables can be marked **secret**. In the editor a secret value is
+masked (`type=password`) until the developer explicitly reveals it, and the daemon
+redacts it (`***`) in diffs and logs while writing it back verbatim when
+unchanged.
+
+### Concurrency and disconnection
+
+Every edit is based on the revision the snapshot was read at. If the file changed
+underneath, the preview fails with `CONFIG_CONFLICT`, nothing is written, and the
+review dialog offers **Refresh configuration** instead of Save — a stale editor
+can never overwrite a newer configuration. While the daemon is disconnected,
+editing is disabled, the loaded snapshot is kept, and nothing is written locally.
+After a successful commit the screen refreshes, and because the daemon broadcasts
+a `configuration` event, every other screen (and other clients) converges on the
+same configuration.

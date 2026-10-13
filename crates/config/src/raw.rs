@@ -11,39 +11,42 @@
 //! typo such as `max_paralel_tasks` should fail loudly (see
 //! `docs/configuration.md`).
 //!
-//! This module is the only place in the crate that is shaped by TOML. Nothing
-//! outside the crate ever sees these types.
+//! The types are also `Serialize` so the configuration management layer can
+//! round-trip a single entity back to TOML when an edit is applied
+//! (`tasks/023.md` §37). `Option` and empty collections are skipped when
+//! serializing so an unchanged entity never gains noise such as
+//! `environment = {}`.
 
 use std::collections::BTreeMap;
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 /// The complete raw configuration file.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawConfig {
+pub struct RawConfig {
     /// The schema version. Defaulted so a file that omits it is treated as v1;
     /// unknown versions are rejected by the loader.
     #[serde(default = "default_version")]
-    pub(crate) config_version: u32,
+    pub config_version: u32,
     /// The declared workspaces.
-    #[serde(default)]
-    pub(crate) workspaces: Vec<RawWorkspace>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub workspaces: Vec<RawWorkspace>,
     /// The declared services (across all workspaces).
-    #[serde(default)]
-    pub(crate) services: Vec<RawService>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<RawService>,
     /// The declared libraries (across all workspaces).
-    #[serde(default)]
-    pub(crate) libraries: Vec<RawLibrary>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<RawLibrary>,
     /// The declared service groups.
-    #[serde(default)]
-    pub(crate) groups: Vec<RawGroup>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<RawGroup>,
     /// The declared developer profiles.
-    #[serde(default)]
-    pub(crate) profiles: Vec<RawProfile>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub profiles: Vec<RawProfile>,
     /// Global task execution settings.
     #[serde(default)]
-    pub(crate) execution: RawExecution,
+    pub execution: RawExecution,
 }
 
 fn default_version() -> u32 {
@@ -51,178 +54,217 @@ fn default_version() -> u32 {
 }
 
 /// A raw workspace.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawWorkspace {
+pub struct RawWorkspace {
     /// The stable identifier.
-    pub(crate) id: String,
+    pub id: String,
     /// The human-readable name (defaults to the id).
-    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The workspace root, which may begin with `~`.
-    pub(crate) root: String,
+    pub root: String,
     /// Workspace-wide environment variables.
-    #[serde(default)]
-    pub(crate) environment: BTreeMap<String, RawEnvValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, RawEnvValue>,
 }
 
 /// A raw service.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawService {
+pub struct RawService {
     /// The stable identifier.
-    pub(crate) id: String,
+    pub id: String,
     /// The human-readable name (defaults to the id).
-    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// `backend`, `frontend`, `library`, or `other:<name>`.
     #[serde(rename = "type")]
-    pub(crate) service_type: String,
+    pub service_type: String,
     /// The id of the owning workspace.
-    pub(crate) workspace: String,
+    pub workspace: String,
     /// The path relative to the workspace root.
-    pub(crate) path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// The branch checked out by default.
-    pub(crate) default_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
     /// The source repository.
-    pub(crate) repository: Option<RawRepository>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<RawRepository>,
     /// A single runtime requirement.
-    pub(crate) runtime: Option<RawRuntime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RawRuntime>,
     /// Additional runtime requirements.
-    #[serde(default)]
-    pub(crate) runtimes: Vec<RawRuntime>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtimes: Vec<RawRuntime>,
     /// The configured commands.
-    #[serde(default)]
-    pub(crate) commands: RawCommands,
+    #[serde(default, skip_serializing_if = "raw_commands_is_empty")]
+    pub commands: RawCommands,
     /// The build system (`maven` or `npm`). When omitted it is inferred from
     /// the runtimes and commands.
-    pub(crate) build_system: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_system: Option<String>,
     /// Optional Liquibase configuration.
-    pub(crate) liquibase: Option<RawLiquibase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liquibase: Option<RawLiquibase>,
     /// Health checks.
-    #[serde(default)]
-    pub(crate) health_checks: Vec<RawHealthCheck>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub health_checks: Vec<RawHealthCheck>,
     /// Exposed ports.
-    #[serde(default)]
-    pub(crate) ports: Vec<RawPort>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ports: Vec<RawPort>,
     /// Declared dependencies.
-    #[serde(default)]
-    pub(crate) dependencies: RawDependencies,
+    #[serde(default, skip_serializing_if = "raw_dependencies_is_empty")]
+    pub dependencies: RawDependencies,
     /// Service environment variables.
-    #[serde(default)]
-    pub(crate) environment: BTreeMap<String, RawEnvValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, RawEnvValue>,
     /// Extra capabilities beyond the type defaults.
-    #[serde(default)]
-    pub(crate) capabilities: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<String>,
 }
 
 /// A raw library.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawLibrary {
+pub struct RawLibrary {
     /// The stable identifier.
-    pub(crate) id: String,
+    pub id: String,
     /// The human-readable name (defaults to the id).
-    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The id of the owning workspace.
-    pub(crate) workspace: String,
+    pub workspace: String,
     /// The path relative to the workspace root.
-    pub(crate) path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
     /// The branch checked out by default.
-    pub(crate) default_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
     /// The artifact technology. Defaults to `maven`.
-    #[serde(rename = "type")]
-    pub(crate) library_type: Option<String>,
+    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
+    pub library_type: Option<String>,
     /// The source repository.
-    pub(crate) repository: Option<RawRepository>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub repository: Option<RawRepository>,
     /// The published artifact coordinate.
-    pub(crate) artifact: Option<RawArtifact>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub artifact: Option<RawArtifact>,
     /// Additional artifacts a multi-module (reactor) library produces.
-    #[serde(default)]
-    pub(crate) artifacts: Vec<RawArtifact>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<RawArtifact>,
     /// A single runtime requirement.
-    pub(crate) runtime: Option<RawRuntime>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<RawRuntime>,
     /// Additional runtime requirements.
-    #[serde(default)]
-    pub(crate) runtimes: Vec<RawRuntime>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub runtimes: Vec<RawRuntime>,
     /// The configured commands.
-    #[serde(default)]
-    pub(crate) commands: RawCommands,
+    #[serde(default, skip_serializing_if = "raw_commands_is_empty")]
+    pub commands: RawCommands,
     /// The build system (`maven` or `npm`). When omitted it is inferred from
     /// the library `type`, runtimes, and commands.
-    pub(crate) build_system: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build_system: Option<String>,
     /// Declared dependencies (libraries only).
-    #[serde(default)]
-    pub(crate) dependencies: RawDependencies,
+    #[serde(default, skip_serializing_if = "raw_dependencies_is_empty")]
+    pub dependencies: RawDependencies,
     /// Library environment variables.
-    #[serde(default)]
-    pub(crate) environment: BTreeMap<String, RawEnvValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, RawEnvValue>,
 }
 
 /// A raw repository.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawRepository {
+pub struct RawRepository {
     /// The clone URL.
-    pub(crate) url: String,
+    pub url: String,
     /// The default branch; falls back to the entity's `default_branch`.
-    pub(crate) default_branch: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_branch: Option<String>,
     /// The hosting provider.
-    pub(crate) provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
 }
 
 /// A raw runtime requirement.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawRuntime {
+pub struct RawRuntime {
     /// `java`, `node`, `maven`, `npm`, or `other:<name>`.
     #[serde(rename = "type")]
-    pub(crate) kind: String,
+    pub kind: String,
     /// The pinned version.
-    pub(crate) version: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub version: Option<String>,
 }
 
 /// A raw artifact coordinate.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawArtifact {
+pub struct RawArtifact {
     /// The group identifier.
-    pub(crate) group_id: String,
+    pub group_id: String,
     /// The artifact identifier.
-    pub(crate) artifact_id: String,
+    pub artifact_id: String,
     /// The artifact version.
-    pub(crate) version: String,
+    pub version: String,
     /// The packaging (for example `jar` or `pom`). Defaults to `jar`.
-    pub(crate) packaging: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub packaging: Option<String>,
     /// The classifier (for example `sources`), when the artifact has one.
-    pub(crate) classifier: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub classifier: Option<String>,
 }
 
 /// The raw command table.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawCommands {
+pub struct RawCommands {
     /// The install command.
-    pub(crate) install: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub install: Option<RawCommand>,
     /// The build command.
-    pub(crate) build: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub build: Option<RawCommand>,
     /// The start command.
-    pub(crate) start: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub start: Option<RawCommand>,
     /// The stop command.
-    pub(crate) stop: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub stop: Option<RawCommand>,
     /// The restart command.
-    pub(crate) restart: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub restart: Option<RawCommand>,
     /// The test command.
-    pub(crate) test: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub test: Option<RawCommand>,
     /// The Liquibase command.
-    pub(crate) liquibase: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub liquibase: Option<RawCommand>,
     /// Project-specific commands, keyed by name.
-    #[serde(default)]
-    pub(crate) custom: BTreeMap<String, RawCommand>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub custom: BTreeMap<String, RawCommand>,
+}
+
+/// Returns `true` when every command is unset.
+fn raw_commands_is_empty(commands: &RawCommands) -> bool {
+    commands.install.is_none()
+        && commands.build.is_none()
+        && commands.start.is_none()
+        && commands.stop.is_none()
+        && commands.restart.is_none()
+        && commands.test.is_none()
+        && commands.liquibase.is_none()
+        && commands.custom.is_empty()
 }
 
 /// A command, in either short string or structured form.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub(crate) enum RawCommand {
+pub enum RawCommand {
     /// A command line such as `"./mvnw clean install"`.
     Line(String),
     /// A structured command with an explicit program and arguments.
@@ -230,25 +272,26 @@ pub(crate) enum RawCommand {
 }
 
 /// A structured command.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawStructuredCommand {
+pub struct RawStructuredCommand {
     /// The executable.
-    pub(crate) program: String,
+    pub program: String,
     /// The arguments.
-    #[serde(default)]
-    pub(crate) args: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
     /// The working directory, relative to the workspace.
-    pub(crate) working_dir: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<String>,
     /// Command-specific environment variables.
-    #[serde(default)]
-    pub(crate) environment: BTreeMap<String, RawEnvValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, RawEnvValue>,
 }
 
 /// An environment variable value.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub(crate) enum RawEnvValue {
+pub enum RawEnvValue {
     /// A literal, non-secret value.
     Literal(String),
     /// A literal value with an explicit secrecy flag.
@@ -256,126 +299,160 @@ pub(crate) enum RawEnvValue {
 }
 
 /// A structured environment variable.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawEnvVariable {
+pub struct RawEnvVariable {
     /// The literal value.
-    pub(crate) value: String,
+    pub value: String,
     /// Whether the value must be redacted when displayed.
-    #[serde(default)]
-    pub(crate) secret: bool,
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub secret: bool,
+}
+
+/// Returns `true` when the flag is `false` (used to skip it when serializing).
+fn is_false(value: &bool) -> bool {
+    !*value
 }
 
 /// Optional Liquibase configuration.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawLiquibase {
+pub struct RawLiquibase {
     /// Whether Liquibase should run. Defaults to `true` when the block is
     /// present.
-    pub(crate) enabled: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enabled: Option<bool>,
     /// The legacy single migration command; mapped to `commands.update`.
-    pub(crate) command: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub command: Option<RawCommand>,
     /// The migration provider (`liquibase` by default).
-    pub(crate) provider: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
     /// The Liquibase execution mode (`maven` by default).
-    pub(crate) execution_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub execution_mode: Option<String>,
     /// The per-operation migration commands.
-    pub(crate) commands: Option<RawMigrationCommands>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub commands: Option<RawMigrationCommands>,
     /// The migration timeout.
-    pub(crate) timeout_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
     /// Liquibase environment variables.
-    #[serde(default)]
-    pub(crate) environment: BTreeMap<String, RawEnvValue>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub environment: BTreeMap<String, RawEnvValue>,
     /// The declared target database.
-    pub(crate) database: Option<RawMigrationDatabase>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database: Option<RawMigrationDatabase>,
 }
 
 /// The raw per-operation migration command table.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawMigrationCommands {
+pub struct RawMigrationCommands {
     /// The validation command.
-    pub(crate) validate: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub validate: Option<RawCommand>,
     /// The status command.
-    pub(crate) status: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<RawCommand>,
     /// The pending-changes command.
-    pub(crate) pending: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pending: Option<RawCommand>,
     /// The SQL-preview command.
-    pub(crate) preview: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview: Option<RawCommand>,
     /// The apply (update) command.
-    pub(crate) update: Option<RawCommand>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub update: Option<RawCommand>,
 }
 
 /// The raw declared target database.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawMigrationDatabase {
+pub struct RawMigrationDatabase {
     /// The declared environment name.
-    pub(crate) environment: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub environment: Option<String>,
     /// The database type.
-    pub(crate) database_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub database_type: Option<String>,
     /// The database name.
-    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// The host identity.
-    pub(crate) host: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub host: Option<String>,
     /// The schema.
-    pub(crate) schema: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schema: Option<String>,
     /// Liquibase contexts.
-    #[serde(default)]
-    pub(crate) contexts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub contexts: Vec<String>,
     /// Liquibase labels.
-    #[serde(default)]
-    pub(crate) labels: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 /// A raw health check.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawHealthCheck {
+pub struct RawHealthCheck {
     /// `process`, `port`, or `http`.
     #[serde(rename = "type")]
-    pub(crate) kind: String,
+    pub kind: String,
     /// The URL for an HTTP check.
-    pub(crate) url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub url: Option<String>,
     /// The expected HTTP status.
-    pub(crate) expected_status: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected_status: Option<u16>,
     /// The port for a port check.
-    pub(crate) port: Option<u16>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub port: Option<u16>,
     /// The probe timeout.
-    pub(crate) timeout_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub timeout_seconds: Option<u64>,
     /// The polling interval.
-    pub(crate) interval_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub interval_seconds: Option<u64>,
     /// Whether the check is required for the service to be healthy. Defaults
     /// to `true`.
-    pub(crate) required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
 }
 
 /// A raw port.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawPort {
+pub struct RawPort {
     /// The port number.
-    pub(crate) port: u16,
+    pub port: u16,
     /// `tcp` or `udp`. Defaults to `tcp`.
-    pub(crate) protocol: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub protocol: Option<String>,
 }
 
 /// The raw dependency tables.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawDependencies {
+pub struct RawDependencies {
     /// Dependencies on other services.
-    #[serde(default)]
-    pub(crate) services: Vec<RawDependencyRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<RawDependencyRef>,
     /// Dependencies on libraries.
-    #[serde(default)]
-    pub(crate) libraries: Vec<RawDependencyRef>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub libraries: Vec<RawDependencyRef>,
+}
+
+/// Returns `true` when no dependency is declared.
+fn raw_dependencies_is_empty(dependencies: &RawDependencies) -> bool {
+    dependencies.services.is_empty() && dependencies.libraries.is_empty()
 }
 
 /// A dependency reference, in short string or detailed form.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(untagged)]
-pub(crate) enum RawDependencyRef {
+pub enum RawDependencyRef {
     /// A bare identifier such as `"auth-service"`.
     Id(String),
     /// A reference with an explicit kind and required flag.
@@ -383,60 +460,70 @@ pub(crate) enum RawDependencyRef {
 }
 
 /// A detailed dependency reference.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawDetailedDependency {
+pub struct RawDetailedDependency {
     /// The target identifier.
-    pub(crate) id: String,
+    pub id: String,
     /// `build` or `runtime`.
-    pub(crate) kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
     /// Whether the dependency is mandatory.
-    pub(crate) required: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub required: Option<bool>,
 }
 
 /// A raw service group.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawGroup {
+pub struct RawGroup {
     /// The stable identifier.
-    pub(crate) id: String,
+    pub id: String,
     /// The human-readable name (defaults to the id).
-    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// An optional description.
-    pub(crate) description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// The owning workspace; inferred from members when omitted.
-    pub(crate) workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     /// The services in the group.
-    #[serde(default)]
-    pub(crate) services: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
 }
 
 /// A raw developer profile.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawProfile {
+pub struct RawProfile {
     /// The stable identifier.
-    pub(crate) id: String,
+    pub id: String,
     /// The human-readable name (defaults to the id).
-    pub(crate) name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// An optional description.
-    pub(crate) description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     /// The owning workspace; inferred from members when omitted.
-    pub(crate) workspace: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<String>,
     /// The services in the profile.
-    #[serde(default)]
-    pub(crate) services: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub services: Vec<String>,
     /// The groups in the profile.
-    #[serde(default)]
-    pub(crate) groups: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<String>,
 }
 
 /// Global execution settings.
-#[derive(Debug, Clone, Default, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct RawExecution {
+pub struct RawExecution {
     /// The maximum number of parallel tasks.
-    pub(crate) max_parallel_tasks: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_parallel_tasks: Option<usize>,
     /// The default operation timeout.
-    pub(crate) default_timeout_seconds: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub default_timeout_seconds: Option<u64>,
 }

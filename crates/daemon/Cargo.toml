@@ -14,6 +14,7 @@ workspace = true
 [dependencies]
 service-orchestrator-application.workspace = true
 service-orchestrator-client.workspace = true
+service-orchestrator-config.workspace = true
 service-orchestrator-domain.workspace = true
 service-orchestrator-execution.workspace = true
 nix = { workspace = true, features = ["fs", "user"] }
@@ -23,5 +24,4 @@ thiserror.workspace = true
 tokio = { workspace = true, features = ["signal"] }
 
 [dev-dependencies]
-service-orchestrator-config.workspace = true
 service-orchestrator-policy.workspace = true

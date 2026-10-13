@@ -1751,3 +1751,217 @@ fn restart_services_builds_one_step_per_service() {
         TaskKind::RestartService
     );
 }
+
+// -- configuration management ------------------------------------------------
+
+mod configuration {
+    use super::*;
+    use std::collections::BTreeMap;
+    use std::path::PathBuf;
+
+    use service_orchestrator_config::raw::{RawCommand, RawCommands, RawDependencies, RawService};
+    use service_orchestrator_config::{
+        ConfigChange, ConfigManager, EntityChange, FileConfigManager,
+    };
+
+    /// A harness backed by a real, file-backed configuration manager in an
+    /// isolated temporary directory (`tasks/023.md` §49).
+    fn file_harness(name: &str) -> (Harness, PathBuf) {
+        let dir = std::env::temp_dir().join(format!(
+            "service-orchestrator-appcfg-{name}-{}",
+            std::process::id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("a temp dir is created");
+        let path = dir.join("config.toml");
+        std::fs::write(&path, CONFIG).expect("the fixture is written");
+
+        let loaded = load_from_str(CONFIG, "<test>").expect("fixture configuration is valid");
+        let manager: Arc<dyn ConfigManager> =
+            Arc::new(FileConfigManager::new(path.clone(), loaded.clone()));
+        let tasks = Arc::new(FakeTaskManager::new());
+        let runtime = Arc::new(InMemoryRuntimeStateStore::new());
+        let app = Application::new(
+            loaded,
+            tasks.clone(),
+            runtime.clone(),
+            Arc::new(NullLogService),
+        )
+        .with_configuration(manager);
+        (
+            Harness {
+                app,
+                tasks,
+                runtime,
+            },
+            path,
+        )
+    }
+
+    fn new_service(id: &str) -> RawService {
+        RawService {
+            id: id.to_owned(),
+            name: None,
+            service_type: "backend".to_owned(),
+            workspace: "acme".to_owned(),
+            path: Some(format!("backend/{id}")),
+            default_branch: Some("main".to_owned()),
+            repository: None,
+            runtime: None,
+            runtimes: Vec::new(),
+            commands: RawCommands {
+                build: Some(RawCommand::Line("./mvnw clean install".to_owned())),
+                start: Some(RawCommand::Line("./mvnw spring-boot:run".to_owned())),
+                ..RawCommands::default()
+            },
+            build_system: Some("maven".to_owned()),
+            liquibase: None,
+            health_checks: Vec::new(),
+            ports: Vec::new(),
+            dependencies: RawDependencies::default(),
+            environment: BTreeMap::new(),
+            capabilities: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn a_snapshot_lists_the_declared_entities_and_a_revision() {
+        let (h, _path) = file_harness("snapshot");
+        let snapshot = h
+            .app
+            .configuration_snapshot()
+            .expect("a snapshot is produced");
+        assert!(!snapshot.revision.is_empty());
+        assert_eq!(snapshot.workspaces.len(), 1);
+        assert_eq!(snapshot.services.len(), 3);
+        assert_eq!(snapshot.libraries.len(), 1);
+        assert_eq!(snapshot.groups.len(), 1);
+        assert_eq!(snapshot.profiles.len(), 1);
+    }
+
+    #[test]
+    fn validating_the_current_file_succeeds() {
+        let (h, _path) = file_harness("validate");
+        let result = h.app.validate_configuration().expect("validation runs");
+        assert!(result.valid);
+        assert!(result.issues.is_empty());
+    }
+
+    #[test]
+    fn committing_a_created_service_is_observable_through_the_application() {
+        let (mut h, _path) = file_harness("commit-create");
+        let revision = h.app.configuration_snapshot().expect("a snapshot").revision;
+        let change = ConfigChange::service(EntityChange::Create {
+            entity: new_service("notification-service"),
+        });
+        let commit = h
+            .app
+            .commit_configuration(&change, &revision)
+            .expect("the change is committed");
+        assert!(commit.description.contains("notification-service"));
+
+        // The daemon refreshes the cached snapshot after a commit; do the same.
+        h.app.refresh_configuration();
+        let services = h.app.list_services(&workspace()).expect("services listed");
+        assert!(services
+            .iter()
+            .any(|service| service.id.as_str() == "notification-service"));
+    }
+
+    #[test]
+    fn preview_reports_a_valid_change_with_a_diff() {
+        let (h, _path) = file_harness("preview");
+        let revision = h.app.configuration_snapshot().expect("a snapshot").revision;
+        let change = ConfigChange::service(EntityChange::Create {
+            entity: new_service("notification-service"),
+        });
+        let preview = h
+            .app
+            .preview_configuration(&change, &revision)
+            .expect("a preview is produced");
+        assert!(preview.valid);
+        assert_eq!(preview.diff.added.len(), 1);
+        assert!(!preview.diff.is_empty());
+    }
+
+    #[test]
+    fn a_stale_revision_is_rejected() {
+        let (h, _path) = file_harness("stale");
+        let change = ConfigChange::service(EntityChange::Create {
+            entity: new_service("notification-service"),
+        });
+        let error = h
+            .app
+            .commit_configuration(&change, "not-the-current-revision")
+            .expect_err("a stale revision is rejected");
+        assert!(matches!(
+            error,
+            ApplicationError::Configuration { ref code, .. } if code == "CONFIG_CONFLICT"
+        ));
+    }
+
+    #[test]
+    fn removing_a_service_requires_destructive_authorization() {
+        let (h, _path) = file_harness("remove-denied");
+        let revision = h.app.configuration_snapshot().expect("a snapshot").revision;
+        let change = ConfigChange::service(EntityChange::Remove {
+            id: "auth-service".to_owned(),
+        });
+        let error = h
+            .app
+            .commit_configuration(&change, &revision)
+            .expect_err("a removal is destructive");
+        assert!(matches!(
+            error,
+            ApplicationError::PermissionDenied {
+                permission: Permission::Destructive,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn a_confirmed_removal_drops_the_entry_without_touching_the_repository() {
+        let (mut h, _path) = file_harness("remove-confirmed");
+        let revision = h.app.configuration_snapshot().expect("a snapshot").revision;
+        // `worker-svc` is referenced by nothing, so its removal is a clean drop
+        // (an unreferenced entity never cascades; `tasks/023.md` §15, §16).
+        let change = ConfigChange::service(EntityChange::Remove {
+            id: "worker-svc".to_owned(),
+        });
+        let authorized = h
+            .app
+            .clone()
+            .with_authorization(Authorization::allow_destructive());
+        authorized
+            .commit_configuration(&change, &revision)
+            .expect("a confirmed removal commits");
+
+        h.app.refresh_configuration();
+        let services = h.app.list_services(&workspace()).expect("services listed");
+        assert!(!services
+            .iter()
+            .any(|service| service.id.as_str() == "worker-svc"));
+        assert!(services
+            .iter()
+            .any(|service| service.id.as_str() == "auth-service"));
+    }
+
+    #[test]
+    fn an_invalid_change_is_reported_as_a_configuration_problem() {
+        let (h, _path) = file_harness("invalid");
+        let revision = h.app.configuration_snapshot().expect("a snapshot").revision;
+        // A service that names a workspace that does not exist fails validation.
+        let mut entity = new_service("orphan-service");
+        entity.workspace = "ghost".to_owned();
+        let change = ConfigChange::service(EntityChange::Create { entity });
+        let error = h
+            .app
+            .commit_configuration(&change, &revision)
+            .expect_err("an invalid change is rejected");
+        assert!(matches!(
+            error,
+            ApplicationError::ConfigurationInvalid { .. }
+        ));
+    }
+}

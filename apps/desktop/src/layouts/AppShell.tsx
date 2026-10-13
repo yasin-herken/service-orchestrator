@@ -3,6 +3,7 @@ import { useState } from 'react';
 import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
 import { BuildsPage } from '../pages/BuildsPage';
+import { ConfigurationPage } from '../pages/ConfigurationPage';
 import { DashboardPage } from '../pages/DashboardPage';
 import { GitPage } from '../pages/GitPage';
 import { HealthPage } from '../pages/HealthPage';
@@ -44,6 +45,7 @@ export function AppShell() {
     'tasks',
     'logs',
     'health',
+    'configuration',
   ];
 
   return (
@@ -66,6 +68,7 @@ export function AppShell() {
           {page === 'tasks' ? <TasksPage intent={intent} onNavigate={navigate} /> : null}
           {page === 'logs' ? <LogsPage intent={intent} /> : null}
           {page === 'health' ? <HealthPage intent={intent} onNavigate={navigate} /> : null}
+          {page === 'configuration' ? <ConfigurationPage /> : null}
           {!implemented.includes(page) ? <PlaceholderPage page={page} /> : null}
         </main>
       </div>

@@ -19,6 +19,7 @@
 
 pub mod build;
 mod commands;
+pub mod configuration;
 pub mod connection;
 mod daemon_bin;
 pub mod dto;
@@ -164,6 +165,13 @@ pub fn run() {
             commands::get_logs,
             commands::subscribe_service_logs,
             commands::unsubscribe_service_logs,
+            commands::get_configuration,
+            commands::validate_configuration,
+            commands::preview_configuration,
+            commands::commit_configuration,
+            commands::reload_configuration,
+            commands::inspect_repository_path,
+            commands::detect_project_configuration,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the desktop application")

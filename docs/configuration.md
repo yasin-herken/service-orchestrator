@@ -576,7 +576,105 @@ The Rust types are:
 
 ---
 
-## 9. Complete example
+## 9. Management, preview, and persistence
+
+The loader in §2 reads configuration. Editing it is a separate concern, owned by
+the `config` crate's management layer (`crates/config/src/management.rs`) and
+driven through the [`ConfigManager`] trait. **The shared daemon holds the only
+writer**; the TUI, MCP, and the desktop GUI never parse or write a file — they
+send a typed change to the daemon and review its preview.
+
+### `ConfigManager`
+
+```rust
+pub trait ConfigManager: Send + Sync {
+    fn current(&self) -> Arc<Config>;
+    fn revision(&self) -> String;
+    fn snapshot(&self) -> Result<ConfigurationSnapshot, ConfigError>;
+    fn preview(&self, change: &ConfigChange, expected_revision: &str)
+        -> Result<ConfigurationPreview, ConfigError>;
+    fn commit(&self, change: &ConfigChange, expected_revision: &str)
+        -> Result<Config, ConfigError>;
+    fn reload(&self) -> Result<Arc<Config>, ConfigError>;
+    fn validate(&self) -> Result<(), ConfigError>;
+}
+```
+
+`FileConfigManager` is the file-backed implementation. Its `commit` validates the
+*entire* proposed document in memory, re-checks the on-disk revision, and only
+then writes atomically; `current()` keeps the validated configuration every
+manager reads. `validate` reads and validates **without** replacing the serving
+configuration, so an inspection is genuinely read-only.
+
+### The change vocabulary
+
+A change targets exactly one entity and is tagged by kind, so it needs no second
+schema on the wire:
+
+```json
+{ "kind": "service",
+  "change": { "action": "create", "entity": { "id": "billing-api", "type": "backend", "workspace": "acme" } } }
+```
+
+```json
+{ "kind": "group", "change": { "action": "remove", "id": "legacy" } }
+```
+
+`EntityChange<T>` is `create { entity }`, `update { id, entity }`, or
+`remove { id }`; `ConfigChange` is `workspace | service | library | profile |
+group`. A whole document is never uploaded, so an edit cannot clobber unrelated
+sections it did not read.
+
+### Preview
+
+`preview` computes, without writing:
+
+- a **revision** and **proposed_revision** (FNV-1a, hex);
+- a structural **diff** (`added`, `updated` with field-level before/after,
+  `removed`);
+- **validation** issues over the whole proposed document;
+- **affected references** — the entities that still point at a removal target;
+- the **running impact**, filled in by the application layer, which knows the
+  live process state. Configuration changes never restart or stop a running
+  service implicitly (`tasks/023.md` §9).
+
+Secret values (`secret = true`) are redacted (`***`) in the diff, and are written
+back **verbatim** when they are unchanged, so editing an entity never leaks or
+loses a secret.
+
+### Persistence guarantees
+
+- **Atomic.** The proposed file is rendered with `toml_edit` (only the changed
+  array of tables is rewritten) and written to a sibling `.<name>.tmp-<pid>`,
+  fsynced, then `rename`d over the target. A reader never sees a partial file.
+- **Revision-checked (TOCTOU-safe).** The revision is verified again immediately
+  before the rename; a mismatch fails with `ConfigError::Conflict` and writes
+  nothing. Two editors can never silently overwrite each other.
+- **Backed up.** The previous file is copied to `<config>.toml.bak` on every
+  successful write.
+- **Permissions preserved.** An existing file keeps its mode; a newly created
+  file is `0600` on Unix.
+- **No partial change.** If the proposal fails validation, the existing file is
+  left exactly as it was.
+
+### Repository inspection and technology detection
+
+Adding a service can start from a local directory. Inspection is strictly
+**read-only** and never runs a build, a script, or a Git command. It reports the
+directory's existence, whether it is a Git repository (with branch and remote),
+the project files seen, detected **build systems** (Maven, npm, and Gradle),
+**runtimes** (Java/Node version requirements), and integrations (Spring Boot,
+React). A detected build system whose execution provider is not installed is
+reported as `provider_not_installed` — for example **Gradle is detected but its
+provider is not installed**, so it is never presented as operational. The
+detection produces a *suggested* service configuration (service type, build
+system, runtimes, build and start commands as structured `program`+`args`, never
+a shell line) that the wizard fills in; the developer edits it and the daemon
+validates it like any other change.
+
+---
+
+## 10. Complete example
 
 See [`examples/config.toml`](../examples/config.toml) for a document that
 exercises every section: one workspace, a backend and a frontend service, a
@@ -586,7 +684,7 @@ integration test suite.
 
 ---
 
-## 10. Future evolution
+## 11. Future evolution
 
 - **Additional sources.** `ConfigLoader` is the extension point; environment,
   CLI, team-shared, and remote sources would implement it and be composed in the

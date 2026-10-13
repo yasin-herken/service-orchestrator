@@ -1684,3 +1684,358 @@ select {
   font-size: 12.5px;
   flex-wrap: wrap;
 }
+
+/* -- configuration management ------------------------------------------------- */
+
+.config-toolbar {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-bottom: 12px;
+}
+
+.config-toolbar__meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.config-toolbar__revision {
+  font-size: 13px;
+}
+
+.config-toolbar__counts {
+  font-size: 12px;
+}
+
+.config-toolbar__actions {
+  display: flex;
+  gap: 8px;
+}
+
+.config-status {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  margin-bottom: 12px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--tone-positive-soft);
+  font-size: 12.5px;
+}
+
+.config-tabs {
+  display: flex;
+  gap: 4px;
+  margin-bottom: 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-tabs__tab {
+  appearance: none;
+  border: none;
+  background: transparent;
+  padding: 6px 12px;
+  font: inherit;
+  font-size: 12.5px;
+  color: var(--text-muted);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+}
+
+.config-tabs__tab--active {
+  color: var(--text);
+  border-bottom-color: var(--accent);
+  font-weight: 600;
+}
+
+.config-list__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 12px;
+  border-bottom: 1px solid var(--border);
+  gap: 8px;
+}
+
+.config-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.config-list__row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border);
+}
+
+.config-list__row:last-child {
+  border-bottom: none;
+}
+
+.config-list__name {
+  font-weight: 600;
+  font-size: 13px;
+}
+
+.config-list__id {
+  font-size: 12px;
+}
+
+.config-list__actions {
+  margin-left: auto;
+  display: flex;
+  gap: 6px;
+}
+
+.config-form {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.config-form__grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.config-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-form__group {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px 12px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.config-form__error {
+  color: var(--tone-negative);
+  font-size: 12px;
+}
+
+.config-form__hint {
+  font-size: 12px;
+  margin: 0;
+}
+
+.config-env {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.config-env__row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.config-env__key {
+  flex: 0 0 30%;
+}
+
+.config-env__value {
+  flex: 1 1 auto;
+}
+
+.config-env__secret {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.config-validation {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  font-size: 12.5px;
+}
+
+.config-validation--ok {
+  background: var(--tone-positive-soft);
+}
+
+.config-validation--error {
+  background: var(--tone-negative-soft);
+}
+
+.config-validation__list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.config-validation__issue {
+  padding: 6px 0;
+  border-top: 1px solid var(--border);
+}
+
+.config-validation__location {
+  font-size: 12px;
+}
+
+.config-validation__problem {
+  margin: 2px 0;
+}
+
+.config-validation__detail {
+  margin: 0;
+  font-size: 12px;
+}
+
+.config-diff {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin: 10px 0;
+}
+
+.config-diff__title {
+  margin: 0 0 4px;
+}
+
+.config-diff__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-diff__entity {
+  font-size: 12.5px;
+}
+
+.config-diff__fields {
+  list-style: none;
+  margin: 4px 0 0;
+  padding: 0 0 0 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.config-diff__field {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.config-diff__path {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.config-impact {
+  margin: 10px 0;
+}
+
+.config-impact__row {
+  font-size: 12.5px;
+}
+
+.config-conflict {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: var(--tone-warning-soft);
+  padding: 10px 12px;
+  margin: 10px 0;
+  font-size: 12.5px;
+}
+
+.config-detect {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.config-detect__actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.config-detect__result,
+.config-detect__suggestion {
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12.5px;
+}
+
+.config-detect__summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin: 0;
+  flex-wrap: wrap;
+}
+
+.config-detect__list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-detect__row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.config-detect__name {
+  font-weight: 600;
+}
+
+.config-detect__evidence,
+.config-detect__note {
+  font-size: 12px;
+}
+
+.config-detect__warnings {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.config-detect__warning {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
