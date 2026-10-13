@@ -756,7 +756,8 @@ clients over a Unix domain socket (`docs/local-daemon.md`,
   daemon executable and no external backend.
 - **One owner of mutable state.** The daemon owns the task engine, the process
   registry, per-service runtime state, health, log subscriptions, and the
-  validated configuration snapshot (read-only to clients). Clients hold only
+  validated configuration (its only writer; clients read a snapshot and commit
+  changes through it). Clients hold only
   refreshable caches, so a task submitted by MCP is immediately visible in the
   TUI and a service started from the TUI is manageable from MCP.
 - **The `client` crate is the boundary.** `OrchestratorClient` mirrors the

@@ -454,10 +454,6 @@ information is shown.
   against the user's own processes (`docs/security.md` §11).
 - **Event delivery is best-effort.** A subscriber that falls behind drops events
   and must resynchronise; events are not persisted.
-- **Configuration is read-only to clients.** The daemon owns the validated
-  configuration snapshot; clients can read a summary but never mutate
-  configuration files while the daemon runs. Configuration editing is a later
-  task.
 - **No OS-level supervision.** The auto-started daemon is a detached child, not a
   `launchd` service, so it does not restart after logout or reboot. On macOS,
   `launchd` integration would be a separate, opt-in feature.

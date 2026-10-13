@@ -133,7 +133,8 @@ The daemon owns:
 - the active task engine and its history;
 - the process registry and per-service runtime state;
 - health state and log subscriptions;
-- the validated configuration snapshot (read-only to clients).
+- the validated configuration, and the daemon is its only writer; clients read a
+  snapshot and change it through the daemon's preview/commit path.
 
 Because there is one engine, a task submitted by MCP is immediately visible in
 the TUI, and vice versa. Because there is one runtime-state store, starting an

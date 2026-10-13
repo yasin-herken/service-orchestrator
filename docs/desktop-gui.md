@@ -25,7 +25,8 @@ displays.
 This document covers the shell, the dashboard, **service lifecycle
 management** (`tasks/019.md`), **Git, build, and library management**
 (`tasks/020.md`), **migration, task, health, and logs management**
-(`tasks/021.md`), and **workflow management and profiles** (`tasks/022.md`):
+(`tasks/021.md`), **workflow management and profiles** (`tasks/022.md`), and
+**configuration management** (`tasks/023.md`):
 listing and selecting services, repositories, build targets,
 libraries, and migration targets; start/stop/restart; Git
 fetch/pull/checkout/sync (single and bulk) with a read-only preview; single and
@@ -34,27 +35,30 @@ alignment; migration validate/inspect/preview/apply; task browsing, filtering,
 details, and cancellation; the health dashboard with manual checks; unified
 realtime and historical logs; **profile and group selection, configurable
 environment-workflow options, a read-only dependency-resolved plan, workflow
-execution and monitoring, cancellation, results, and bounded history**; task
+execution and monitoring, cancellation, results, and bounded history**;
+**configuration browsing and editing** of workspaces, services, libraries,
+profiles, and groups through a validated, reviewed commit; task
 progress; structured logs; cancellation;
 realtime refresh; and confirmation/error handling.
 
 | Delivered | Not yet delivered (later tasks) |
 | --- | --- |
-| Application shell: sidebar, header, workspace selector | Service or workspace creation/editing |
-| Dashboard: real workspace/daemon counters, task activity feed | Docker and Kubernetes targets |
-| Services table: state, health, branch, port, last operation | DMG packaging, code signing, notarization, CI/CD |
-| Multi-selection with stable ids, select-all-visible, by type/state | Destructive Git operations (`git reset`, `git clean`, force stop) |
-| Start / stop / restart, single and bulk | Automatic Maven POM rewriting or version changes |
-| Service detail panel with configuration, observed state, diagnostics | New build providers |
-| Git screen: repositories, selection, fetch/pull/checkout/sync, bulk preview | New migration providers or engines |
-| Build screen: provider-agnostic targets and capabilities, single/bulk builds | Service creation/editing GUI |
+| Application shell: sidebar, header, workspace selector | Docker and Kubernetes targets |
+| Dashboard: real workspace/daemon counters, task activity feed | DMG packaging, code signing, notarization, CI/CD |
+| Services table: state, health, branch, port, last operation | Destructive Git operations (`git reset`, `git clean`, force stop) |
+| Multi-selection with stable ids, select-all-visible, by type/state | Automatic Maven POM rewriting or version changes |
+| Start / stop / restart, single and bulk | New build providers |
+| Service detail panel with configuration, observed state, diagnostics | New migration providers or engines |
+| Git screen: repositories, selection, fetch/pull/checkout/sync, bulk preview | New workflow engines or a second scheduler |
+| Build screen: provider-agnostic targets and capabilities, single/bulk builds | |
 | Library screen: artifacts, dependents, verification, version alignment, prepare | |
 | Migration screen: targets, snapshot, SQL preview, confirmed apply, bulk workflow | |
 | Tasks screen: bounded history, seven states, filters, details, cancellation | |
 | Health screen: runtime vs health, per-check detail, manual checks | |
 | Logs screen: unified viewer, scopes, follow, filters, bounded buffer | |
-| Workflows screen: service/profile/group selection, options, read-only plan, execute, monitor (`tasks/022.md`) | Service or profile/group creation/editing |
-| Workflow results (partial success) and bounded, workspace-scoped history | New workflow engines or a second scheduler |
+| Workflows screen: service/profile/group selection, options, read-only plan, execute, monitor (`tasks/022.md`) | |
+| Configuration screen: workspace/service/library/profile/group add, edit, and remove; validate, reload, and repository detection (`tasks/023.md`) | |
+| Workflow results (partial success) and bounded, workspace-scoped history | |
 | Shared task monitoring: progress dialog, cancellation, bounded logs | |
 | Realtime task-driven refresh; confirmation, error, and progress dialogs | |
 | Connection status with disconnect banner, Retry, and safe reconnect | |
@@ -94,8 +98,9 @@ apps/desktop/
 │   │   ├── git/               # RepositoryTable, RepositoryDetailPanel, GitSyncDialog
 │   │   ├── build/             # BuildTargetTable, BuildTargetDetailPanel, BuildCapabilitiesList
 │   │   ├── library/           # LibraryTable, LibraryDetailPanel, VersionAlignmentPanel, PrepareLibraryDialog
-│   │   └── workflow/          # WorkflowWizard, selection, options, dependency view, preview, progress, results, history
-│   ├── pages/                 # Dashboard, Services, Git, Builds, Libraries, Workflows, placeholders
+│   │   ├── workflow/          # WorkflowWizard, selection, options, dependency view, preview, progress, results, history
+│   │   └── configuration/     # entity editors (workspace, service, library, profile, group)
+│   ├── pages/                 # Dashboard, Services, Git, Builds, Libraries, Migrations, Workflows, Tasks, Logs, Health, Configuration, placeholders
 │   └── styles/global.css      # light + dark via prefers-color-scheme
 └── src-tauri/
     ├── Cargo.toml             # its own workspace; excluded from the root one
@@ -1185,9 +1190,10 @@ npm run build && npm run typecheck && npm run test
   configuration; the GUI selects and previews them but never creates or edits
   them (§27).
 - **Out of scope by design.** No new migration providers, engines, or log
-  storage; no service creation/editing, no new build providers, no Docker or
-  Kubernetes, no DMG, signing, notarization, or CI/CD (`tasks/021.md` §47,
-  `tasks/022.md` §46).
+  storage; no new build providers, no Docker or Kubernetes, no DMG, signing,
+  notarization, or CI/CD (`tasks/021.md` §47, `tasks/022.md` §46). Service,
+  workspace, library, profile, and group creation/editing were later added by the
+  Configuration screen (§28, `tasks/023.md`).
 - The active workspace selection lives in memory only; it is not persisted
   across restarts.
 - The development icon (`src-tauri/icons/icon.png`) is an obvious placeholder;
