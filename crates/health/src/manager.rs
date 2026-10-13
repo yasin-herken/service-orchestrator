@@ -36,7 +36,7 @@ use service_orchestrator_application::{
     HealthCheckOutcome, HealthCheckScope, HealthIndex, HealthState, RuntimeStateStore,
     ServiceHealth, ServiceRuntimeIndex,
 };
-use service_orchestrator_config::Config;
+use service_orchestrator_config::{Config, ConfigManager, StaticConfigManager};
 use service_orchestrator_domain::{
     HealthCheck, HealthCheckKind, ServiceId, Timestamp, WorkspaceId,
 };
@@ -59,7 +59,7 @@ const EVENT_BUS_CAPACITY: usize = 256;
 
 /// Runs health checks, aggregates them, and records the result.
 pub struct HealthManager {
-    config: Arc<Config>,
+    config: Arc<dyn ConfigManager>,
     runtime_state: Arc<dyn RuntimeStateStore>,
     checkers: Arc<HealthCheckerRegistry>,
     store: Arc<HealthStore>,
@@ -77,6 +77,33 @@ impl HealthManager {
     #[must_use]
     pub fn new(
         config: Arc<Config>,
+        service_runtime: Arc<dyn ServiceRuntimeIndex>,
+        runtime_state: Arc<dyn RuntimeStateStore>,
+    ) -> Self {
+        Self::with_config_manager(
+            Arc::new(StaticConfigManager::new((*config).clone())),
+            service_runtime,
+            runtime_state,
+        )
+    }
+
+    /// Replaces the configuration manager with a shared, live one.
+    ///
+    /// The daemon wires the single configuration manager here so a committed
+    /// change is observed by the next health check (`tasks/023.md` §39, §40).
+    #[must_use]
+    pub fn with_shared_config(mut self, config: Arc<dyn ConfigManager>) -> Self {
+        self.config = config;
+        self
+    }
+
+    /// Creates a manager over a shared, live configuration.
+    ///
+    /// Every check reads the manager's current snapshot, so a committed
+    /// configuration change is honoured immediately (`tasks/023.md` §39, §40).
+    #[must_use]
+    pub fn with_config_manager(
+        config: Arc<dyn ConfigManager>,
         service_runtime: Arc<dyn ServiceRuntimeIndex>,
         runtime_state: Arc<dyn RuntimeStateStore>,
     ) -> Self {
@@ -153,12 +180,12 @@ impl HealthManager {
         service_id: &ServiceId,
         scope: HealthCheckScope,
     ) -> Result<ServiceHealth, HealthError> {
-        let workspace = self
-            .config
-            .workspace_of_service(service_id)
-            .ok_or_else(|| HealthError::ServiceNotFound {
+        let config = self.config.current();
+        let workspace = config.workspace_of_service(service_id).ok_or_else(|| {
+            HealthError::ServiceNotFound {
                 service: service_id.clone(),
-            })?;
+            }
+        })?;
         let workspace_id = workspace.workspace.id.clone();
         let service = workspace
             .workspace
@@ -201,12 +228,12 @@ impl HealthManager {
         timeout: Duration,
         cancellation: Option<Cancellation>,
     ) -> Result<ServiceHealth, HealthError> {
-        let workspace = self
-            .config
-            .workspace_of_service(service_id)
-            .ok_or_else(|| HealthError::ServiceNotFound {
+        let config = self.config.current();
+        let workspace = config.workspace_of_service(service_id).ok_or_else(|| {
+            HealthError::ServiceNotFound {
                 service: service_id.clone(),
-            })?;
+            }
+        })?;
         let workspace_id = workspace.workspace.id.clone();
         let service = workspace
             .workspace

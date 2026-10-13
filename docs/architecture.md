@@ -140,7 +140,7 @@ clients over IPC, but it adds no business logic of its own.
 | `domain` | Domain | Pure business concepts and rules. Depends on no workspace crate. |
 | `execution` | Core service | Task/workflow engine: state, dependency-aware scheduling, bounded concurrency, cancellation, retry, timeout, progress. |
 | `policy` | Core service | Permission model and policy engine (`READ`, `SAFE_WRITE`, `DESTRUCTIVE`). |
-| `config` | Infrastructure | Versioned configuration loading, parsing, validation, migration. Produces one validated `Config` for the application. |
+| `config` | Infrastructure | Versioned configuration loading, parsing, validation, migration, and **management**: the format-preserving `ConfigManager`/`FileConfigManager` that previews, atomically commits, and reloads a typed `ConfigChange` under revision-based concurrency, and read-only repository inspection/technology detection. The daemon owns the only writer. Produces one validated `Config` for the application. |
 | `application` | Application | The shared application core: use cases (commands and queries), orchestration, policy application, and the ports infrastructure implements (`RuntimeStateStore`, `LogService`). Consumes `Config` and submits work to the `execution` engine. |
 | `git` | Infrastructure | Git adapter implementing the application Git port. |
 | `process` | Infrastructure | Local process lifecycle, state, ports, child processes, logs. |
@@ -150,7 +150,7 @@ clients over IPC, but it adds no business logic of its own.
 | `health` | Infrastructure | Health adapter. A `HealthManager` selects a `HealthChecker` (process, TCP, HTTP/actuator) through a small registry, runs each configured probe under its own timeout, aggregates the outcomes deterministically, records bounded history and events, mirrors the aggregate into the runtime state store, and implements the read-only `HealthIndex` port. A `HealthMonitor` optionally polls watched services. |
 | `logging` | Infrastructure | Observability adapter. A `LogHub` unifies managed-process output, task-engine events, and application messages into one structured, bounded, filterable store, answers stable cursor queries, and streams realtime entries to multiple backpressure-tolerant subscribers. Thin ingestors correlate existing event sources; messages are redacted before storage. Implements the `LogService`/`LogSubscription` ports. |
 | `client` | Client / runtime | The shared `OrchestratorClient` boundary every interface talks to, the versioned length-prefixed JSON IPC protocol, socket-path resolution, daemon auto-start and readiness waiting, and `RemoteClient` — the daemon-backed client. Also implements the trait for `Application` so in-process tests need no daemon. |
-| `daemon` | Client / runtime | The local shared runtime: binds the Unix domain socket, validates protocol versions, routes each request to the shared `Application`, fans task/log events out to clients over bounded channels, and manages single-instance locking and graceful shutdown. Contains no business logic. |
+| `daemon` | Client / runtime | The local shared runtime: binds the Unix domain socket, validates protocol versions, routes each request to the shared `Application`, fans task/log/**configuration** events out to clients over bounded channels, owns the single live configuration writer, and manages single-instance locking and graceful shutdown. Contains no business logic. |
 | `mcp` | Interface | MCP stdio adapter over the shared runtime client: strict tool schemas and structured envelopes, read-only resources, workflow prompts, and standard-authorization policy enforcement. |
 | `tui` | Interface | Ratatui adapter over the shared runtime client. |
 | `service-orchestrator` (root) | Composition root | Wires infrastructure into the core, runs the daemon for `daemon`, and hands a client to an interface for `tui`/`mcp`. |
@@ -1018,7 +1018,7 @@ SDK `rmcp` 3.5.1.
 
 The `apps/desktop` application is the graphical interface (`docs/desktop-gui.md`,
 `docs/adr/018-tauri-desktop-gui.md`, `docs/adr/019-desktop-service-management.md`,
-`docs/adr/020-desktop-git-build-library.md`, `tasks/022.md`).
+`docs/adr/020-desktop-git-build-library.md`, `tasks/022.md`, `tasks/023.md`).
 It is launched with `npm run tauri dev` during development; the Tauri crate is
 deliberately its own Cargo workspace, excluded from the root one, so the
 `wry`/`tao`/`objc` dependency tree is compiled only for the GUI.
@@ -1062,6 +1062,15 @@ deliberately its own Cargo workspace, excluded from the root one, so the
   registry behind the `BuildCapabilityIndex` port
   (`crates/application/src/ports/build.rs`), so the GUI renders a build system's
   operations without hard-coding Maven or npm.
+- **Configuration commands.** The adapter exposes configuration reads
+  (`get_configuration`, `validate_configuration`, `preview_configuration`,
+  `inspect_repository_path`, `detect_project_configuration`) and mutations
+  (`commit_configuration`, `reload_configuration`). It parses and writes no TOML:
+  it forwards the typed `ConfigChange` to the shared configuration use cases, and
+  the daemon re-validates, re-checks the revision, and performs the atomic write.
+  It also forwards the daemon's `configuration` event as
+  `daemon://configuration`, so every screen refreshes when the configuration
+  changes (`tasks/023.md`, `docs/configuration.md` §9).
 - **One connection, one client.** A shared `AppState` owns a single client
   behind a connect lock, so a burst of commands cannot start several daemons.
   The adapter resolves the real `service-orchestrator` binary (explicit

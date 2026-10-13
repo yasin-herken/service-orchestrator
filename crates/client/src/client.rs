@@ -31,13 +31,16 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 use service_orchestrator_application::{
     Application, ApplicationError, Authorization, BuildCapabilities, BulkOperationSummary,
-    EnvironmentPlan, HealthCheckScope, LibraryArtifactVerification, LibraryDependent,
-    LibraryPrepareOptions, LibraryStatus, LogEntry, LogPage, LogRequest, LogSubscription,
-    MigrationStatus, OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
-    ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus, ServiceStatus, WorkflowCancellation,
-    WorkflowStatus, WorkspaceStatus, WorkspaceValidationReport,
+    ConfigurationCommit, ConfigurationReload, ConfigurationValidation, EnvironmentPlan,
+    HealthCheckScope, LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions,
+    LibraryStatus, LogEntry, LogPage, LogRequest, LogSubscription, MigrationStatus,
+    OperationResult, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
+    ProjectConfigurationSuggestion, RepositoryInspection, ServiceDiagnostics, ServiceHealth,
+    ServiceRuntimeStatus, ServiceStatus, WorkflowCancellation, WorkflowStatus, WorkspaceStatus,
+    WorkspaceValidationReport,
 };
 use service_orchestrator_application::{DiffOptions, HealthState};
+use service_orchestrator_config::{ConfigChange, ConfigurationPreview, ConfigurationSnapshot};
 use service_orchestrator_domain::{
     Branch, BranchInfo, GroupId, Library, LibraryId, Profile, ProfileId, RepoDiff,
     RepositoryStatus, Service, ServiceGroup, ServiceId, Task, TaskId, Workflow, WorkflowId,
@@ -45,6 +48,20 @@ use service_orchestrator_domain::{
 };
 use service_orchestrator_execution::TaskEvent;
 use tokio::sync::broadcast;
+
+use crate::protocol::ConfigurationChanged;
+
+/// Returns a structured "unsupported" error for a defaulted client method.
+///
+/// Used by the [`OrchestratorClient`] trait's configuration default methods so
+/// an implementation that does not support configuration management reports one
+/// actionable error instead of silently returning an empty value.
+fn unsupported<T>(operation: &str) -> Result<T, ApplicationError> {
+    Err(ApplicationError::RuntimeUnavailable {
+        code: "UNSUPPORTED_OPERATION".to_owned(),
+        message: format!("this client does not support '{operation}'"),
+    })
+}
 
 /// The read-only slice of configuration an interface needs.
 ///
@@ -490,6 +507,66 @@ pub trait OrchestratorClient: Send + Sync {
         workspace_id: &WorkspaceId,
         profile_id: &ProfileId,
     ) -> Result<OperationResult, ApplicationError>;
+
+    // -- configuration management -------------------------------------------
+
+    /// Returns a read-only raw configuration snapshot for editing.
+    fn configuration_snapshot(&self) -> Result<ConfigurationSnapshot, ApplicationError> {
+        unsupported("configuration_snapshot")
+    }
+
+    /// Validates the current configuration file without changing it.
+    fn validate_configuration(&self) -> Result<ConfigurationValidation, ApplicationError> {
+        unsupported("validate_configuration")
+    }
+
+    /// Previews a change without committing it.
+    fn preview_configuration(
+        &self,
+        _change: &ConfigChange,
+        _expected_revision: &str,
+    ) -> Result<ConfigurationPreview, ApplicationError> {
+        unsupported("preview_configuration")
+    }
+
+    /// Validates and persists a configuration change.
+    ///
+    /// A removal requires a destructive-authorized client; see
+    /// [`with_authorization`](Self::with_authorization).
+    fn commit_configuration(
+        &self,
+        _change: &ConfigChange,
+        _expected_revision: &str,
+    ) -> Result<ConfigurationCommit, ApplicationError> {
+        unsupported("commit_configuration")
+    }
+
+    /// Re-reads and validates the configuration file from disk.
+    fn reload_configuration(&self) -> Result<ConfigurationReload, ApplicationError> {
+        unsupported("reload_configuration")
+    }
+
+    /// Inspects a local repository directory, read-only.
+    fn inspect_repository(&self, _path: &str) -> Result<RepositoryInspection, ApplicationError> {
+        unsupported("inspect_repository")
+    }
+
+    /// Detects a suggested service configuration from a repository.
+    fn detect_project_configuration(
+        &self,
+        _path: &str,
+    ) -> Result<ProjectConfigurationSuggestion, ApplicationError> {
+        unsupported("detect_project_configuration")
+    }
+
+    /// Subscribes to configuration-change events.
+    ///
+    /// The default is an immediately closed stream; the daemon-backed client
+    /// overrides it (`tasks/023.md` §39, §40).
+    fn subscribe_configuration_events(&self) -> broadcast::Receiver<ConfigurationChanged> {
+        let (_sender, receiver) = broadcast::channel(1);
+        receiver
+    }
 }
 
 /// Makes the application core usable as an in-process client.
@@ -999,6 +1076,45 @@ impl OrchestratorClient for Application {
         profile_id: &ProfileId,
     ) -> Result<OperationResult, ApplicationError> {
         Application::stop_profile(self, workspace_id, profile_id)
+    }
+
+    fn configuration_snapshot(&self) -> Result<ConfigurationSnapshot, ApplicationError> {
+        Application::configuration_snapshot(self)
+    }
+
+    fn validate_configuration(&self) -> Result<ConfigurationValidation, ApplicationError> {
+        Application::validate_configuration(self)
+    }
+
+    fn preview_configuration(
+        &self,
+        change: &ConfigChange,
+        expected_revision: &str,
+    ) -> Result<ConfigurationPreview, ApplicationError> {
+        Application::preview_configuration(self, change, expected_revision)
+    }
+
+    fn commit_configuration(
+        &self,
+        change: &ConfigChange,
+        expected_revision: &str,
+    ) -> Result<ConfigurationCommit, ApplicationError> {
+        Application::commit_configuration(self, change, expected_revision)
+    }
+
+    fn reload_configuration(&self) -> Result<ConfigurationReload, ApplicationError> {
+        Application::reload_configuration(self)
+    }
+
+    fn inspect_repository(&self, path: &str) -> Result<RepositoryInspection, ApplicationError> {
+        Application::inspect_repository(self, path)
+    }
+
+    fn detect_project_configuration(
+        &self,
+        path: &str,
+    ) -> Result<ProjectConfigurationSuggestion, ApplicationError> {
+        Application::detect_project_configuration(self, path)
     }
 }
 

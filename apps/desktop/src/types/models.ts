@@ -664,6 +664,455 @@ export const TASK_EVENT = 'daemon://task';
 /** Event name carrying a `LogStreamEvent` from the Rust adapter. */
 export const LOG_EVENT = 'daemon://log';
 
+/** Event name carrying a `ConfigurationChangedEvent` from the Rust adapter. */
+export const CONFIGURATION_EVENT = 'daemon://configuration';
+
+// -- configuration management --------------------------------------------------
+
+/**
+ * The raw configuration schema, mirrored from the config crate's `raw` module.
+ *
+ * These are the *unvalidated* on-disk shapes: the daemon validates and persists
+ * them, and the GUI only ever edits a value the daemon returns. `Option` and
+ * empty collections are omitted on the wire (`skip_serializing_if`), so every
+ * optional field is `undefined` when absent.
+ */
+
+/** A literal or explicitly-secret environment value (`raw::RawEnvValue`). */
+export interface RawEnvVariableView {
+  value: string;
+  secret: boolean;
+}
+
+/** An environment value: a bare string or a structured variable. */
+export type RawEnvValueView = string | RawEnvVariableView;
+
+/** A source repository (`raw::RawRepository`). */
+export interface RawRepositoryView {
+  url: string;
+  default_branch?: string;
+  provider?: string;
+}
+
+/** A runtime requirement (`raw::RawRuntime`). */
+export interface RawRuntimeView {
+  /** `java`, `node`, `maven`, `npm`, or `other:<name>`. */
+  type: string;
+  version?: string;
+}
+
+/** An artifact coordinate (`raw::RawArtifact`). */
+export interface RawArtifactView {
+  group_id: string;
+  artifact_id: string;
+  version: string;
+  packaging?: string;
+  classifier?: string;
+}
+
+/** A structured command with an explicit program and arguments. */
+export interface RawStructuredCommandView {
+  program: string;
+  args?: string[];
+  working_dir?: string;
+  environment?: Record<string, RawEnvValueView>;
+}
+
+/** A command in short-string or structured form (`raw::RawCommand`). */
+export type RawCommandView = string | RawStructuredCommandView;
+
+/** The configured commands of a service or library (`raw::RawCommands`). */
+export interface RawCommandsView {
+  install?: RawCommandView;
+  build?: RawCommandView;
+  start?: RawCommandView;
+  stop?: RawCommandView;
+  restart?: RawCommandView;
+  test?: RawCommandView;
+  liquibase?: RawCommandView;
+  custom?: Record<string, RawCommandView>;
+}
+
+/** A per-operation Liquibase command table (`raw::RawMigrationCommands`). */
+export interface RawMigrationCommandsView {
+  validate?: RawCommandView;
+  status?: RawCommandView;
+  pending?: RawCommandView;
+  preview?: RawCommandView;
+  update?: RawCommandView;
+}
+
+/** A declared migration target database (`raw::RawMigrationDatabase`). */
+export interface RawMigrationDatabaseView {
+  environment?: string;
+  database_type?: string;
+  name?: string;
+  host?: string;
+  schema?: string;
+  contexts?: string[];
+  labels?: string[];
+}
+
+/** Optional Liquibase configuration (`raw::RawLiquibase`). */
+export interface RawLiquibaseView {
+  enabled?: boolean;
+  command?: RawCommandView;
+  provider?: string;
+  execution_mode?: string;
+  commands?: RawMigrationCommandsView;
+  timeout_seconds?: number;
+  environment?: Record<string, RawEnvValueView>;
+  database?: RawMigrationDatabaseView;
+}
+
+/** A configured health check (`raw::RawHealthCheck`). */
+export interface RawHealthCheckView {
+  /** `process`, `port`, or `http`. */
+  type: string;
+  url?: string;
+  expected_status?: number;
+  port?: number;
+  timeout_seconds?: number;
+  interval_seconds?: number;
+  required?: boolean;
+}
+
+/** A declared port (`raw::RawPort`). */
+export interface RawPortView {
+  port: number;
+  protocol?: string;
+}
+
+/** A detailed dependency reference (`raw::RawDetailedDependency`). */
+export interface RawDetailedDependencyView {
+  id: string;
+  kind?: string;
+  required?: boolean;
+}
+
+/** A dependency reference in short-string or detailed form. */
+export type RawDependencyRefView = string | RawDetailedDependencyView;
+
+/** The dependency tables of a service or library (`raw::RawDependencies`). */
+export interface RawDependenciesView {
+  services?: RawDependencyRefView[];
+  libraries?: RawDependencyRefView[];
+}
+
+/** A raw workspace (`raw::RawWorkspace`). */
+export interface RawWorkspaceView {
+  id: string;
+  name?: string;
+  root: string;
+  environment?: Record<string, RawEnvValueView>;
+}
+
+/** A raw service (`raw::RawService`). */
+export interface RawServiceView {
+  id: string;
+  name?: string;
+  /** `backend`, `frontend`, `library`, or `other:<name>`. */
+  type: string;
+  workspace: string;
+  path?: string;
+  default_branch?: string;
+  repository?: RawRepositoryView;
+  runtime?: RawRuntimeView;
+  runtimes?: RawRuntimeView[];
+  commands?: RawCommandsView;
+  build_system?: string;
+  liquibase?: RawLiquibaseView;
+  health_checks?: RawHealthCheckView[];
+  ports?: RawPortView[];
+  dependencies?: RawDependenciesView;
+  environment?: Record<string, RawEnvValueView>;
+  capabilities?: string[];
+}
+
+/** A raw library (`raw::RawLibrary`). */
+export interface RawLibraryView {
+  id: string;
+  name?: string;
+  workspace: string;
+  path?: string;
+  default_branch?: string;
+  type?: string;
+  repository?: RawRepositoryView;
+  artifact?: RawArtifactView;
+  artifacts?: RawArtifactView[];
+  runtime?: RawRuntimeView;
+  runtimes?: RawRuntimeView[];
+  commands?: RawCommandsView;
+  build_system?: string;
+  dependencies?: RawDependenciesView;
+  environment?: Record<string, RawEnvValueView>;
+}
+
+/** A raw service group (`raw::RawGroup`). */
+export interface RawGroupView {
+  id: string;
+  name?: string;
+  description?: string;
+  workspace?: string;
+  services?: string[];
+}
+
+/** A raw developer profile (`raw::RawProfile`). */
+export interface RawProfileView {
+  id: string;
+  name?: string;
+  description?: string;
+  workspace?: string;
+  services?: string[];
+  groups?: string[];
+}
+
+/** Global task execution settings (`raw::RawExecution`). */
+export interface RawExecutionView {
+  max_parallel_tasks?: number;
+  default_timeout_seconds?: number;
+}
+
+/** A read-only, editable snapshot of the raw configuration. */
+export interface ConfigurationSnapshotView {
+  /** The revision the snapshot was read at. */
+  revision: string;
+  config_version: number;
+  workspaces: RawWorkspaceView[];
+  services: RawServiceView[];
+  libraries: RawLibraryView[];
+  profiles: RawProfileView[];
+  groups: RawGroupView[];
+  execution: RawExecutionView;
+}
+
+/** The kind of configuration entity a change targets (`EntityKind`). */
+export type EntityKindView = 'workspace' | 'service' | 'library' | 'profile' | 'group';
+
+/** A short identity for an entity in a diff (`EntitySummary`). */
+export interface EntitySummaryView {
+  kind: EntityKindView;
+  id: string;
+  name: string | null;
+}
+
+/** One changed field of an updated entity (`FieldChange`). */
+export interface FieldChangeView {
+  field: string;
+  before: string | null;
+  after: string | null;
+}
+
+/** An entity that changed in place (`UpdatedEntity`). */
+export interface UpdatedEntityView {
+  kind: EntityKindView;
+  id: string;
+  name: string | null;
+  fields: FieldChangeView[];
+}
+
+/** A structured, human-readable configuration diff (`ConfigurationDiff`). */
+export interface ConfigurationDiffView {
+  added: EntitySummaryView[];
+  updated: UpdatedEntityView[];
+  removed: EntitySummaryView[];
+}
+
+/** A reference from another entity that points at a change target. */
+export interface AffectedReferenceView {
+  source_kind: EntityKindView;
+  source_id: string;
+  relation: string;
+  target: string;
+}
+
+/** The impact of a change on a long-running process (`RunningServiceImpact`). */
+export interface RunningServiceImpactView {
+  service_id: string;
+  running: boolean;
+  /** `added`, `updated`, or `removed`. */
+  change: string;
+  action_required: string;
+}
+
+/** One actionable configuration problem (`ValidationError`). */
+export interface ValidationIssueView {
+  file: string | null;
+  location: string;
+  problem: string;
+  expected: string | null;
+  suggested_fix: string | null;
+}
+
+/** A create/update/remove change to a single entity (`EntityChange<T>`). */
+export interface CreateEntityChangeView<T> {
+  action: 'create';
+  entity: T;
+}
+export interface UpdateEntityChangeView<T> {
+  action: 'update';
+  id: string;
+  entity: T;
+}
+export interface RemoveEntityChangeView {
+  action: 'remove';
+  id: string;
+}
+export type EntityChangeView<T> =
+  | CreateEntityChangeView<T>
+  | UpdateEntityChangeView<T>
+  | RemoveEntityChangeView;
+
+/**
+ * A single configuration change (`ConfigChange`).
+ *
+ * The wire form is adjacently tagged: `{ kind, change }`, and the change itself
+ * is tagged by `action` (`tasks/023.md` §41). The GUI builds exactly this shape
+ * and the daemon decodes it — there is no second schema.
+ */
+export type ConfigChangeView =
+  | { kind: 'workspace'; change: EntityChangeView<RawWorkspaceView> }
+  | { kind: 'service'; change: EntityChangeView<RawServiceView> }
+  | { kind: 'library'; change: EntityChangeView<RawLibraryView> }
+  | { kind: 'profile'; change: EntityChangeView<RawProfileView> }
+  | { kind: 'group'; change: EntityChangeView<RawGroupView> };
+
+/** The result of previewing a change without committing it. */
+export interface ConfigurationPreviewView {
+  revision: string;
+  proposed_revision: string;
+  valid: boolean;
+  diff: ConfigurationDiffView;
+  issues: ValidationIssueView[];
+  affected_references: AffectedReferenceView[];
+  running_impact: RunningServiceImpactView[];
+}
+
+/** The outcome of validating the active configuration file. */
+export interface ConfigurationValidationView {
+  revision: string;
+  valid: boolean;
+  issues: ValidationIssueView[];
+}
+
+/** A compact count of the declared entities (`ConfigurationCounts`). */
+export interface ConfigurationCountsView {
+  workspaces: number;
+  services: number;
+  libraries: number;
+  profiles: number;
+  groups: number;
+}
+
+/** The outcome of committing a configuration change. */
+export interface ConfigurationCommitView {
+  revision: string;
+  description: string;
+  counts: ConfigurationCountsView;
+}
+
+/** The outcome of reloading the configuration from disk. */
+export interface ConfigurationReloadView {
+  revision: string;
+  counts: ConfigurationCountsView;
+}
+
+/** Whether an execution provider for a build system is installed. */
+export type ProviderAvailabilityView =
+  | 'available'
+  | 'provider_not_installed'
+  | 'not_applicable';
+
+/** A build system detected in a repository (`DetectedBuildSystem`). */
+export interface DetectedBuildSystemView {
+  system: string;
+  label: string;
+  availability: ProviderAvailabilityView;
+  evidence: string[];
+  note?: string;
+}
+
+/** A runtime requirement suggested by a repository (`DetectedRuntime`). */
+export interface DetectedRuntimeView {
+  kind: string;
+  label: string;
+  required_version?: string;
+  evidence: string[];
+}
+
+/** A non-build integration detected in a repository (`DetectedIntegration`). */
+export interface DetectedIntegrationView {
+  kind: string;
+  label: string;
+  evidence: string[];
+}
+
+/** A bounded, read-only summary of a Maven project (`MavenMetadata`). */
+export interface MavenMetadataView {
+  group_id?: string;
+  artifact_id?: string;
+  version?: string;
+  packaging?: string;
+  java_version?: string;
+  modules?: string[];
+  wrapper_available: boolean;
+  spring_boot: boolean;
+}
+
+/** A bounded, read-only summary of a Node project (`NodeMetadata`). */
+export interface NodeMetadataView {
+  name?: string;
+  version?: string;
+  required_node_version?: string;
+  package_manager?: string;
+  scripts?: string[];
+  react: boolean;
+}
+
+/** A read-only inspection of a local repository directory. */
+export interface RepositoryProbeView {
+  path: string;
+  exists: boolean;
+  is_directory: boolean;
+  is_git_repository: boolean;
+  branch?: string;
+  remote?: string;
+  project_files?: string[];
+  build_systems?: DetectedBuildSystemView[];
+  runtimes?: DetectedRuntimeView[];
+  integrations?: DetectedIntegrationView[];
+  maven?: MavenMetadataView;
+  node?: NodeMetadataView;
+  notes?: string[];
+}
+
+/** A suggested command (never a shell line) (`SuggestedCommand`). */
+export interface SuggestedCommandView {
+  program: string;
+  args: string[];
+}
+
+/** A starting-point service configuration from a repository (`ProjectConfigurationSuggestion`). */
+export interface ProjectSuggestionView {
+  path: string;
+  service_type?: string;
+  build_system?: string;
+  runtimes?: DetectedRuntimeView[];
+  build_command?: SuggestedCommandView;
+  start_command?: SuggestedCommandView;
+  integrations?: DetectedIntegrationView[];
+  warnings?: string[];
+  inspection: RepositoryProbeView;
+}
+
+/** An active-configuration change pushed to the adapter's `daemon://configuration`. */
+export interface ConfigurationChangedEvent {
+  /** The revision of the configuration after the change. */
+  revision: string;
+  /** A short, human-readable description of what changed. */
+  description: string;
+}
+
 // -- profiles, groups, and environment workflows -------------------------------
 
 /**

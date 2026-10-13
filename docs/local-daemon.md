@@ -196,7 +196,8 @@ An asynchronous event:
 ```
 
 Event kinds are `task` (a task-engine state change), `log` (a realtime log entry
-for a subscribed service), and `shutdown` (the daemon is stopping).
+for a subscribed service), `configuration` (the active configuration changed),
+and `shutdown` (the daemon is stopping).
 
 Responses and events are written by a single per-connection writer task, so a
 pushed event can never interleave in the middle of a response frame.
@@ -328,6 +329,19 @@ The plan returned by `plan_prepare_environment` is computed by the daemon too, s
 the preview an interface shows is the daemon's own authoritative plan, not a
 locally re-derived one (`docs/environment-workflows.md`).
 
+The same is true of **configuration**. The daemon owns the live configuration
+(one `ConfigManager`) and is its only writer. Every client reads a snapshot from
+it, previews and commits a change through it, and observes the identical result:
+
+```text
+TUI ── commit (service create) ──▶ daemon ──▶ config.toml
+MCP ── get_configuration ───────▶ daemon ──▶ revision + entities
+```
+
+`validate` reads and validates the file without changing what the daemon serves,
+so a client-side "check" can never mutate shared state. See
+[`docs/configuration.md`](configuration.md) §9 for the management layer.
+
 ---
 
 ## 10. Event streaming
@@ -339,6 +353,9 @@ channels:
   progress, success, failure, cancellation, …);
 - **log events** — realtime log entries for services a client explicitly
   subscribed to;
+- **configuration events** (`ConfigurationChanged { revision, description }`) —
+  pushed after a commit or a reload, so every client converges on the same
+  configuration;
 - **shutdown** — the daemon is stopping.
 
 Subscriptions are bounded, and each connection has its own outbound queue, so a

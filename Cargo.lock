@@ -863,6 +863,7 @@ dependencies = [
  "service-orchestrator-domain",
  "thiserror",
  "toml",
+ "toml_edit",
 ]
 
 [[package]]

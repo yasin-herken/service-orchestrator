@@ -17,17 +17,18 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::Serialize;
 use serde_json::Value;
 use service_orchestrator_application::{
-    Application, ApplicationError, LogStreamError, LogSubscription,
+    Application, ApplicationError, Authorization, LogStreamError, LogSubscription,
 };
 use service_orchestrator_client::{
-    codes, unavailable, DaemonStatus, RequestEnvelope, ResponseEnvelope, ServerEvent,
-    ServerMessage, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    codes, unavailable, ConfigurationChanged, DaemonStatus, RequestEnvelope, ResponseEnvelope,
+    ServerEvent, ServerMessage, MAX_FRAME_BYTES, PROTOCOL_VERSION,
 };
+use service_orchestrator_config::ConfigChange;
 use service_orchestrator_domain::ServiceId;
 use service_orchestrator_execution::TaskEngine;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixListener;
-use tokio::sync::{broadcast, mpsc, watch};
+use tokio::sync::{broadcast, mpsc, watch, RwLock};
 use tokio::task::JoinHandle;
 
 use crate::dispatch;
@@ -46,6 +47,11 @@ const ACCEPT_BACKOFF: std::time::Duration = std::time::Duration::from_millis(50)
 /// reading can never grow the daemon's memory without limit
 /// (`tasks/017.md` §18, defect D7).
 const OUTBOUND_CAPACITY: usize = 256;
+
+/// How many configuration-change events a slow client may fall behind before it
+/// is told it lagged. Configuration changes are rare, so this only needs to
+/// cover a burst of edits.
+const CONFIG_EVENT_CAPACITY: usize = 64;
 
 /// Configuration for a running daemon.
 #[derive(Clone, Debug)]
@@ -109,8 +115,9 @@ impl Daemon {
         let guard = SocketGuard::new(&socket);
 
         let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let (config_events, _config_receiver) = broadcast::channel(CONFIG_EVENT_CAPACITY);
         let shared = Arc::new(Shared {
-            application: self.application,
+            application: RwLock::new(self.application),
             engine: self.engine,
             socket_path: socket.clone(),
             started_at_unix: SystemTime::now()
@@ -118,6 +125,7 @@ impl Daemon {
                 .map(|elapsed| elapsed.as_secs())
                 .unwrap_or(0),
             clients: AtomicUsize::new(0),
+            config_events,
             shutdown_tx: shutdown_tx.clone(),
         });
 
@@ -141,11 +149,18 @@ impl Daemon {
 
 /// State shared by every connection.
 struct Shared {
-    application: Application,
+    /// The authoritative application core.
+    ///
+    /// Behind a lock so a configuration commit can refresh the core's cached
+    /// snapshot while a reader request holds a cheap clone
+    /// (`tasks/023.md` §38, §40).
+    application: RwLock<Application>,
     engine: Arc<TaskEngine>,
     socket_path: PathBuf,
     started_at_unix: u64,
     clients: AtomicUsize,
+    /// Configuration-change events fanned out to every client.
+    config_events: broadcast::Sender<ConfigurationChanged>,
     shutdown_tx: watch::Sender<bool>,
 }
 
@@ -156,10 +171,10 @@ impl Shared {
     }
 
     /// Builds the daemon's diagnostic snapshot.
-    fn status(&self) -> DaemonStatus {
+    fn status(&self, application: &Application) -> DaemonStatus {
         let mut managed_services = 0usize;
-        for workspace in self.application.list_workspaces() {
-            if let Ok(running) = self.application.list_running_services(&workspace.id) {
+        for workspace in application.list_workspaces() {
+            if let Ok(running) = application.list_running_services(&workspace.id) {
                 managed_services += running.len();
             }
         }
@@ -251,6 +266,30 @@ async fn handle_connection(
         }
     });
 
+    // Forward configuration-change events so every client refreshes its view of
+    // the active configuration (`tasks/023.md` §39, §40).
+    let mut config_events = shared.config_events.subscribe();
+    let config_out = out.clone();
+    let config_pump = tokio::spawn(async move {
+        loop {
+            match config_events.recv().await {
+                Ok(change) => {
+                    if config_out
+                        .send(ServerMessage::Event(ServerEvent::ConfigurationChanged(
+                            change,
+                        )))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+                Err(broadcast::error::RecvError::Lagged(_)) => continue,
+                Err(broadcast::error::RecvError::Closed) => return,
+            }
+        }
+    });
+
     let mut subscriptions: HashMap<ServiceId, JoinHandle<()>> = HashMap::new();
 
     loop {
@@ -289,6 +328,7 @@ async fn handle_connection(
         handle.abort();
     }
     event_pump.abort();
+    config_pump.abort();
     drop(out);
     let _ = writer_task.await;
     shared.clients.fetch_sub(1, Ordering::SeqCst);
@@ -323,11 +363,22 @@ async fn handle_request(
 
     match request.method.as_str() {
         service_orchestrator_client::ops::DAEMON_STATUS => {
-            respond(out, &request, encode(shared.status())).await;
+            let application = shared.application.read().await;
+            respond(out, &request, encode(shared.status(&application))).await;
         }
         service_orchestrator_client::ops::DAEMON_SHUTDOWN => {
             shared.request_shutdown();
             respond(out, &request, encode(())).await;
+        }
+        // A configuration commit takes the write lock so it can validate and
+        // persist the change and then refresh the core's cached snapshot before
+        // any other request observes it (`tasks/023.md` §38, §40).
+        service_orchestrator_client::ops::COMMIT_CONFIGURATION => {
+            handle_commit_configuration(shared, out, request, same_user).await;
+        }
+        // A reload re-reads the file and refreshes the cached snapshot.
+        service_orchestrator_client::ops::RELOAD_CONFIGURATION => {
+            handle_reload_configuration(shared, out, request).await;
         }
         service_orchestrator_client::ops::SUBSCRIBE_SERVICE_LOGS => {
             let decoded: Result<(ServiceId,), _> = serde_json::from_value(request.params.clone());
@@ -337,7 +388,12 @@ async fn handle_request(
                         respond(out, &request, encode(())).await;
                     }
                     std::collections::hash_map::Entry::Vacant(entry) => {
-                        match shared.application.subscribe_service_logs(&service_id) {
+                        let subscription = shared
+                            .application
+                            .read()
+                            .await
+                            .subscribe_service_logs(&service_id);
+                        match subscription {
                             Ok(subscription) => {
                                 let handle =
                                     spawn_log_pump(service_id.clone(), subscription, out.clone());
@@ -372,10 +428,85 @@ async fn handle_request(
             respond(out, &request, encode(())).await;
         }
         _ => {
-            let result =
-                dispatch::route(&shared.application, &shared.engine, &request, same_user).await;
+            // A read-only request works on a cheap clone taken under a read
+            // guard, so it never blocks a concurrent configuration commit for
+            // the duration of the operation and a commit is always applied to a
+            // fresh snapshot (`tasks/023.md` §38, §40).
+            let application = shared.application.read().await.clone();
+            let result = dispatch::route(&application, &shared.engine, &request, same_user).await;
             respond(out, &request, result).await;
         }
+    }
+}
+
+/// Validates and persists a configuration change, then refreshes the daemon and
+/// broadcasts a change event.
+async fn handle_commit_configuration(
+    shared: &Arc<Shared>,
+    out: &mpsc::Sender<ServerMessage>,
+    request: RequestEnvelope,
+    same_user: bool,
+) {
+    let allow_destructive = dispatch::destructive_allowed(&request, same_user);
+    let authorization = if allow_destructive {
+        Authorization::allow_destructive()
+    } else {
+        Authorization::standard()
+    };
+    let decoded: Result<(ConfigChange, String), _> = serde_json::from_value(request.params.clone());
+    let (change, revision) = match decoded {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            respond(
+                out,
+                &request,
+                Err(unavailable(
+                    codes::INVALID_REQUEST,
+                    format!("invalid configuration change parameters: {error}"),
+                )),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let mut application = shared.application.write().await;
+    // The commit runs on an authorized clone; the clone shares the same
+    // configuration manager, so the shared core's snapshot is refreshed from the
+    // manager below (`tasks/015.md` §23).
+    let authorized = application.clone().with_authorization(authorization);
+    match authorized.commit_configuration(&change, &revision) {
+        Ok(commit) => {
+            application.refresh_configuration();
+            drop(application);
+            let _ = shared.config_events.send(ConfigurationChanged {
+                revision: commit.revision.clone(),
+                description: commit.description.clone(),
+            });
+            respond(out, &request, encode(commit)).await;
+        }
+        Err(error) => respond(out, &request, Err(error)).await,
+    }
+}
+
+/// Re-reads and validates the configuration file and refreshes the daemon.
+async fn handle_reload_configuration(
+    shared: &Arc<Shared>,
+    out: &mpsc::Sender<ServerMessage>,
+    request: RequestEnvelope,
+) {
+    let mut application = shared.application.write().await;
+    match application.reload_configuration() {
+        Ok(reload) => {
+            application.refresh_configuration();
+            drop(application);
+            let _ = shared.config_events.send(ConfigurationChanged {
+                revision: reload.revision.clone(),
+                description: "reloaded configuration from disk".to_owned(),
+            });
+            respond(out, &request, encode(reload)).await;
+        }
+        Err(error) => respond(out, &request, Err(error)).await,
     }
 }
 

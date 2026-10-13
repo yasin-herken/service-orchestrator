@@ -37,9 +37,11 @@ use service_orchestrator_client::{
     codes, read_frame, socket_path, write_frame, ClientKind, OrchestratorClient, RemoteClient,
     RequestEnvelope, ResponseEnvelope, ServerMessage, PROTOCOL_VERSION, SOCKET_ENV,
 };
-use service_orchestrator_config::load_from_str;
+use service_orchestrator_config::{
+    load_from_str, ConfigChange, ConfigManager, EntityChange, FileConfigManager,
+};
 use service_orchestrator_daemon::{Daemon, DaemonError, DaemonOptions};
-use service_orchestrator_domain::{ProcessState, ServiceId, TaskId};
+use service_orchestrator_domain::{Permission, ProcessState, ServiceId, TaskId};
 use service_orchestrator_execution::{TaskEngine, TaskEvent};
 
 /// The fixture configuration, shared with the MCP adapter tests. It is generic:
@@ -117,7 +119,7 @@ impl Harness {
             .enable_all()
             .build()
             .expect("a Tokio runtime is built");
-        let (application, engine) = runtime.block_on(build_core());
+        let (application, engine) = runtime.block_on(build_core(&config_path));
         let daemon = Daemon::new(
             application,
             engine,
@@ -198,9 +200,18 @@ impl Drop for Harness {
     }
 }
 
-/// Builds a real application core with no executors and in-memory state.
-async fn build_core() -> (Application, Arc<TaskEngine>) {
+/// Builds a real application core with no executors and in-memory state, backed
+/// by the real file configuration manager over the harness's config file.
+///
+/// Wiring the file manager is what makes the daemon the single configuration
+/// writer end to end: a commit through IPC rewrites the file and refreshes this
+/// core (`tasks/023.md` §38, §40, §49).
+async fn build_core(config_path: &Path) -> (Application, Arc<TaskEngine>) {
     let config = load_from_str(FIXTURE, "<daemon-test>").expect("the fixture is valid");
+    let manager: Arc<dyn ConfigManager> = Arc::new(FileConfigManager::new(
+        config_path.to_path_buf(),
+        config.clone(),
+    ));
     let engine = Arc::new(
         TaskEngine::builder()
             .max_parallel_tasks(4)
@@ -212,7 +223,8 @@ async fn build_core() -> (Application, Arc<TaskEngine>) {
         engine.clone(),
         Arc::new(InMemoryRuntimeStateStore::new()),
         Arc::new(NullLogService),
-    );
+    )
+    .with_configuration(manager);
     (application, engine)
 }
 
@@ -603,7 +615,7 @@ fn a_client_reports_the_daemon_as_unavailable_after_shutdown() {
 fn a_second_daemon_on_the_same_socket_is_refused() {
     let harness = Harness::start();
 
-    let (application, engine) = harness.runtime.block_on(build_core());
+    let (application, engine) = harness.runtime.block_on(build_core(&harness.config_path));
     let second = Daemon::new(
         application,
         engine,
@@ -671,4 +683,203 @@ fn a_fresh_daemon_adopts_nothing_and_never_kills_unrelated_processes() {
 
     let _ = decoy.kill();
     let _ = decoy.wait();
+}
+
+// -- configuration management ------------------------------------------------
+
+/// Builds a new minimal, valid backend service entity.
+fn new_service(id: &str) -> service_orchestrator_config::raw::RawService {
+    use service_orchestrator_config::raw::{RawCommand, RawCommands, RawDependencies, RawService};
+    RawService {
+        id: id.to_owned(),
+        name: Some(id.to_owned()),
+        service_type: "backend".to_owned(),
+        workspace: "demo".to_owned(),
+        path: Some(format!("backend/{id}")),
+        default_branch: Some("main".to_owned()),
+        repository: None,
+        runtime: None,
+        runtimes: Vec::new(),
+        commands: RawCommands {
+            build: Some(RawCommand::Line("./mvnw clean install".to_owned())),
+            start: Some(RawCommand::Line("./mvnw spring-boot:run".to_owned())),
+            ..RawCommands::default()
+        },
+        build_system: Some("maven".to_owned()),
+        liquibase: None,
+        health_checks: Vec::new(),
+        ports: Vec::new(),
+        dependencies: RawDependencies::default(),
+        environment: std::collections::BTreeMap::new(),
+        capabilities: Vec::new(),
+    }
+}
+
+/// Waits for the next configuration-change event, or fails at the deadline.
+fn wait_for_configuration_change(
+    events: &mut tokio::sync::broadcast::Receiver<
+        service_orchestrator_client::ConfigurationChanged,
+    >,
+) -> service_orchestrator_client::ConfigurationChanged {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        match events.try_recv() {
+            Ok(change) => return change,
+            Err(tokio::sync::broadcast::error::TryRecvError::Empty) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "the configuration-change event did not arrive in time"
+                );
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(error) => panic!("the configuration-change stream failed: {error}"),
+        }
+    }
+}
+
+#[test]
+fn configuration_snapshot_and_validation_are_available_over_ipc() {
+    let mut harness = Harness::start();
+    let client = harness.client(ClientKind::Desktop);
+
+    let snapshot = client
+        .configuration_snapshot()
+        .expect("the daemon returns a snapshot");
+    assert!(!snapshot.revision.is_empty());
+    assert_eq!(snapshot.workspaces.len(), 1);
+    assert_eq!(snapshot.services.len(), 2);
+
+    let validation = client
+        .validate_configuration()
+        .expect("the daemon validates the active file");
+    assert!(validation.valid);
+
+    harness.shutdown().expect("the daemon stops");
+}
+
+#[test]
+fn committing_a_service_is_broadcast_to_every_connected_client() {
+    let mut harness = Harness::start();
+    let writer = harness.client(ClientKind::Desktop);
+    let observer = harness.client(ClientKind::Tui);
+
+    let mut events = observer.subscribe_configuration_events();
+    // A round trip guarantees the observer's server-side event pump is
+    // registered before the commit fires.
+    observer
+        .configuration_snapshot()
+        .expect("the daemon answers");
+
+    let revision = writer
+        .configuration_snapshot()
+        .expect("a snapshot")
+        .revision;
+    let change = ConfigChange::service(EntityChange::Create {
+        entity: new_service("notify-api"),
+    });
+    let commit = writer
+        .commit_configuration(&change, &revision)
+        .expect("the change is committed");
+    assert!(commit.description.contains("notify-api"));
+
+    let event = wait_for_configuration_change(&mut events);
+    assert_eq!(event.revision, commit.revision);
+    assert!(event.description.contains("notify-api"));
+
+    // Every client sees the same new revision from the one source of truth.
+    let snapshot = observer
+        .configuration_snapshot()
+        .expect("the observer re-reads the snapshot");
+    assert_eq!(snapshot.revision, commit.revision);
+    assert!(snapshot.services.iter().any(|s| s.id == "notify-api"));
+
+    harness.shutdown().expect("the daemon stops");
+}
+
+#[test]
+fn a_stale_configuration_revision_is_rejected_over_ipc() {
+    let mut harness = Harness::start();
+    let client = harness.client(ClientKind::Desktop);
+    let change = ConfigChange::service(EntityChange::Create {
+        entity: new_service("notify-api"),
+    });
+
+    let error = client
+        .commit_configuration(&change, "a-revision-from-the-past")
+        .expect_err("a stale edit is refused");
+    assert!(matches!(
+        error,
+        ApplicationError::Configuration { ref code, .. } if code == "CONFIG_CONFLICT"
+    ));
+
+    harness.shutdown().expect("the daemon stops");
+}
+
+#[test]
+fn a_removal_cannot_be_self_confirmed_over_ipc() {
+    let mut harness = Harness::start();
+    let client = harness.client(ClientKind::Desktop);
+    let revision = client
+        .configuration_snapshot()
+        .expect("a snapshot")
+        .revision;
+    let change = ConfigChange::group(EntityChange::Remove {
+        id: "core".to_owned(),
+    });
+
+    let error = client
+        .commit_configuration(&change, &revision)
+        .expect_err("a removal needs confirmation");
+    assert!(matches!(
+        error,
+        ApplicationError::PermissionDenied {
+            permission: Permission::Destructive,
+            ..
+        }
+    ));
+
+    harness.shutdown().expect("the daemon stops");
+}
+
+#[test]
+fn a_confirmed_removal_persists_and_preserves_unrelated_secrets() {
+    let mut harness = Harness::start();
+    let client = harness
+        .client(ClientKind::Desktop)
+        .with_authorization(Authorization::allow_destructive());
+    let revision = client
+        .configuration_snapshot()
+        .expect("a snapshot")
+        .revision;
+    // `core` is referenced by no other entity, so its removal is a clean drop.
+    let change = ConfigChange::group(EntityChange::Remove {
+        id: "core".to_owned(),
+    });
+    client
+        .commit_configuration(&change, &revision)
+        .expect("a confirmed removal commits");
+
+    let snapshot = client
+        .configuration_snapshot()
+        .expect("the snapshot is re-read");
+    assert!(!snapshot.groups.iter().any(|g| g.id == "core"));
+
+    // A secret elsewhere in the file survives the rewrite verbatim.
+    let text = std::fs::read_to_string(&harness.config_path).expect("the file is readable");
+    assert!(text.contains("super-secret-value"));
+
+    harness.shutdown().expect("the daemon stops");
+}
+
+#[test]
+fn reload_validation_reports_the_active_revision() {
+    let mut harness = Harness::start();
+    let client = harness.client(ClientKind::Desktop);
+    let before = client
+        .configuration_snapshot()
+        .expect("a snapshot")
+        .revision;
+    let reload = client.reload_configuration().expect("the file reloads");
+    assert_eq!(reload.revision, before);
+    harness.shutdown().expect("the daemon stops");
 }

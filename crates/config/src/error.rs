@@ -15,10 +15,11 @@
 
 use std::fmt;
 
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
 /// A single, actionable configuration problem.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationError {
     /// The configuration file the problem was found in, if known.
     pub file: Option<String>,
@@ -89,7 +90,7 @@ impl fmt::Display for ValidationError {
 }
 
 /// A non-empty collection of [`ValidationError`] values for one file.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ValidationErrors {
     file: Option<String>,
     errors: Vec<ValidationError>,
@@ -204,6 +205,70 @@ pub enum ConfigError {
     /// The file parsed but is semantically invalid.
     #[error("{0}")]
     Validation(ValidationErrors),
+
+    /// A configuration edit lost a race with a concurrent writer.
+    ///
+    /// The revision the editor was based on no longer matches the file on
+    /// disk, so applying the edit would silently overwrite a newer change
+    /// (`tasks/023.md` §7, §47).
+    #[error(
+        "the configuration changed on disk since it was read \
+         (expected revision {expected}, found {actual})"
+    )]
+    Conflict {
+        /// The file whose revision is stale.
+        path: String,
+        /// The revision the editor expected.
+        expected: String,
+        /// The revision actually on disk.
+        actual: String,
+    },
+
+    /// A configuration edit referenced an entity that does not exist.
+    #[error("{kind} '{id}' is not present in the configuration")]
+    EntityNotFound {
+        /// The entity kind, for example `service`.
+        kind: &'static str,
+        /// The entity identifier.
+        id: String,
+    },
+
+    /// A configuration edit tried to create an entity that already exists.
+    #[error("{kind} '{id}' already exists in the configuration")]
+    EntityExists {
+        /// The entity kind, for example `workspace`.
+        kind: &'static str,
+        /// The entity identifier.
+        id: String,
+    },
+
+    /// A configuration edit is internally inconsistent.
+    ///
+    /// For example an update whose payload renames the entity: identity is
+    /// stable and must be changed by removing and re-creating instead
+    /// (`tasks/023.md` §28).
+    #[error("the configuration change is not valid: {message}")]
+    InvalidChange {
+        /// A human-readable explanation.
+        message: String,
+    },
+
+    /// The configuration document could not be edited or rendered.
+    #[error("failed to edit the configuration document: {message}")]
+    Document {
+        /// A human-readable explanation.
+        message: String,
+    },
+
+    /// The configuration could not be persisted.
+    #[error("failed to write configuration file '{path}': {source}")]
+    Write {
+        /// The file that could not be written.
+        path: String,
+        /// The underlying I/O error.
+        #[source]
+        source: std::io::Error,
+    },
 }
 
 impl From<ValidationErrors> for ConfigError {

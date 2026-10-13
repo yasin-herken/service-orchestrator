@@ -26,8 +26,9 @@ mod socket;
 
 pub use client::{ConfigSummary, OrchestratorClient};
 pub use protocol::{
-    codes, read_frame, unavailable, write_frame, ClientKind, DiffParams, RequestEnvelope,
-    ResponseEnvelope, ServerEvent, ServerMessage, MAX_FRAME_BYTES, PROTOCOL_VERSION,
+    codes, read_frame, unavailable, write_frame, ClientKind, ConfigurationChanged, DiffParams,
+    RequestEnvelope, ResponseEnvelope, ServerEvent, ServerMessage, MAX_FRAME_BYTES,
+    PROTOCOL_VERSION,
 };
 pub use remote::{DaemonStatus, RemoteClient, RemoteLogSubscription, REQUEST_TIMEOUT};
 pub use socket::{

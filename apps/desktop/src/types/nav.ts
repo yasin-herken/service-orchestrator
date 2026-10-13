@@ -10,6 +10,7 @@ export type PageId =
   | 'tasks'
   | 'logs'
   | 'health'
+  | 'configuration'
   | 'settings';
 
 /**
@@ -58,6 +59,7 @@ export const PAGES: readonly PageDefinition[] = [
   { id: 'tasks', label: 'Tasks', title: 'Tasks' },
   { id: 'logs', label: 'Logs', title: 'Logs' },
   { id: 'health', label: 'Health', title: 'Health' },
+  { id: 'configuration', label: 'Configuration', title: 'Configuration' },
   { id: 'settings', label: 'Settings', title: 'Settings' },
 ] as const;
 

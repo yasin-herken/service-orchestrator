@@ -29,7 +29,12 @@
 
 use std::sync::Arc;
 
+use service_orchestrator_application::{
+    ConfigurationCommit, ConfigurationReload, ConfigurationValidation,
+    ProjectConfigurationSuggestion, RepositoryInspection,
+};
 use service_orchestrator_client::{DaemonStatus, RemoteClient};
+use service_orchestrator_config::{ConfigChange, ConfigurationPreview, ConfigurationSnapshot};
 use tauri::{AppHandle, State};
 
 use crate::connection::ConnectionSnapshot;
@@ -47,7 +52,10 @@ use crate::logs::LogQuery;
 use crate::state::AppState;
 use crate::tasks::TaskLogsQuery;
 use crate::workflow::PrepareEnvironmentInput;
-use crate::{build, git, health, library, logs, migration, mutations, queries, tasks, workflow};
+use crate::{
+    build, configuration, git, health, library, logs, migration, mutations, queries, tasks,
+    workflow,
+};
 
 /// Runs one blocking query against the shared client.
 ///
@@ -1325,4 +1333,139 @@ pub async fn unsubscribe_service_logs(
 ) -> Result<(), CommandError> {
     state.log_fanout().unsubscribe(&subscription_id).await;
     Ok(())
+}
+
+// -- configuration management -------------------------------------------------
+
+/// Reads the active configuration as a raw, editable snapshot.
+///
+/// # Errors
+///
+/// A structured `{ code, message }` error when the daemon cannot be reached or
+/// the file cannot be read.
+#[tauri::command]
+pub async fn get_configuration(
+    state: State<'_, AppState>,
+) -> Result<ConfigurationSnapshot, CommandError> {
+    query(state.inner(), |client| {
+        configuration::snapshot(client.as_ref())
+    })
+    .await
+}
+
+/// Validates the active configuration file without changing it.
+///
+/// # Errors
+///
+/// A structured `{ code, message }` error when the daemon cannot be reached or
+/// the file cannot be read.
+#[tauri::command]
+pub async fn validate_configuration(
+    state: State<'_, AppState>,
+) -> Result<ConfigurationValidation, CommandError> {
+    query(state.inner(), |client| {
+        configuration::validate(client.as_ref())
+    })
+    .await
+}
+
+/// Previews a proposed configuration change without committing it.
+///
+/// The frontend sends the change as the daemon's own `ConfigChange` shape and
+/// the revision the editor was based on; the daemon computes the diff,
+/// validation, affected references, and running-service impact
+/// (`tasks/023.md` §32, §34).
+///
+/// # Errors
+///
+/// `CONFIG_CONFLICT` for a stale revision, `INVALID_INPUT` for a malformed
+/// change, otherwise a structured `{ code, message }` error.
+#[tauri::command]
+pub async fn preview_configuration(
+    state: State<'_, AppState>,
+    change: ConfigChange,
+    expected_revision: String,
+) -> Result<ConfigurationPreview, CommandError> {
+    query(state.inner(), move |client| {
+        configuration::preview(client.as_ref(), &change, &expected_revision)
+    })
+    .await
+}
+
+/// Validates and persists a configuration change.
+///
+/// `confirmed` forwards the user's explicit confirmation to the daemon as the
+/// request's destructive-authorization intent; the daemon independently
+/// verifies the client kind and peer identity, and its policy decision is
+/// final (`tasks/023.md` §30, §46).
+///
+/// # Errors
+///
+/// `CONFIGURATION_INVALID` when the proposal does not validate, `CONFIG_CONFLICT`
+/// for a stale revision, `PermissionDenied` when a removal was not authorized,
+/// otherwise a structured `{ code, message }` error.
+#[tauri::command]
+pub async fn commit_configuration(
+    state: State<'_, AppState>,
+    change: ConfigChange,
+    expected_revision: String,
+    confirmed: bool,
+) -> Result<ConfigurationCommit, CommandError> {
+    query(state.inner(), move |client| {
+        configuration::commit(client.as_ref(), &change, &expected_revision, confirmed)
+    })
+    .await
+}
+
+/// Re-reads and validates the configuration file from disk.
+///
+/// # Errors
+///
+/// `CONFIGURATION_INVALID` when the on-disk file is invalid, otherwise a
+/// structured `{ code, message }` error.
+#[tauri::command]
+pub async fn reload_configuration(
+    state: State<'_, AppState>,
+) -> Result<ConfigurationReload, CommandError> {
+    query(state.inner(), |client| {
+        configuration::reload(client.as_ref())
+    })
+    .await
+}
+
+/// Inspects a local repository directory, read-only, for the service wizard.
+///
+/// The GUI sends a path; the daemon validates it (absolute, no traversal) and
+/// returns structured observations. No build, script, or Git command runs
+/// (`tasks/023.md` §17, §20, §46).
+///
+/// # Errors
+///
+/// `INVALID_PATH` for a rejected path, otherwise a structured `{ code, message }`
+/// error.
+#[tauri::command]
+pub async fn inspect_repository_path(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<RepositoryInspection, CommandError> {
+    query(state.inner(), move |client| {
+        configuration::inspect(client.as_ref(), &path)
+    })
+    .await
+}
+
+/// Detects a suggested service configuration from a repository.
+///
+/// # Errors
+///
+/// Same as [`inspect_repository_path`].
+#[tauri::command]
+pub async fn detect_project_configuration(
+    state: State<'_, AppState>,
+    path: String,
+) -> Result<ProjectConfigurationSuggestion, CommandError> {
+    query(state.inner(), move |client| {
+        configuration::detect(client.as_ref(), &path)
+    })
+    .await
 }

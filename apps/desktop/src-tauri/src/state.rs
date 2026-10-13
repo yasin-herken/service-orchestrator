@@ -22,7 +22,9 @@ use tauri::{AppHandle, Emitter, Manager};
 use crate::connection::{classify_probe, ConnectionSnapshot, ConnectionTracker, ProbeOutcome};
 use crate::daemon_bin::{self, DAEMON_BINARY};
 use crate::error::CommandError;
-use crate::events::{lagged_payload, task_event_payload, CONNECTION_EVENT, TASK_EVENT};
+use crate::events::{
+    lagged_payload, task_event_payload, CONFIGURATION_EVENT, CONNECTION_EVENT, TASK_EVENT,
+};
 
 /// How often the monitor probes a connected daemon, in seconds.
 const PROBE_INTERVAL: Duration = Duration::from_secs(5);
@@ -178,7 +180,9 @@ impl AppState {
             return;
         }
         let mut receiver = client.subscribe_task_events();
+        let mut configuration = client.subscribe_configuration_events();
         let app = self.app.clone();
+        let configuration_app = app.clone();
         tauri::async_runtime::spawn(async move {
             loop {
                 match receiver.recv().await {
@@ -190,6 +194,20 @@ impl AppState {
                     Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
                         let _ = app.emit(TASK_EVENT, lagged_payload(dropped));
                     }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        // Configuration changes are broadcast to every connected client; the
+        // Configuration screen refreshes its snapshot when one arrives
+        // (`tasks/023.md` §39, §40).
+        tauri::async_runtime::spawn(async move {
+            loop {
+                match configuration.recv().await {
+                    Ok(change) => {
+                        let _ = configuration_app.emit(CONFIGURATION_EVENT, change);
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
                     Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                 }
             }

@@ -6,6 +6,13 @@ import type {
   BuildCapabilitiesView,
   BuildTargetSummary,
   BulkSummaryView,
+  ConfigChangeView,
+  ConfigurationChangedEvent,
+  ConfigurationCommitView,
+  ConfigurationPreviewView,
+  ConfigurationReloadView,
+  ConfigurationSnapshotView,
+  ConfigurationValidationView,
   ConnectionSnapshot,
   DaemonStatus,
   EnvironmentPlanView,
@@ -24,7 +31,9 @@ import type {
   OperationOutcome,
   PrepareEnvironmentInput,
   ProfileView,
+  ProjectSuggestionView,
   RepositoryInspectionView,
+  RepositoryProbeView,
   RepositorySummary,
   ServiceDetail,
   ServiceSummary,
@@ -43,10 +52,12 @@ import type { LogsQuery, PrepareOptions, TaskLogsQuery } from '../services/deskt
 type ConnectionHandler = (snapshot: ConnectionSnapshot) => void;
 type TaskHandler = (event: TaskEvent) => void;
 type LogHandler = (event: LogStreamEvent) => void;
+type ConfigurationHandler = (event: ConfigurationChangedEvent) => void;
 
 const connectionHandlers = new Set<ConnectionHandler>();
 const taskHandlers = new Set<TaskHandler>();
 const logHandlers = new Set<LogHandler>();
+const configurationHandlers = new Set<ConfigurationHandler>();
 
 function subscribeConnections(handler: ConnectionHandler): Promise<() => void> {
   connectionHandlers.add(handler);
@@ -61,6 +72,11 @@ function subscribeTasks(handler: TaskHandler): Promise<() => void> {
 function subscribeLogs(handler: LogHandler): Promise<() => void> {
   logHandlers.add(handler);
   return Promise.resolve(() => logHandlers.delete(handler));
+}
+
+function subscribeConfiguration(handler: ConfigurationHandler): Promise<() => void> {
+  configurationHandlers.add(handler);
+  return Promise.resolve(() => configurationHandlers.delete(handler));
 }
 
 /**
@@ -177,12 +193,30 @@ export const mockDesktopApi = {
   getLogs: vi.fn<(query?: LogsQuery) => Promise<LogPageView>>(),
   subscribeServiceLogs: vi.fn<(subscriptionId: string, serviceId: string) => Promise<void>>(),
   unsubscribeServiceLogs: vi.fn<(subscriptionId: string) => Promise<void>>(),
+  getConfiguration: vi.fn<() => Promise<ConfigurationSnapshotView>>(),
+  validateConfiguration: vi.fn<() => Promise<ConfigurationValidationView>>(),
+  previewConfiguration: vi.fn<
+    (change: ConfigChangeView, expectedRevision: string) => Promise<ConfigurationPreviewView>
+  >(),
+  commitConfiguration: vi.fn<
+    (
+      change: ConfigChangeView,
+      expectedRevision: string,
+      confirmed: boolean,
+    ) => Promise<ConfigurationCommitView>
+  >(),
+  reloadConfiguration: vi.fn<() => Promise<ConfigurationReloadView>>(),
+  inspectRepository: vi.fn<(path: string) => Promise<RepositoryProbeView>>(),
+  detectProjectConfiguration: vi.fn<(path: string) => Promise<ProjectSuggestionView>>(),
   getConnectionState: vi.fn<() => Promise<ConnectionSnapshot>>(),
   onConnectionChanged: vi.fn<(handler: ConnectionHandler) => Promise<() => void>>(
     subscribeConnections,
   ),
   onTaskEvent: vi.fn<(handler: TaskHandler) => Promise<() => void>>(subscribeTasks),
   onLogEvent: vi.fn<(handler: LogHandler) => Promise<() => void>>(subscribeLogs),
+  onConfigurationChanged: vi.fn<
+    (handler: ConfigurationHandler) => Promise<() => void>
+  >(subscribeConfiguration),
 };
 
 /** Delivers a connection snapshot to every mounted subscriber. */
@@ -206,15 +240,24 @@ export function emitLogEvent(event: LogStreamEvent): void {
   }
 }
 
+/** Delivers a configuration-change event to every mounted subscriber. */
+export function emitConfigurationChanged(event: ConfigurationChangedEvent): void {
+  for (const handler of [...configurationHandlers]) {
+    handler(event);
+  }
+}
+
 /** Clears subscriptions and mock behaviour between tests. */
 export function resetMockDesktopApi(): void {
   connectionHandlers.clear();
   taskHandlers.clear();
   logHandlers.clear();
+  configurationHandlers.clear();
   vi.resetAllMocks();
   mockDesktopApi.onConnectionChanged.mockImplementation(subscribeConnections);
   mockDesktopApi.onTaskEvent.mockImplementation(subscribeTasks);
   mockDesktopApi.onLogEvent.mockImplementation(subscribeLogs);
+  mockDesktopApi.onConfigurationChanged.mockImplementation(subscribeConfiguration);
   mockDesktopApi.subscribeServiceLogs.mockResolvedValue(undefined);
   mockDesktopApi.unsubscribeServiceLogs.mockResolvedValue(undefined);
 }

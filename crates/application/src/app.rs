@@ -12,7 +12,9 @@
 
 use std::sync::Arc;
 
-use service_orchestrator_config::{Config, ConfiguredWorkspace, LiquibaseConfig};
+use service_orchestrator_config::{
+    Config, ConfigManager, ConfiguredWorkspace, LiquibaseConfig, StaticConfigManager,
+};
 use service_orchestrator_domain::{
     AbsolutePath, GroupId, Library, LibraryId, Permission, Profile, ProfileId, Repository, Service,
     ServiceGroup, ServiceId, WorkspaceId,
@@ -23,14 +25,16 @@ use crate::error::ApplicationError;
 use crate::ports::{
     ArtifactInspector, BuildCapabilityIndex, GitManager, HealthIndex, LogService,
     NullArtifactInspector, NullBuildCapabilityIndex, NullGitManager, NullHealthIndex,
-    NullServiceRuntimeIndex, NullWorkspaceProbe, ResolvedRepository, ResolvedServiceTarget,
-    RuntimeStateStore, ServiceRuntimeIndex, WorkspaceProbe,
+    NullRepositoryInspector, NullServiceRuntimeIndex, NullWorkspaceProbe, RepositoryInspector,
+    ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore, ServiceRuntimeIndex,
+    WorkspaceProbe,
 };
 
 /// The shared application core.
 #[derive(Clone)]
 pub struct Application {
-    config: Config,
+    config: Arc<Config>,
+    configuration: Arc<dyn ConfigManager>,
     tasks: Arc<dyn service_orchestrator_execution::TaskManager>,
     runtime: Arc<dyn RuntimeStateStore>,
     logs: Arc<dyn LogService>,
@@ -40,6 +44,7 @@ pub struct Application {
     health: Arc<dyn HealthIndex>,
     build_capabilities: Arc<dyn BuildCapabilityIndex>,
     probe: Arc<dyn WorkspaceProbe>,
+    repository_inspector: Arc<dyn RepositoryInspector>,
     policy: PolicyEngine,
     authorization: Authorization,
 }
@@ -61,8 +66,11 @@ impl Application {
         runtime: Arc<dyn RuntimeStateStore>,
         logs: Arc<dyn LogService>,
     ) -> Self {
+        let configuration: Arc<dyn ConfigManager> =
+            Arc::new(StaticConfigManager::new(config.clone()));
         Self {
-            config,
+            config: Arc::new(config),
+            configuration,
             tasks,
             runtime,
             logs,
@@ -72,6 +80,7 @@ impl Application {
             health: Arc::new(NullHealthIndex),
             build_capabilities: Arc::new(NullBuildCapabilityIndex),
             probe: Arc::new(NullWorkspaceProbe),
+            repository_inspector: Arc::new(NullRepositoryInspector),
             policy: PolicyEngine::new(),
             authorization: Authorization::standard(),
         }
@@ -149,6 +158,37 @@ impl Application {
         self
     }
 
+    /// Replaces the configuration manager.
+    ///
+    /// The manager owns the validated configuration the application reads and
+    /// the transaction operations behind the configuration-management use
+    /// cases. The daemon wires a [`FileConfigManager`](service_orchestrator_config::FileConfigManager)
+    /// so a committed change is re-loaded and every subsequent read observes it
+    /// (`tasks/023.md` §39, §40). Without it, the application keeps the
+    /// configuration it was constructed with and mutation operations report
+    /// that configuration management is unavailable.
+    #[must_use]
+    pub fn with_configuration(mut self, configuration: Arc<dyn ConfigManager>) -> Self {
+        self.configuration = configuration;
+        self.refresh_configuration();
+        self
+    }
+
+    /// Replaces the repository inspector.
+    ///
+    /// The inspector is provided by the composition root; it performs the
+    /// read-only repository observations behind
+    /// [`inspect_repository`](Self::inspect_repository). Without a real
+    /// inspector, those queries report that inspection is unavailable.
+    #[must_use]
+    pub fn with_repository_inspector(
+        mut self,
+        repository_inspector: Arc<dyn RepositoryInspector>,
+    ) -> Self {
+        self.repository_inspector = repository_inspector;
+        self
+    }
+
     /// Replaces the policy engine.
     #[must_use]
     pub fn with_policy(mut self, policy: PolicyEngine) -> Self {
@@ -167,7 +207,21 @@ impl Application {
     /// Returns the validated configuration backing this application.
     #[must_use]
     pub fn config(&self) -> &Config {
-        &self.config
+        self.config.as_ref()
+    }
+
+    /// Returns the configuration manager behind the management use cases.
+    #[must_use]
+    pub fn configuration(&self) -> &dyn ConfigManager {
+        self.configuration.as_ref()
+    }
+
+    /// Re-reads the configuration manager's current snapshot into this view.
+    ///
+    /// Called by the daemon after it commits or reloads configuration so a
+    /// subsequent request observes the new state (`tasks/023.md` §39, §40).
+    pub fn refresh_configuration(&mut self) {
+        self.config = self.configuration.current();
     }
 
     /// Checks `permission` against the current authorization.
@@ -237,6 +291,11 @@ impl Application {
     /// Returns the workspace probe boundary.
     pub(crate) fn probe(&self) -> &dyn WorkspaceProbe {
         self.probe.as_ref()
+    }
+
+    /// Returns the repository inspector boundary.
+    pub(crate) fn repository_inspector(&self) -> &dyn RepositoryInspector {
+        self.repository_inspector.as_ref()
     }
 
     /// Resolves an entity's workspace-relative directory into an absolute path.

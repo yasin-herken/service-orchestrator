@@ -21,6 +21,7 @@ use crate::error::ApplicationError;
 use crate::models::OperationResult;
 
 mod build;
+mod configuration;
 mod git;
 mod health;
 mod library;

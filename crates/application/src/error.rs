@@ -80,6 +80,37 @@ pub enum ApplicationError {
         message: String,
     },
 
+    /// A configuration transaction failed with a structured error.
+    ///
+    /// Produced by the configuration-management use cases. The `code` is stable
+    /// and machine-readable — for example `CONFIG_CONFLICT` when an edit lost a
+    /// race with another writer, `CONFIG_ENTITY_NOT_FOUND`, or
+    /// `CONFIG_WRITE_FAILED` — so an interface can react without scraping the
+    /// message (`tasks/023.md` §28, §47).
+    #[error("configuration error ({code}): {message}")]
+    Configuration {
+        /// A stable, machine-readable code.
+        code: String,
+        /// A human-readable, actionable summary.
+        message: String,
+    },
+
+    /// A repository inspection failed with a structured error.
+    #[error("repository inspection error ({code}): {message}")]
+    RepositoryInspection {
+        /// A stable, machine-readable code such as `INSPECTION_UNAVAILABLE`.
+        code: String,
+        /// A human-readable summary.
+        message: String,
+    },
+
+    /// A caller-supplied path was rejected as unsafe or invalid.
+    #[error("invalid path: {message}")]
+    InvalidPath {
+        /// A human-readable explanation.
+        message: String,
+    },
+
     /// A constructed workflow is not well formed.
     #[error("workflow is invalid: {message}")]
     WorkflowInvalid {
@@ -272,6 +303,57 @@ impl ApplicationError {
     #[must_use]
     pub(crate) fn invalid_operation(message: impl Into<String>) -> Self {
         Self::InvalidOperation {
+            message: message.into(),
+        }
+    }
+
+    /// Maps a configuration error into a structured application error.
+    ///
+    /// The stable `code` lets an interface distinguish, for example, a stale
+    /// revision (`CONFIG_CONFLICT`) from a write failure without parsing the
+    /// message (`tasks/023.md` §28, §47).
+    #[must_use]
+    pub(crate) fn config(error: service_orchestrator_config::ConfigError) -> Self {
+        use service_orchestrator_config::ConfigError;
+        // A validation failure keeps its dedicated variant so the UI can render
+        // it as a configuration problem rather than a generic transaction error.
+        if let ConfigError::Validation(errors) = &error {
+            return Self::ConfigurationInvalid {
+                message: errors.to_string(),
+            };
+        }
+        let code = match &error {
+            ConfigError::Read { .. } => "CONFIG_READ_FAILED",
+            ConfigError::Parse { .. } => "CONFIG_PARSE_FAILED",
+            ConfigError::UnsupportedVersion { .. } => "CONFIG_VERSION_UNSUPPORTED",
+            ConfigError::Conflict { .. } => "CONFIG_CONFLICT",
+            ConfigError::EntityNotFound { .. } => "CONFIG_ENTITY_NOT_FOUND",
+            ConfigError::EntityExists { .. } => "CONFIG_ENTITY_EXISTS",
+            ConfigError::InvalidChange { .. } => "CONFIG_INVALID_CHANGE",
+            ConfigError::Document { .. } => "CONFIG_DOCUMENT_INVALID",
+            ConfigError::Write { .. } => "CONFIG_WRITE_FAILED",
+            // `Validation` was handled above.
+            ConfigError::Validation(_) => "CONFIG_INVALID",
+        };
+        Self::Configuration {
+            code: code.to_owned(),
+            message: error.to_string(),
+        }
+    }
+
+    /// Builds an [`ApplicationError::RepositoryInspection`].
+    #[must_use]
+    pub(crate) fn inspection(error: crate::ports::RepositoryInspectionError) -> Self {
+        Self::RepositoryInspection {
+            code: error.code,
+            message: error.message,
+        }
+    }
+
+    /// Builds an [`ApplicationError::InvalidPath`].
+    #[must_use]
+    pub(crate) fn invalid_path(message: impl Into<String>) -> Self {
+        Self::InvalidPath {
             message: message.into(),
         }
     }

@@ -61,10 +61,17 @@ impl std::error::Error for CommandError {}
 
 impl From<ApplicationError> for CommandError {
     fn from(error: ApplicationError) -> Self {
-        // Runtime errors already carry the stable wire code the frontend
-        // branches on (DAEMON_UNAVAILABLE, PROTOCOL_INCOMPATIBLE, …).
-        if let ApplicationError::RuntimeUnavailable { code, message } = &error {
-            return Self::new(code.clone(), message.clone());
+        // Errors that already carry a stable wire code promote it so the
+        // frontend branches on the specific condition (DAEMON_UNAVAILABLE,
+        // CONFIG_CONFLICT, CONFIG_ENTITY_NOT_FOUND, INSPECTION_FAILED, …)
+        // rather than an outer variant name.
+        match &error {
+            ApplicationError::RuntimeUnavailable { code, message }
+            | ApplicationError::Configuration { code, message }
+            | ApplicationError::RepositoryInspection { code, message } => {
+                return Self::new(code.clone(), message.clone());
+            }
+            _ => {}
         }
         // Everything else maps to its externally tagged variant name, which is
         // stable, specific, and requires no hand-maintained match arms.
@@ -121,6 +128,22 @@ mod tests {
         assert_eq!(command.code, "ServiceNotFound");
         assert!(!command.message.is_empty());
         assert!(!command.message.contains("stack"), "no internals leak");
+    }
+
+    #[test]
+    fn configuration_codes_promote_their_specific_code() {
+        let error = ApplicationError::Configuration {
+            code: "CONFIG_CONFLICT".to_owned(),
+            message: "the file changed".to_owned(),
+        };
+        let command: CommandError = error.into();
+        assert_eq!(command.code, "CONFIG_CONFLICT");
+
+        let inspection = ApplicationError::RepositoryInspection {
+            code: "INSPECTION_FAILED".to_owned(),
+            message: "unreadable".to_owned(),
+        };
+        assert_eq!(CommandError::from(inspection).code, "INSPECTION_FAILED");
     }
 
     #[test]

@@ -6,10 +6,12 @@
 //! repository or start a process.
 
 mod build;
+mod configuration;
 mod git;
 mod health;
 mod library;
 mod migration;
+mod repository;
 mod runtime;
 mod service;
 mod task;

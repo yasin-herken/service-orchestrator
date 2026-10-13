@@ -33,6 +33,7 @@ pub(crate) mod health;
 pub(crate) mod logs;
 pub(crate) mod migration;
 pub(crate) mod probe;
+pub(crate) mod repository;
 pub(crate) mod runtime_state;
 pub(crate) mod service_runtime;
 
@@ -58,6 +59,11 @@ pub use logs::{
 pub use migration::{parameter as migration_parameter, MigrationError, ResolvedMigrationTarget};
 pub(crate) use probe::NullWorkspaceProbe;
 pub use probe::WorkspaceProbe;
+pub use repository::{
+    DetectedBuildSystem, DetectedIntegration, DetectedRuntime, MavenMetadata, NodeMetadata,
+    NullRepositoryInspector, ProjectConfigurationSuggestion, ProviderAvailability,
+    RepositoryInspection, RepositoryInspectionError, RepositoryInspector, SuggestedCommand,
+};
 pub use runtime_state::{
     HealthState, InMemoryRuntimeStateStore, RuntimeStateStore, ServiceRuntimeState,
 };

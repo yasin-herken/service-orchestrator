@@ -58,13 +58,14 @@ mod validation;
 pub use app::Application;
 pub use error::ApplicationError;
 pub use models::{
-    AlignmentStatus, BuildCapabilities, BulkOperationSummary, ConsumerAlignment, DiagnosticFailure,
-    EnvironmentPhaseKind, EnvironmentPlan, EnvironmentPlanPhase, EnvironmentPlanStep,
-    HealthCheckScope, LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions,
-    LibraryStatus, MigrationStatus, OperationResult, PrepareEnvironmentRequest,
-    PrepareSelectedLibrariesRequest, ServiceDiagnostics, ServiceRuntimeStatus, ServiceStatus,
-    VersionAlignmentPlan, WorkflowCancellation, WorkflowPhaseProgress, WorkflowStatus,
-    WorkflowTaskFailure, WorkspaceStatus,
+    AlignmentStatus, BuildCapabilities, BulkOperationSummary, ConfigurationCommit,
+    ConfigurationCounts, ConfigurationReload, ConfigurationValidation, ConsumerAlignment,
+    DiagnosticFailure, EnvironmentPhaseKind, EnvironmentPlan, EnvironmentPlanPhase,
+    EnvironmentPlanStep, HealthCheckScope, LibraryArtifactVerification, LibraryDependent,
+    LibraryPrepareOptions, LibraryStatus, MigrationStatus, OperationResult,
+    PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest, ServiceDiagnostics,
+    ServiceRuntimeStatus, ServiceStatus, VersionAlignmentPlan, WorkflowCancellation,
+    WorkflowPhaseProgress, WorkflowStatus, WorkflowTaskFailure, WorkspaceStatus,
 };
 pub use validation::{
     ConfiguredPortConflict, OccupiedPort, RepositoryCheckStatus, RepositoryOwner,
@@ -77,14 +78,17 @@ pub use validation::{
 pub use ports::{
     artifact_parameter, build_parameter, migration_parameter, parameter, service_runtime_parameter,
     ArtifactInspectionError, ArtifactInspector, ArtifactPresence, BuildCapabilityIndex, BuildError,
-    DependencyVersionInspection, DiffOptions, GitError, GitManager, GitOptions, HealthCheckOutcome,
-    HealthIndex, HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogPage, LogRequest,
-    LogService, LogServiceError, LogSource, LogStream, LogStreamError, LogSubscription,
-    MigrationError, NullArtifactInspector, NullBuildCapabilityIndex, NullGitManager,
-    NullHealthIndex, NullLogService, NullServiceRuntimeIndex, ResolvedArtifact,
-    ResolvedBuildCommand, ResolvedBuildTarget, ResolvedDependency, ResolvedMigrationTarget,
-    ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore, ServiceHealth,
-    ServiceProcessInfo, ServiceRuntimeError, ServiceRuntimeIndex, ServiceRuntimeState,
+    DependencyVersionInspection, DetectedBuildSystem, DetectedIntegration, DetectedRuntime,
+    DiffOptions, GitError, GitManager, GitOptions, HealthCheckOutcome, HealthIndex, HealthState,
+    InMemoryRuntimeStateStore, LogEntry, LogLevel, LogPage, LogRequest, LogService,
+    LogServiceError, LogSource, LogStream, LogStreamError, LogSubscription, MavenMetadata,
+    MigrationError, NodeMetadata, NullArtifactInspector, NullBuildCapabilityIndex, NullGitManager,
+    NullHealthIndex, NullLogService, NullRepositoryInspector, NullServiceRuntimeIndex,
+    ProjectConfigurationSuggestion, ProviderAvailability, RepositoryInspection,
+    RepositoryInspectionError, RepositoryInspector, ResolvedArtifact, ResolvedBuildCommand,
+    ResolvedBuildTarget, ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository,
+    ResolvedServiceTarget, RuntimeStateStore, ServiceHealth, ServiceProcessInfo,
+    ServiceRuntimeError, ServiceRuntimeIndex, ServiceRuntimeState, SuggestedCommand,
     WorkspaceProbe, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
 };
 pub use service_orchestrator_policy::{Authorization, PolicyDecision, PolicyEngine};

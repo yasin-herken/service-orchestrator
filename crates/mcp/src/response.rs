@@ -104,6 +104,13 @@ pub(crate) fn error_body(error: &ApplicationError) -> ErrorBody {
         ApplicationError::ConfigurationInvalid { message } => {
             ErrorBody::new("CONFIGURATION_INVALID", message.clone())
         }
+        ApplicationError::Configuration { code, message }
+        | ApplicationError::RepositoryInspection { code, message } => {
+            ErrorBody::new(code.clone(), message.clone())
+        }
+        ApplicationError::InvalidPath { message } => {
+            ErrorBody::new("INVALID_PATH", message.clone())
+        }
         ApplicationError::WorkflowInvalid { message } => {
             ErrorBody::new("WORKFLOW_INVALID", message.clone())
         }

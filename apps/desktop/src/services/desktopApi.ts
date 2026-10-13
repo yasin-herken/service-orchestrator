@@ -7,6 +7,13 @@ import type {
   BuildCapabilitiesView,
   BuildTargetSummary,
   BulkSummaryView,
+  ConfigChangeView,
+  ConfigurationChangedEvent,
+  ConfigurationCommitView,
+  ConfigurationPreviewView,
+  ConfigurationReloadView,
+  ConfigurationSnapshotView,
+  ConfigurationValidationView,
   ConnectionSnapshot,
   DaemonStatus,
   EnvironmentPlanView,
@@ -25,7 +32,9 @@ import type {
   OperationOutcome,
   PrepareEnvironmentInput,
   ProfileView,
+  ProjectSuggestionView,
   RepositoryInspectionView,
+  RepositoryProbeView,
   RepositorySummary,
   ServiceDetail,
   ServiceSummary,
@@ -39,6 +48,7 @@ import type {
   WorkflowView,
 } from '../types/models';
 import {
+  CONFIGURATION_EVENT,
   DAEMON_CONNECTION_EVENT,
   LOG_EVENT,
   TASK_EVENT,
@@ -276,6 +286,51 @@ export interface OrchestratorDesktopApi {
   subscribeServiceLogs(subscriptionId: string, serviceId: string): Promise<void>;
   /** Detaches a realtime subscription; unknown ids are ignored. */
   unsubscribeServiceLogs(subscriptionId: string): Promise<void>;
+  /**
+   * Reads the active configuration as a raw, editable snapshot.
+   *
+   * The daemon is the only configuration reader-writer; the GUI parses no TOML
+   * and never writes a file (`tasks/023.md` §38, §41).
+   */
+  getConfiguration(): Promise<ConfigurationSnapshotView>;
+  /** Validates the active configuration file without changing it. */
+  validateConfiguration(): Promise<ConfigurationValidationView>;
+  /**
+   * Previews a proposed change without committing it.
+   *
+   * The daemon computes the diff, validation, affected references, and
+   * running-service impact; `expectedRevision` is the snapshot revision the
+   * editor was based on, and a stale value is reported as `CONFIG_CONFLICT`.
+   */
+  previewConfiguration(
+    change: ConfigChangeView,
+    expectedRevision: string,
+  ): Promise<ConfigurationPreviewView>;
+  /**
+   * Validates and persists a configuration change.
+   *
+   * `confirmed` expresses the user's intent for a removal; the daemon
+   * independently verifies the client kind and peer identity and its policy
+   * decision is final — a confirmation boolean is never trusted authorization
+   * (`tasks/023.md` §30, §46).
+   */
+  commitConfiguration(
+    change: ConfigChangeView,
+    expectedRevision: string,
+    confirmed: boolean,
+  ): Promise<ConfigurationCommitView>;
+  /** Re-reads and validates the configuration file from disk. */
+  reloadConfiguration(): Promise<ConfigurationReloadView>;
+  /**
+   * Inspects a local repository directory, read-only.
+   *
+   * The daemon validates the path (absolute, no traversal) and returns
+   * structured observations; no build, script, or Git command runs
+   * (`tasks/023.md` §17, §20).
+   */
+  inspectRepository(path: string): Promise<RepositoryProbeView>;
+  /** Detects a suggested service configuration from a repository. */
+  detectProjectConfiguration(path: string): Promise<ProjectSuggestionView>;
   /** The adapter's current daemon connection state. */
   getConnectionState(): Promise<ConnectionSnapshot>;
   /** Subscribes to daemon connection changes; resolves to an unsubscriber. */
@@ -284,6 +339,10 @@ export interface OrchestratorDesktopApi {
   onTaskEvent(handler: (event: TaskEvent) => void): Promise<UnlistenFn>;
   /** Subscribes to realtime log-stream events; resolves to an unsubscriber. */
   onLogEvent(handler: (event: LogStreamEvent) => void): Promise<UnlistenFn>;
+  /** Subscribes to active-configuration changes; resolves to an unsubscriber. */
+  onConfigurationChanged(
+    handler: (event: ConfigurationChangedEvent) => void,
+  ): Promise<UnlistenFn>;
 }
 
 /** Invokes a Tauri command, normalizing rejections into `DesktopError`. */
@@ -448,9 +507,31 @@ export const desktopApi: OrchestratorDesktopApi = {
     call<void>('subscribe_service_logs', { subscriptionId, serviceId }),
   unsubscribeServiceLogs: (subscriptionId) =>
     call<void>('unsubscribe_service_logs', { subscriptionId }),
+  getConfiguration: () => call<ConfigurationSnapshotView>('get_configuration'),
+  validateConfiguration: () =>
+    call<ConfigurationValidationView>('validate_configuration'),
+  previewConfiguration: (change, expectedRevision) =>
+    call<ConfigurationPreviewView>('preview_configuration', {
+      change,
+      expectedRevision,
+    }),
+  commitConfiguration: (change, expectedRevision, confirmed) =>
+    call<ConfigurationCommitView>('commit_configuration', {
+      change,
+      expectedRevision,
+      confirmed,
+    }),
+  reloadConfiguration: () =>
+    call<ConfigurationReloadView>('reload_configuration'),
+  inspectRepository: (path) =>
+    call<RepositoryProbeView>('inspect_repository_path', { path }),
+  detectProjectConfiguration: (path) =>
+    call<ProjectSuggestionView>('detect_project_configuration', { path }),
   getConnectionState: () => call<ConnectionSnapshot>('get_connection_state'),
   onConnectionChanged: (handler) =>
     subscribe<ConnectionSnapshot>(DAEMON_CONNECTION_EVENT, handler),
   onTaskEvent: (handler) => subscribe<TaskEvent>(TASK_EVENT, handler),
   onLogEvent: (handler) => subscribe<LogStreamEvent>(LOG_EVENT, handler),
+  onConfigurationChanged: (handler) =>
+    subscribe<ConfigurationChangedEvent>(CONFIGURATION_EVENT, handler),
 };
