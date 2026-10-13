@@ -49,8 +49,8 @@ use service_orchestrator_config::{load_from_str, Config};
 use service_orchestrator_daemon::{Daemon, DaemonError, DaemonOptions};
 use service_orchestrator_desktop_lib::{
     build,
-    dto::{LogEntryView, OperationOutcome, OperationStatus},
-    git, health, library, logs, migration, mutations, queries, tasks,
+    dto::{LogEntryView, OperationOutcome, OperationStatus, WorkflowStatusView},
+    git, health, library, logs, migration, mutations, queries, tasks, workflow,
 };
 use service_orchestrator_domain::{
     AbsolutePath, Branch, BranchInfo, BranchKind, BuildOperation, BuildSystem, GitOperation,
@@ -137,6 +137,41 @@ impl CoreSpec {
     fn blocking(mut self, ids: &[&str]) -> Self {
         self.blocking = ids.iter().map(|id| (*id).to_owned()).collect();
         self
+    }
+
+    /// The fixture with a second, independent workspace.
+    ///
+    /// The added workspace declares one service but neither the fixture profile
+    /// nor the fixture group, so a workspace-scoped lookup under it must not
+    /// resolve them (`tasks/022.md` §42 items 2, 34).
+    fn with_second_workspace() -> Self {
+        let config = format!(
+            "{FIXTURE}\n\
+             [[workspaces]]\n\
+             id = \"other\"\n\
+             name = \"Other Platform\"\n\
+             root = \"~/Projects/other\"\n\
+             \n\
+             [[services]]\n\
+             id = \"ledger-api\"\n\
+             name = \"ledger-api\"\n\
+             type = \"backend\"\n\
+             workspace = \"other\"\n\
+             path = \"backend/ledger-api\"\n\
+             default_branch = \"main\"\n\
+             build_system = \"maven\"\n\
+             \n\
+             [services.repository]\n\
+             url = \"git@github.com:other/ledger-api.git\"\n\
+             \n\
+             [services.commands]\n\
+             build = \"./mvnw clean install\"\n\
+             start = \"./mvnw spring-boot:run\"\n"
+        );
+        Self {
+            config,
+            ..Self::default()
+        }
     }
 }
 
@@ -2804,4 +2839,395 @@ fn unique_root() -> PathBuf {
         .expect("the clock is after the epoch")
         .as_nanos();
     std::env::temp_dir().join(format!("so-desktop-{}-{nanos}", std::process::id()))
+}
+
+// -- desktop workflow management (`tasks/022.md` §42) ------------------------
+
+/// A prepare-environment input scoped to the fixture's `demo` workspace.
+fn prepare_input() -> workflow::PrepareEnvironmentInput {
+    workflow::PrepareEnvironmentInput {
+        workspace_id: "demo".to_owned(),
+        ..workflow::PrepareEnvironmentInput::default()
+    }
+}
+
+/// Polls a workflow's aggregated status until `expect` holds.
+fn wait_for_status(
+    client: &RemoteClient,
+    workflow_id: &str,
+    expect: impl Fn(&WorkflowStatusView) -> bool,
+) -> WorkflowStatusView {
+    let deadline = Instant::now() + DEADLINE;
+    loop {
+        let status = workflow::workflow_status(client, workflow_id).expect("status loads");
+        if expect(&status) {
+            return status;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "workflow '{workflow_id}' never reached the expected state (state: {})",
+            status.state
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The GUI reconnects to a running daemon and loads the configured profiles and
+/// groups, with membership scoped to its owning workspace (`tasks/022.md` §42
+/// items 1, 2, 3).
+#[test]
+fn profiles_and_groups_load_and_are_workspace_scoped() {
+    let harness = Harness::start_with_spec(CoreSpec::with_second_workspace());
+    let client = harness.client();
+
+    let profiles = workflow::list_profiles(&client, "demo").expect("profiles load");
+    assert_eq!(profiles.len(), 1);
+    let full_stack = &profiles[0];
+    assert_eq!(full_stack.id, "full-stack");
+    assert_eq!(full_stack.display_name, "Full Stack");
+    assert_eq!(full_stack.workspace_id, "demo");
+    assert_eq!(full_stack.services, vec!["orders-api", "admin-ui"]);
+    assert_eq!(full_stack.resolved_services, vec!["orders-api", "admin-ui"]);
+    assert_eq!(
+        workflow::get_profile(&client, "demo", "full-stack").expect("profile loads"),
+        *full_stack
+    );
+
+    let groups = workflow::list_groups(&client, "demo").expect("groups load");
+    assert_eq!(groups.len(), 1);
+    let core = &groups[0];
+    assert_eq!(core.id, "core");
+    assert_eq!(core.display_name, "Core");
+    assert_eq!(core.workspace_id, "demo");
+    assert_eq!(core.services, vec!["orders-api", "admin-ui"]);
+    assert_eq!(
+        workflow::get_group(&client, "demo", "core").expect("group loads"),
+        *core
+    );
+
+    // The second workspace owns neither the fixture profile nor the fixture
+    // group: scoping comes from configuration, never from the GUI.
+    assert!(workflow::list_profiles(&client, "other")
+        .expect("profiles load")
+        .is_empty());
+    assert!(workflow::list_groups(&client, "other")
+        .expect("groups load")
+        .is_empty());
+    assert_eq!(
+        workflow::get_profile(&client, "other", "full-stack")
+            .expect_err("the profile belongs to demo")
+            .code,
+        "NOT_FOUND"
+    );
+    assert_eq!(
+        workflow::get_group(&client, "other", "core")
+            .expect_err("the group belongs to demo")
+            .code,
+        "NOT_FOUND"
+    );
+
+    // Identifiers are validated before any lookup happens.
+    assert_eq!(
+        workflow::list_profiles(&client, "")
+            .expect_err("an empty workspace is invalid")
+            .code,
+        "INVALID_INPUT"
+    );
+    assert_eq!(
+        workflow::get_profile(&client, "demo", "bad id")
+            .expect_err("spaces are invalid")
+            .code,
+        "INVALID_INPUT"
+    );
+    assert_eq!(
+        workflow::get_group(&client, "demo", "bad id")
+            .expect_err("spaces are invalid")
+            .code,
+        "INVALID_INPUT"
+    );
+    assert_eq!(
+        workflow::get_profile(&client, "demo", "missing")
+            .expect_err("an unknown profile is a structured error")
+            .code,
+        "ProfileNotFound"
+    );
+    assert_eq!(
+        workflow::get_group(&client, "demo", "missing")
+            .expect_err("an unknown group is a structured error")
+            .code,
+        "GroupNotFound"
+    );
+}
+
+/// The read-only plan resolves dependencies through the core's planner and
+/// schedules nothing (`tasks/022.md` §42 items 4, 5, 6).
+#[test]
+fn a_plan_resolves_dependencies_without_scheduling_anything() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    // Selecting the dependent pulls in the required dependency and its library.
+    let mut input = prepare_input();
+    input.services = vec!["admin-ui".to_owned()];
+    let plan = workflow::plan(&client, &input).expect("a plan is generated");
+    assert_eq!(plan.workspace_id, "demo");
+    assert_eq!(plan.selected_services, vec!["admin-ui"]);
+    assert_eq!(plan.resolved_services, vec!["orders-api", "admin-ui"]);
+    assert_eq!(plan.included_dependencies, vec!["orders-api"]);
+    assert_eq!(plan.required_libraries, vec!["shared-kit"]);
+    assert!(plan.step_count > 0);
+    assert!(plan.phases.iter().any(|phase| phase.kind == "git-sync"));
+    assert_eq!(plan.target_branch, None, "no branch is forced");
+    assert!(!plan.requires_destructive_authorization);
+
+    // Planning is read-only: no task runs, and no workflow enters history.
+    assert!(client.list_running_tasks().is_empty());
+    assert!(workflow::list_workflows(&client, "demo", None)
+        .expect("history loads")
+        .is_empty());
+
+    // A group selects its members through the same planner.
+    let mut grouped = prepare_input();
+    grouped.group = Some("core".to_owned());
+    let group_plan = workflow::plan(&client, &grouped).expect("a plan is generated");
+    assert_eq!(group_plan.resolved_services, vec!["orders-api", "admin-ui"]);
+    assert_eq!(group_plan.target_branch, None);
+
+    // A profile plus an explicit branch is previewed without any checkout.
+    let mut branched = prepare_input();
+    branched.profile = Some("full-stack".to_owned());
+    branched.branch = Some("main".to_owned());
+    let branch_plan = workflow::plan(&client, &branched).expect("a plan is generated");
+    assert_eq!(branch_plan.target_branch.as_deref(), Some("main"));
+    assert!(client.list_running_tasks().is_empty());
+
+    // A plan is never authorization: invalid input is still rejected, and more
+    // than one selection source is refused rather than guessed.
+    let mut invalid = prepare_input();
+    invalid.services = vec!["orders-api".to_owned()];
+    invalid.profile = Some("full-stack".to_owned());
+    assert_eq!(
+        workflow::plan(&client, &invalid)
+            .expect_err("two selection sources are rejected")
+            .code,
+        "INVALID_INPUT"
+    );
+}
+
+/// A workflow executes through the shared core, its aggregated results are
+/// inspectable, and it lands in bounded, workspace-scoped history
+/// (`tasks/022.md` §42 items 7, 11).
+#[test]
+fn a_workflow_executes_and_reports_its_results() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    let mut input = prepare_input();
+    input.services = vec!["orders-api".to_owned()];
+    input.build = true;
+    input.start = true;
+
+    let outcome = workflow::execute(&client, &input).expect("the workflow is scheduled");
+    assert_eq!(outcome.status, OperationStatus::Workflow);
+    assert_eq!(outcome.kind, "prepare_environment");
+    let workflow_id = workflow_of(&outcome);
+
+    let summary = wait_for_workflow(&client, &workflow_id);
+    assert_eq!(summary.failed, 0);
+    assert_eq!(summary.pending, 0);
+    assert!(summary.succeeded > 0);
+
+    let status = workflow::workflow_status(&client, workflow_id.as_str()).expect("status loads");
+    assert_eq!(status.workflow_id, workflow_id.as_str());
+    assert_eq!(status.kind, "prepare_environment");
+    assert_eq!(status.state, "succeeded");
+    assert_eq!(status.total, summary.total);
+    assert_eq!(status.failed, 0);
+    assert_eq!(status.cancelled, 0);
+    assert_eq!(status.pending, 0);
+    assert!(status.started_at.is_some());
+    assert!(status.finished_at.is_some());
+    assert!(status.failures.is_empty());
+
+    // Progress is reported per phase, in the core's canonical order, and every
+    // step of a settled workflow has left the pending count.
+    let phases: Vec<&str> = status
+        .phases
+        .iter()
+        .map(|phase| phase.phase.as_str())
+        .collect();
+    assert!(phases.contains(&"git-sync"));
+    assert!(phases.contains(&"service-build"));
+    assert!(phases.contains(&"service-start"));
+    assert!(phases.contains(&"health-check"));
+    assert!(status.phases.iter().all(|phase| phase.pending == 0));
+
+    // The workflow is on the workspace-scoped history list.
+    let history = workflow::list_workflows(&client, "demo", None).expect("history loads");
+    assert_eq!(history.len(), 1);
+    let row = &history[0];
+    assert_eq!(row.workflow_id, workflow_id.as_str());
+    assert_eq!(row.workspace_id, "demo");
+    assert_eq!(row.state, "succeeded");
+    assert_eq!(row.total, status.total);
+    assert_eq!(row.finished_at, status.finished_at);
+
+    // Another workspace has no rows of its own: history is workspace-scoped.
+    assert!(workflow::list_workflows(&client, "other", None)
+        .expect("history loads")
+        .is_empty());
+}
+
+/// A workflow where one step fails reports partial success with the structured
+/// failure, never a false "succeeded" (`tasks/022.md` §42 item 9).
+#[test]
+fn a_workflow_reports_partial_failure_per_step() {
+    let harness = Harness::start_with(&[], &["admin-ui"], &[]);
+    let client = harness.client();
+
+    let mut input = prepare_input();
+    input.services = vec!["admin-ui".to_owned()];
+    input.build = true;
+
+    let outcome = workflow::execute(&client, &input).expect("the workflow is scheduled");
+    let workflow_id = workflow_of(&outcome);
+    let summary = wait_for_workflow(&client, &workflow_id);
+    assert_eq!(summary.failed, 1);
+    assert!(summary.succeeded > 0, "the dependency build still succeeds");
+
+    let status = workflow::workflow_status(&client, workflow_id.as_str()).expect("status loads");
+    assert_eq!(status.state, "partially_succeeded");
+    assert_eq!(status.failed, 1);
+    assert_eq!(status.failures.len(), 1);
+    let failure = &status.failures[0];
+    assert_eq!(failure.kind, "build_service");
+    assert_eq!(failure.code, "BUILD_COMMAND_FAILED");
+    // A workflow step is scheduled with a workflow target, so the failed task
+    // carries no service binding of its own; the executor's message names it.
+    assert!(
+        failure.message.contains("admin-ui"),
+        "got: {}",
+        failure.message
+    );
+}
+
+/// A workflow in flight is observable while it runs and can be cancelled, with
+/// completed work preserved and active work stopped (`tasks/022.md` §42 items 8,
+/// 10).
+#[test]
+fn a_running_workflow_is_observable_and_cancellable() {
+    let harness = Harness::start_with(&[], &[], &["orders-api"]);
+    let client = harness.client();
+
+    let mut input = prepare_input();
+    input.services = vec!["orders-api".to_owned(), "admin-ui".to_owned()];
+    input.build = true;
+    let outcome = workflow::execute(&client, &input).expect("the workflow is scheduled");
+    let workflow_id = workflow_of(&outcome);
+
+    // While the blocked step waits, the workflow is running and the steps that
+    // already finished are reflected in the aggregate.
+    let running = wait_for_status(&client, workflow_id.as_str(), |status| {
+        status.pending > 0 && status.succeeded > 0
+    });
+    assert_eq!(running.state, "running");
+
+    // The GUI's cancellation goes through the same engine operation the TUI
+    // uses; it is not a frontend-only stop.
+    tasks::cancel_workflow(&client, workflow_id.as_str()).expect("cancel is accepted");
+    let summary = wait_for_workflow(&client, &workflow_id);
+    assert_eq!(summary.pending, 0);
+    assert!(summary.cancelled > 0, "the blocked step is cancelled");
+
+    let status = workflow::workflow_status(&client, workflow_id.as_str()).expect("status loads");
+    assert_eq!(status.pending, 0);
+    // Completed work is kept, so a partly-cancelled workflow is reported as
+    // partially succeeded rather than as a total cancellation.
+    assert_eq!(status.state, "partially_succeeded");
+    assert!(status.failures.is_empty(), "cancellation is not a failure");
+}
+
+/// The same workflow is observed identically through the GUI, the TUI, and MCP:
+/// one daemon, one task engine, one set of aggregates (`tasks/022.md` §42 items
+/// 12, 13).
+#[test]
+fn the_tui_and_mcp_observe_the_same_workflow() {
+    let harness = Harness::start();
+    let gui = harness.client();
+    let tui = harness.tui_client();
+    let mcp = harness.mcp_client();
+
+    let mut input = prepare_input();
+    input.services = vec!["orders-api".to_owned()];
+    input.build = true;
+    let outcome = workflow::execute(&gui, &input).expect("the workflow is scheduled");
+    let workflow_id = workflow_of(&outcome);
+    let _ = wait_for_workflow(&gui, &workflow_id);
+
+    let from_gui = workflow::workflow_status(&gui, workflow_id.as_str()).expect("gui status");
+    let from_tui = workflow::workflow_status(&tui, workflow_id.as_str()).expect("tui status");
+    let from_mcp = workflow::workflow_status(&mcp, workflow_id.as_str()).expect("mcp status");
+    assert_eq!(from_tui, from_gui);
+    assert_eq!(from_mcp, from_gui);
+    assert_eq!(from_gui.state, "succeeded");
+
+    // Every interface sees the same bounded history window too.
+    let history = workflow::list_workflows(&mcp, "demo", None).expect("history loads");
+    assert_eq!(history.len(), 1);
+    assert_eq!(history[0].workflow_id, workflow_id.as_str());
+}
+
+/// A reconnecting GUI reloads configuration-backed state and reports workflow
+/// state honestly: the engine's in-memory history is not fabricated after a
+/// restart, and planning still works (`tasks/022.md` §42 item 14).
+#[test]
+fn a_reconnecting_gui_reloads_state_after_a_daemon_restart() {
+    let mut harness = Harness::start();
+    let client = harness.client();
+
+    let mut input = prepare_input();
+    input.services = vec!["orders-api".to_owned()];
+    let outcome = workflow::execute(&client, &input).expect("the workflow is scheduled");
+    let workflow_id = workflow_of(&outcome);
+    let _ = wait_for_workflow(&client, &workflow_id);
+    assert_eq!(
+        workflow::list_workflows(&client, "demo", None)
+            .expect("history loads")
+            .len(),
+        1
+    );
+
+    harness.restart();
+    let reconnected = harness.client();
+
+    // Configuration-backed state returns with the new daemon.
+    assert_eq!(
+        workflow::list_profiles(&reconnected, "demo")
+            .expect("profiles load")
+            .len(),
+        1
+    );
+    assert_eq!(
+        workflow::list_groups(&reconnected, "demo")
+            .expect("groups load")
+            .len(),
+        1
+    );
+
+    // The task engine's in-memory history does not survive, and the adapter
+    // fabricates nothing to hide that: the list is empty and the old workflow
+    // is a structured not-found rather than a phantom success.
+    assert!(workflow::list_workflows(&reconnected, "demo", None)
+        .expect("history loads")
+        .is_empty());
+    assert_eq!(
+        workflow::workflow_status(&reconnected, workflow_id.as_str())
+            .expect_err("the workflow is no longer observable")
+            .code,
+        "WorkflowNotFound"
+    );
+
+    // The reconnected GUI can plan again through the same daemon.
+    let plan = workflow::plan(&reconnected, &input).expect("a plan is generated");
+    assert!(plan.step_count > 0);
 }

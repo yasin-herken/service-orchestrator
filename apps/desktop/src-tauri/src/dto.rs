@@ -7,15 +7,16 @@
 
 use serde::Serialize;
 use service_orchestrator_application::{
-    BuildCapabilities, BulkOperationSummary, HealthCheckOutcome, LibraryArtifactVerification,
-    LibraryDependent, LibraryStatus, LogEntry, LogPage, MigrationStatus, OperationResult,
-    ServiceDiagnostics, ServiceHealth, ServiceStatus, VersionAlignmentPlan, WorkflowCancellation,
+    BuildCapabilities, BulkOperationSummary, EnvironmentPlan, HealthCheckOutcome,
+    LibraryArtifactVerification, LibraryDependent, LibraryStatus, LogEntry, LogPage,
+    MigrationStatus, OperationResult, ServiceDiagnostics, ServiceHealth, ServiceStatus,
+    VersionAlignmentPlan, WorkflowCancellation, WorkflowStatus,
     WorkspaceStatus as CoreWorkspaceStatus,
 };
 use service_orchestrator_domain::{
     ArtifactCoordinate, BranchInfo, BuildOperation, Dependency, DependencyTarget, HealthCheck,
-    Library, Repository, RepositoryStatus, Runtime, Service, Task, TaskProgress, Timestamp,
-    Workflow, Workspace,
+    Library, Profile, Repository, RepositoryStatus, Runtime, Service, ServiceGroup, Task,
+    TaskProgress, Timestamp, Workflow, Workspace,
 };
 
 /// A workspace as shown in the selector and the dashboard.
@@ -1495,6 +1496,363 @@ fn task_duration_millis(task: &Task) -> Option<u64> {
             .saturating_sub(started.epoch_millis()),
     )
     .ok()
+}
+
+// -- environment workflows ----------------------------------------------------
+
+/// A configured developer profile in display form.
+///
+/// `resolved_services` is configuration-derived: the profile's explicit
+/// services plus the members of the groups it references, deduplicated. The
+/// full dependency closure is *not* computed here — the read-only plan
+/// (`EnvironmentPlanView`) is the single source of truth for that
+/// (`tasks/022.md` §8, §12).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct ProfileView {
+    /// The profile identifier.
+    pub id: String,
+    /// The human-readable profile name.
+    pub display_name: String,
+    /// An optional description.
+    pub description: Option<String>,
+    /// The workspace that owns the profile.
+    pub workspace_id: String,
+    /// The services referenced directly by the profile.
+    pub services: Vec<String>,
+    /// The groups referenced by the profile.
+    pub groups: Vec<String>,
+    /// The services selected by the profile, expanded from its groups.
+    pub resolved_services: Vec<String>,
+}
+
+impl ProfileView {
+    /// Builds the display view of a profile within its owning workspace.
+    #[must_use]
+    pub fn for_workspace(workspace: &Workspace, profile: &Profile) -> Self {
+        let mut resolved: Vec<String> = Vec::new();
+        for service in &profile.services {
+            if !resolved.contains(&service.to_string()) {
+                resolved.push(service.to_string());
+            }
+        }
+        for group_id in &profile.groups {
+            if let Some(group) = workspace.group(group_id) {
+                for service in &group.services {
+                    let id = service.to_string();
+                    if !resolved.contains(&id) {
+                        resolved.push(id);
+                    }
+                }
+            }
+        }
+        Self {
+            id: profile.id.to_string(),
+            display_name: profile.display_name.clone(),
+            description: profile.description.clone(),
+            workspace_id: workspace.id.to_string(),
+            services: profile.services.iter().map(ToString::to_string).collect(),
+            groups: profile.groups.iter().map(ToString::to_string).collect(),
+            resolved_services: resolved,
+        }
+    }
+}
+
+/// A configured service group in display form.
+///
+/// Members come from configuration; the dependencies those members pull in are
+/// resolved by the plan, never duplicated here (`tasks/022.md` §9).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct GroupView {
+    /// The group identifier.
+    pub id: String,
+    /// The human-readable group name.
+    pub display_name: String,
+    /// An optional description.
+    pub description: Option<String>,
+    /// The workspace that owns the group.
+    pub workspace_id: String,
+    /// The member services, in configured order.
+    pub services: Vec<String>,
+}
+
+impl GroupView {
+    /// Builds the display view of a group within its owning workspace.
+    #[must_use]
+    pub fn for_workspace(workspace: &Workspace, group: &ServiceGroup) -> Self {
+        Self {
+            id: group.id.to_string(),
+            display_name: group.display_name.clone(),
+            description: group.description.clone(),
+            workspace_id: workspace.id.to_string(),
+            services: group.services.iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
+/// One planned step of an environment preparation, in display form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PlanStepView {
+    /// The phase label the step belongs to (`git-sync`, `migration`, …).
+    pub phase: String,
+    /// The task kind the step performs (`git_sync`, `liquibase`, …).
+    pub task: String,
+    /// The service the step acts on, when any.
+    pub service: Option<String>,
+    /// The library the step acts on, when any.
+    pub library: Option<String>,
+    /// A human-readable description.
+    pub description: String,
+}
+
+/// A planned phase and its steps, in display form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct PlanPhaseView {
+    /// The phase label, in canonical execution order.
+    pub kind: String,
+    /// The planned steps of the phase, in planned order.
+    pub steps: Vec<PlanStepView>,
+}
+
+/// The daemon's read-only plan for preparing a development environment.
+///
+/// Every field is copied from the application core's
+/// [`EnvironmentPlan`]: the GUI renders the backend-generated plan and never
+/// reconstructs dependency or execution logic (`tasks/022.md` §12, §13).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct EnvironmentPlanView {
+    /// The workspace the plan applies to.
+    pub workspace_id: String,
+    /// The branch that would be checked out, if any.
+    pub target_branch: Option<String>,
+    /// The services the caller explicitly selected.
+    pub selected_services: Vec<String>,
+    /// Every service that would participate, including dependencies.
+    pub resolved_services: Vec<String>,
+    /// The services added automatically as required dependencies.
+    pub included_dependencies: Vec<String>,
+    /// The libraries that would be prepared, in dependency order.
+    pub required_libraries: Vec<String>,
+    /// The planned phases, in execution order.
+    pub phases: Vec<PlanPhaseView>,
+    /// The total number of steps across every phase.
+    pub step_count: u32,
+    /// Whether any step requires destructive authorization.
+    pub requires_destructive_authorization: bool,
+    /// Non-fatal observations reported by the planner.
+    pub warnings: Vec<String>,
+}
+
+impl From<EnvironmentPlan> for EnvironmentPlanView {
+    fn from(plan: EnvironmentPlan) -> Self {
+        Self {
+            workspace_id: plan.workspace_id.to_string(),
+            target_branch: plan.target_branch.map(|branch| branch.to_string()),
+            selected_services: plan
+                .selected_services
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            resolved_services: plan
+                .resolved_services
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            included_dependencies: plan
+                .included_dependencies
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            required_libraries: plan
+                .required_libraries
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            phases: plan
+                .phases
+                .iter()
+                .map(|phase| PlanPhaseView {
+                    kind: phase.kind.label().to_owned(),
+                    steps: phase
+                        .steps
+                        .iter()
+                        .map(|step| PlanStepView {
+                            phase: step.phase.label().to_owned(),
+                            task: step.task.label().to_owned(),
+                            service: step.service.as_ref().map(ToString::to_string),
+                            library: step.library.as_ref().map(ToString::to_string),
+                            description: step.description.clone(),
+                        })
+                        .collect(),
+                })
+                .collect(),
+            step_count: plan.step_count,
+            requires_destructive_authorization: plan.requires_destructive_authorization,
+            warnings: plan.warnings,
+        }
+    }
+}
+
+/// Per-phase progress within a workflow, in display form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkflowPhaseProgressView {
+    /// The phase label.
+    pub phase: String,
+    /// The number of tasks in the phase.
+    pub total: u32,
+    /// Tasks that succeeded.
+    pub succeeded: u32,
+    /// Tasks that failed.
+    pub failed: u32,
+    /// Tasks still queued, blocked, or running.
+    pub pending: u32,
+}
+
+/// A structured failure within a workflow, in display form.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkflowTaskFailureView {
+    /// The failed task.
+    pub task_id: String,
+    /// The task kind label.
+    pub kind: String,
+    /// The service the task acted on, if any.
+    pub service: Option<String>,
+    /// The library the task acted on, if any.
+    pub library: Option<String>,
+    /// A stable, machine-readable error code.
+    pub code: String,
+    /// A human-readable summary.
+    pub message: String,
+}
+
+/// An aggregated, structured status for a workflow, in display form.
+///
+/// Counts, phase progress, and structured failures come straight from the
+/// application core; the GUI never fabricates percentages or outcomes
+/// (`tasks/022.md` §19, §20, §25).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkflowStatusView {
+    /// The workflow identifier.
+    pub workflow_id: String,
+    /// The workflow kind label (`prepare_environment`, …).
+    pub kind: String,
+    /// The aggregate state (`queued`, `running`, `partially_succeeded`, …).
+    pub state: String,
+    /// The total number of tasks.
+    pub total: u32,
+    /// Tasks that succeeded.
+    pub succeeded: u32,
+    /// Tasks that failed.
+    pub failed: u32,
+    /// Tasks that were cancelled.
+    pub cancelled: u32,
+    /// Tasks that were deliberately skipped.
+    pub skipped: u32,
+    /// Tasks still queued, blocked, or running.
+    pub pending: u32,
+    /// When the workflow's first task started, seconds since the epoch.
+    pub started_at: Option<i64>,
+    /// When the workflow's last task finished, seconds since the epoch.
+    pub finished_at: Option<i64>,
+    /// Progress per phase, in canonical phase order.
+    pub phases: Vec<WorkflowPhaseProgressView>,
+    /// Every failed task, with its structured error.
+    pub failures: Vec<WorkflowTaskFailureView>,
+}
+
+impl From<WorkflowStatus> for WorkflowStatusView {
+    fn from(status: WorkflowStatus) -> Self {
+        Self {
+            workflow_id: status.workflow_id.to_string(),
+            kind: status.kind.label().to_owned(),
+            state: status.state.label().to_owned(),
+            total: status.total,
+            succeeded: status.succeeded,
+            failed: status.failed,
+            cancelled: status.cancelled,
+            skipped: status.skipped,
+            pending: status.pending,
+            started_at: status.started_at.map(timestamp_seconds),
+            finished_at: status.finished_at.map(timestamp_seconds),
+            phases: status
+                .phases
+                .iter()
+                .map(|phase| WorkflowPhaseProgressView {
+                    phase: phase.phase.label().to_owned(),
+                    total: phase.total,
+                    succeeded: phase.succeeded,
+                    failed: phase.failed,
+                    pending: phase.pending,
+                })
+                .collect(),
+            failures: status
+                .failures
+                .iter()
+                .map(|failure| WorkflowTaskFailureView {
+                    task_id: failure.task_id.to_string(),
+                    kind: failure.kind.label().to_owned(),
+                    service: failure.service.as_ref().map(ToString::to_string),
+                    library: failure.library.as_ref().map(ToString::to_string),
+                    code: failure.code.clone(),
+                    message: failure.message.clone(),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// One workflow on the bounded, workspace-scoped history list.
+///
+/// The daemon has no persisted workflow table: history is derived from the task
+/// engine's retained tasks, so it is bounded and disappears with the daemon's
+/// in-memory state — exactly what the screen reports (`tasks/022.md` §26).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct WorkflowSummaryView {
+    /// The workflow identifier.
+    pub workflow_id: String,
+    /// The workflow kind label.
+    pub kind: String,
+    /// The aggregate state.
+    pub state: String,
+    /// The workspace the workflow belongs to, resolved from configuration.
+    pub workspace_id: String,
+    /// The total number of tasks.
+    pub total: u32,
+    /// Tasks that succeeded.
+    pub succeeded: u32,
+    /// Tasks that failed.
+    pub failed: u32,
+    /// Tasks that were cancelled.
+    pub cancelled: u32,
+    /// Tasks that were deliberately skipped.
+    pub skipped: u32,
+    /// Tasks still queued, blocked, or running.
+    pub pending: u32,
+    /// When the workflow's first task started, seconds since the epoch.
+    pub started_at: Option<i64>,
+    /// When the workflow's last task finished, seconds since the epoch.
+    pub finished_at: Option<i64>,
+}
+
+impl WorkflowSummaryView {
+    /// Builds a history row from an aggregated status and its workspace.
+    #[must_use]
+    pub fn from_status(status: WorkflowStatus, workspace_id: impl Into<String>) -> Self {
+        let view = WorkflowStatusView::from(status);
+        Self {
+            workflow_id: view.workflow_id,
+            kind: view.kind,
+            state: view.state,
+            workspace_id: workspace_id.into(),
+            total: view.total,
+            succeeded: view.succeeded,
+            failed: view.failed,
+            cancelled: view.cancelled,
+            skipped: view.skipped,
+            pending: view.pending,
+            started_at: view.started_at,
+            finished_at: view.finished_at,
+        }
+    }
 }
 
 #[cfg(test)]

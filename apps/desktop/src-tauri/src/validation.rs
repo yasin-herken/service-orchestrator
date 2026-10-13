@@ -6,7 +6,9 @@
 //! (`tasks/019.md` §35). Validation lives here, once, and is reused by the
 //! read queries and the mutating commands alike.
 
-use service_orchestrator_domain::{Branch, LibraryId, ServiceId, TaskId, WorkflowId, WorkspaceId};
+use service_orchestrator_domain::{
+    Branch, GroupId, LibraryId, ProfileId, ServiceId, TaskId, WorkflowId, WorkspaceId,
+};
 
 use crate::error::CommandError;
 
@@ -82,6 +84,26 @@ pub(crate) fn parse_branch(raw: &str) -> Result<Branch, CommandError> {
         .map_err(|error| CommandError::invalid_input(format!("invalid branch: {error}")))
 }
 
+/// Validates a profile identifier through the domain.
+///
+/// # Errors
+///
+/// Returns `INVALID_INPUT` when the domain rejects the identifier.
+pub(crate) fn parse_profile_id(raw: &str) -> Result<ProfileId, CommandError> {
+    ProfileId::new(raw)
+        .map_err(|error| CommandError::invalid_input(format!("invalid profile id: {error}")))
+}
+
+/// Validates a group identifier through the domain.
+///
+/// # Errors
+///
+/// Returns `INVALID_INPUT` when the domain rejects the identifier.
+pub(crate) fn parse_group_id(raw: &str) -> Result<GroupId, CommandError> {
+    GroupId::new(raw)
+        .map_err(|error| CommandError::invalid_input(format!("invalid group id: {error}")))
+}
+
 /// Validates a task identifier through the domain.
 ///
 /// # Errors
@@ -131,6 +153,23 @@ mod tests {
         assert_eq!(
             parse_service_id("orders-api").expect("valid").to_string(),
             "orders-api"
+        );
+    }
+
+    #[test]
+    fn profile_and_group_ids_validate() {
+        assert_eq!(
+            parse_profile_id("full-stack").expect("valid").to_string(),
+            "full-stack"
+        );
+        assert_eq!(
+            parse_profile_id("").expect_err("empty").code,
+            "INVALID_INPUT"
+        );
+        assert_eq!(parse_group_id("core").expect("valid").to_string(), "core");
+        assert_eq!(
+            parse_group_id("bad id").expect_err("space").code,
+            "INVALID_INPUT"
         );
     }
 

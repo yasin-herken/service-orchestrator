@@ -6,23 +6,31 @@ export type PageId =
   | 'builds'
   | 'libraries'
   | 'migrations'
+  | 'workflows'
   | 'tasks'
   | 'logs'
   | 'health'
   | 'settings';
 
 /**
- * A cross-screen navigation payload (`tasks/021.md` §30).
+ * A cross-screen navigation payload (`tasks/021.md` §30, `tasks/022.md` §6).
  *
- * It carries stable identifiers only — a task id or a service id — so a failed
- * migration can open its task, a failed task can open its logs, and an
- * unhealthy service can open its health detail without parsing anything.
+ * It carries stable identifiers only — a task id, a service id, or the id of a
+ * profile/group to preselect — so a service, a profile, or a group can open
+ * the workflow planner with the right selection without any screen parsing
+ * anything or duplicating workflow logic.
  */
 export interface NavIntent {
   /** The task the target screen should open. */
   taskId?: string;
   /** The service the target screen should select. */
   serviceId?: string;
+  /** Services to preselect on the Workflows screen. */
+  workflowServiceIds?: string[];
+  /** The profile to preselect on the Workflows screen. */
+  workflowProfileId?: string;
+  /** The group to preselect on the Workflows screen. */
+  workflowGroupId?: string;
 }
 
 /** One navigation entry in the sidebar. */
@@ -46,6 +54,7 @@ export const PAGES: readonly PageDefinition[] = [
   { id: 'builds', label: 'Builds', title: 'Builds' },
   { id: 'libraries', label: 'Libraries', title: 'Libraries' },
   { id: 'migrations', label: 'Migrations', title: 'Migrations' },
+  { id: 'workflows', label: 'Workflows', title: 'Workflows' },
   { id: 'tasks', label: 'Tasks', title: 'Tasks' },
   { id: 'logs', label: 'Logs', title: 'Logs' },
   { id: 'health', label: 'Health', title: 'Health' },

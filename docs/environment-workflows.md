@@ -253,6 +253,12 @@ started and registered; the process then runs independently of the workflow.
 Readiness is bounded by the configured health-check timeouts — the workflow does
 not wait forever.
 
+Each of these steps carries its resolved service target as task parameters (the
+owning workspace, the service id, the working directory, and the workspace
+root), because the lifecycle and health executors decode their target from the
+parameters exactly as the standalone operations do. The in-workflow health step
+therefore schedules the same `HealthCheck` task a manual health check does.
+
 ---
 
 ## 7. Cancellation and failure handling
@@ -393,7 +399,37 @@ can surface the need for confirmation.
 
 ---
 
-## 12. Example workflows
+## 12. Desktop GUI usage
+
+The desktop GUI (`docs/desktop-gui.md` §27) consumes the same workflow through
+thin Tauri commands that map one-to-one onto the operations above:
+
+| Command | Maps to |
+| --- | --- |
+| `list_profiles` / `get_profile` | the profile reads behind profile selection |
+| `list_groups` / `get_group` | the group reads behind group selection |
+| `plan_prepare_environment` | the read-only plan |
+| `prepare_environment` | scheduling (returns a workflow id) |
+| `get_workflow_status` | aggregated state, per-phase progress, structured failures |
+| `list_workflows` | a bounded, workspace-scoped history window |
+| `cancel_workflow` (existing) | cancellation of every still-active task |
+
+The screen selects exactly one source (explicit services, a profile, or a
+group), configures the request with **safe defaults** (sync on, dependencies on,
+health wait on; builds, migrations, startup, and branch off), previews the plan,
+executes it, and then monitors and cancels it through the same engine operations
+the TUI and MCP use. Planning writes nothing, and the daemon re-validates and
+re-authorizes at execution time — a frontend confirmation is never treated as
+authorization.
+
+Because the daemon keeps no persisted workflow table, `list_workflows` is
+derived: the adapter groups the engine's active and retained tasks by workflow
+id and reads each workflow's workspace from the resolved parameters of its
+steps, so history is bounded and disappears with the daemon's in-memory state.
+
+---
+
+## 13. Example workflows
 
 **Backend development.** `{ workspaceId, profile: "backend-development",
 build: true, runLiquibase: true, start: true }` — sync every backend repository,
@@ -414,7 +450,7 @@ consuming service.
 
 ---
 
-## 13. Related documents
+## 14. Related documents
 
 - `docs/adr/016-environment-workflows.md` — the decision record.
 - `docs/application-core.md` — the application core and its request/response

@@ -983,6 +983,25 @@ fn prepare_environment_wires_the_full_pipeline() {
             assert!(ids.contains(dependency), "unknown prerequisite");
         }
     }
+
+    // The in-workflow health step carries the resolved service target the health
+    // executor decodes, so the pipeline's health phase can actually run rather
+    // than failing on missing parameters.
+    let health = steps
+        .iter()
+        .find(|step| step.task == TaskKind::HealthCheck)
+        .expect("a health check step");
+    assert_eq!(
+        health.parameters.get("service.id").map(String::as_str),
+        Some("auth-service")
+    );
+    assert_eq!(
+        health
+            .parameters
+            .get("service.workspace")
+            .map(String::as_str),
+        Some("acme")
+    );
 }
 
 #[test]

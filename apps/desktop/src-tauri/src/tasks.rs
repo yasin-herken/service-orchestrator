@@ -139,7 +139,7 @@ pub fn get_workflow(
 
 /// Maps services and libraries to their owning workspace, resolved once per
 /// `list_tasks` call from configuration.
-struct OwnerIndex {
+pub(crate) struct OwnerIndex {
     services: HashMap<ServiceId, WorkspaceId>,
     libraries: HashMap<LibraryId, WorkspaceId>,
 }
@@ -150,7 +150,7 @@ impl OwnerIndex {
     /// # Errors
     ///
     /// Returns the daemon's structured error when a listing fails.
-    fn build(client: &dyn OrchestratorClient) -> Result<Self, CommandError> {
+    pub(crate) fn build(client: &dyn OrchestratorClient) -> Result<Self, CommandError> {
         let mut services = HashMap::new();
         let mut libraries = HashMap::new();
         for workspace in client.list_workspaces().map_err(CommandError::from)? {
@@ -173,11 +173,12 @@ impl OwnerIndex {
         })
     }
 
-    fn service_workspace(&self, service: &ServiceId) -> Option<&WorkspaceId> {
+    /// Returns the workspace owning a service, when it is configured.
+    pub(crate) fn service_workspace(&self, service: &ServiceId) -> Option<&WorkspaceId> {
         self.services.get(service)
     }
 
-    fn library_workspace(&self, library: &LibraryId) -> Option<&WorkspaceId> {
+    pub(crate) fn library_workspace(&self, library: &LibraryId) -> Option<&WorkspaceId> {
         self.libraries.get(library)
     }
 }

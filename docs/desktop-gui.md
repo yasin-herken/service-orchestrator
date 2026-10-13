@@ -1,7 +1,8 @@
 # Desktop GUI (Tauri 2)
 
 The desktop GUI is the graphical interface to Service Orchestrator
-(`tasks/018.md`, `tasks/019.md`, `tasks/020.md`). It is a Tauri 2 application — a
+(`tasks/018.md`, `tasks/019.md`, `tasks/020.md`, `tasks/021.md`,
+`tasks/022.md`). It is a Tauri 2 application — a
 React + TypeScript frontend (`apps/desktop`) inside a native macOS window, with a
 small Rust adapter crate (`apps/desktop/src-tauri`) behind it.
 
@@ -23,14 +24,18 @@ displays.
 
 This document covers the shell, the dashboard, **service lifecycle
 management** (`tasks/019.md`), **Git, build, and library management**
-(`tasks/020.md`), and **migration, task, health, and logs management**
-(`tasks/021.md`): listing and selecting services, repositories, build targets,
+(`tasks/020.md`), **migration, task, health, and logs management**
+(`tasks/021.md`), and **workflow management and profiles** (`tasks/022.md`):
+listing and selecting services, repositories, build targets,
 libraries, and migration targets; start/stop/restart; Git
 fetch/pull/checkout/sync (single and bulk) with a read-only preview; single and
 bulk builds; library build/install/sync and preparation; dependency version
 alignment; migration validate/inspect/preview/apply; task browsing, filtering,
 details, and cancellation; the health dashboard with manual checks; unified
-realtime and historical logs; task progress; structured logs; cancellation;
+realtime and historical logs; **profile and group selection, configurable
+environment-workflow options, a read-only dependency-resolved plan, workflow
+execution and monitoring, cancellation, results, and bounded history**; task
+progress; structured logs; cancellation;
 realtime refresh; and confirmation/error handling.
 
 | Delivered | Not yet delivered (later tasks) |
@@ -48,6 +53,8 @@ realtime refresh; and confirmation/error handling.
 | Tasks screen: bounded history, seven states, filters, details, cancellation | |
 | Health screen: runtime vs health, per-check detail, manual checks | |
 | Logs screen: unified viewer, scopes, follow, filters, bounded buffer | |
+| Workflows screen: service/profile/group selection, options, read-only plan, execute, monitor (`tasks/022.md`) | Service or profile/group creation/editing |
+| Workflow results (partial success) and bounded, workspace-scoped history | New workflow engines or a second scheduler |
 | Shared task monitoring: progress dialog, cancellation, bounded logs | |
 | Realtime task-driven refresh; confirmation, error, and progress dialogs | |
 | Connection status with disconnect banner, Retry, and safe reconnect | |
@@ -86,8 +93,9 @@ apps/desktop/
 │   │   ├── tasks/             # shared task monitoring (progress, summary, logs, errors)
 │   │   ├── git/               # RepositoryTable, RepositoryDetailPanel, GitSyncDialog
 │   │   ├── build/             # BuildTargetTable, BuildTargetDetailPanel, BuildCapabilitiesList
-│   │   └── library/           # LibraryTable, LibraryDetailPanel, VersionAlignmentPanel, PrepareLibraryDialog
-│   ├── pages/                 # Dashboard, Services, Git, Builds, Libraries, placeholders
+│   │   ├── library/           # LibraryTable, LibraryDetailPanel, VersionAlignmentPanel, PrepareLibraryDialog
+│   │   └── workflow/          # WorkflowWizard, selection, options, dependency view, preview, progress, results, history
+│   ├── pages/                 # Dashboard, Services, Git, Builds, Libraries, Workflows, placeholders
 │   └── styles/global.css      # light + dark via prefers-color-scheme
 └── src-tauri/
     ├── Cargo.toml             # its own workspace; excluded from the root one
@@ -103,6 +111,7 @@ apps/desktop/
         ├── build.rs           # build read/mutation use cases (provider-agnostic)
         ├── library.rs         # library read/mutation use cases
         ├── tasks.rs           # task/workflow/log reads and cancellation
+        ├── workflow.rs        # profile/group reads, environment planning and execution, history
         ├── validation.rs      # domain-typed identifier parsing at the boundary
         ├── dto.rs             # wire view models incl. Git/Build/Library/Task views
         ├── state.rs           # shared AppState, connection, event forwarding
@@ -258,6 +267,32 @@ task-producing, so progress is observed through the task engine rather than a
 blocking call. `pending` and `locked` are `None` until a real inspection task
 answers (§14).
 
+### Workflow management and profiles (`tasks/022.md` §35, §36)
+
+| Command | Backing use case | Returns |
+| --- | --- | --- |
+| `list_profiles` | `list_profiles` + workspace snapshot | the workspace's profiles with their groups expanded |
+| `get_profile` | `get_profile`, scoped to the workspace | one profile view |
+| `list_groups` | `list_groups` + workspace snapshot | the workspace's groups with member services |
+| `get_group` | `get_group`, scoped to the workspace | one group view |
+| `plan_prepare_environment` | `plan_prepare_environment` (read-only) | the daemon's dependency-resolved plan |
+| `prepare_environment` | `prepare_environment` | an `OperationOutcome` carrying the workflow id |
+| `get_workflow_status` | `get_workflow_status` | aggregated counts, per-phase progress, structured failures |
+| `list_workflows` | derived: running + recent tasks → `get_workflow` → `get_workflow_status` | a bounded, workspace-scoped workflow history |
+
+`plan_prepare_environment` and `prepare_environment` take one nested `input`
+object and share **one** request mapping, so a preview can never drift from what
+execution schedules. Planning writes nothing; the daemon re-validates the
+request and re-authorizes it at execution time, and no frontend confirmation
+flag is ever treated as authorization (§27).
+
+`list_workflows` is the only derived read: the daemon keeps no persisted
+workflow table and no workspace-scoped workflow listing, so the adapter groups
+the engine's active and retained tasks by workflow id and reads each candidate's
+workspace from the resolved parameters of its steps (a composed workflow step is
+scheduled with a workflow target, not a service or library one). Workflows that
+have aged out of retention are skipped rather than failing the list.
+
 ### Errors
 
 A failing command rejects with `{ code, message }`:
@@ -268,7 +303,8 @@ A failing command rejects with `{ code, message }`:
   branch) failed domain validation;
 - `NOT_FOUND` — the entity belongs to a different workspace;
 - the application error's variant name (for example `WorkspaceNotFound`,
-  `ServiceNotFound`, `LibraryNotFound`), including a **permission denial** from
+  `ServiceNotFound`, `LibraryNotFound`, `ProfileNotFound`, `GroupNotFound`,
+  `WorkflowNotFound`), including a **permission denial** from
   the policy engine — surfaced as `PermissionDenied` with the daemon's
   explanation — and structured Git/build/library codes such as
   `BUILD_UNSUPPORTED_OPERATION`;
@@ -454,6 +490,11 @@ interface at all.
   `utils/serviceSelection.ts` (set operations on ids), and
   `utils/taskProgress.ts` (busy ids, last task/operation per service) are pure
   functions with their own tests; components only render and dispatch.
+- **Workflow planning is backend-derived.** `pages/WorkflowsPage.tsx` renders the
+  daemon's plan and status; it holds no dependency or scheduling logic, polls
+  `get_workflow_status` and `list_tasks` on a short interval while a workflow
+  runs (refreshed immediately when a task settles via `terminalRevision`), and
+  disables execution while the daemon is disconnected (§27).
 - **Presentation-only components.** Table, badges, cards, dialogs, capability
   lists, version-alignment panels, and state views receive data and callbacks;
   they contain no business rules.
@@ -863,11 +904,15 @@ protected operation automatically.
 
 ## 19. Cross-screen navigation (`tasks/021.md` §30)
 
-`AppShell` holds a small `NavIntent` (`taskId` and/or `serviceId` — stable
+`AppShell` holds a small `NavIntent` (`taskId`, `serviceId`, `workflowServiceIds`,
+`workflowProfileId`, and `workflowGroupId` — stable
 identifiers only, nothing parsed from display text) alongside the active page.
 `navigate(page, intent)` passes it to the target screen, which uses it to open
 the exact entity: a failed migration opens its task on the Tasks screen, a
 failed task opens its logs, and an unhealthy service opens its health detail.
+The same mechanism seeds the Workflows screen: Services offers "Prepare
+workflow…" with the selected service ids, and the Dashboard offers "Prepare
+environment…" (§27).
 The intent is consumed once; filters reset on arrival and on workspace switch.
 
 ## 20. Shared task monitoring (`tasks/020.md` §27–§29)
@@ -972,8 +1017,10 @@ Backend (`apps/desktop/src-tauri`):
   daemon-binary resolution, Git sync-mode parsing, the bulk-build request shape,
   library prepare options, log-level parsing, migration request mapping, task
   query and cancellation mapping, health query mapping, log query mapping
-  (scope resolution and cursor semantics), and authorization-error
-  propagation (`PermissionDenied`), per `tasks/021.md` §41 — no real migration
+  (scope resolution and cursor semantics), **environment-workflow request
+  mapping, the safe defaults, plan/status/summary view rendering, and workflow
+  history scoping/limits** (`tasks/022.md` §41), and authorization-error
+  propagation (`PermissionDenied`) — no real migration
   and no external service is run in adapter unit tests;
 - `tests/daemon_ipc.rs` starts a **real daemon** on a private socket with fake
   executors over a shared in-memory runtime-state store and drives the adapter's
@@ -986,6 +1033,11 @@ Backend (`apps/desktop/src-tauri`):
   database item), health queries and readiness, unified log queries and cursor
   pagination, task listing/cancellation, and that several clients share one
   authoritative daemon — the cross-interface consistency of `tasks/021.md` §43.
+  `tasks/022.md` §42 adds profile/group loading with workspace scoping, a
+  read-only dependency-resolved plan that schedules nothing, execution with
+  aggregated results and per-phase progress, partial-failure reporting,
+  cancellation of a running workflow, identical TUI/MCP observation, and
+  reconnect behaviour after a daemon restart.
   It uses **fixture workspaces and fakes only** — no real developer repository,
   no real process, and no real database.
 
@@ -1005,7 +1057,13 @@ Frontend (`apps/desktop`):
   health rendering and event-driven refresh, log scopes/streaming/filters/
   pagination/follow/buffer limits/subscription cleanup, cross-screen
   navigation, workspace switching with stale-response protection, and
-  daemon-disconnect behaviour that disables mutating actions.
+  daemon-disconnect behaviour that disables mutating actions;
+- `tasks/022.md` coverage (`pages/workflows-page.test.tsx`): profile/group/
+  service selection, workflow options, read-only plan and dependency preview,
+  execution and realtime phase/per-service progress, cancellation with
+  confirmation, partial-success results, bounded history, workspace-scope
+  reset, plan failures, and the daemon-disconnect behaviour that disables
+  execution while preserving the workflow id.
 
 Commands used for validation:
 
@@ -1069,10 +1127,99 @@ npm run build && npm run typecheck && npm run test
   assertions (`apps/desktop/src-tauri/tests/daemon_ipc.rs`); no test in this
   repository provisions a disposable real database, so a real Liquibase
   round trip against an isolated database remains a manual verification.
+- **Workflow history is derived and in-memory.** The daemon persists no workflow
+  table, so `list_workflows` reconstructs a bounded window from the engine's
+  active and retained tasks; history is lost on a daemon restart and a workflow
+  that ages out of retention is simply absent rather than an error (§27).
+- **Composed workflow failures are identified by task, not by entity.** A
+  workflow step is scheduled with a workflow target, so a failed step's task
+  carries no service or library binding; the Results view shows the task id, kind,
+  code, and the executor's message (which names the service) rather than a
+  structured service field (§27).
+- **Workflows are consumed, not authored.** Profiles and groups come from
+  configuration; the GUI selects and previews them but never creates or edits
+  them (§27).
 - **Out of scope by design.** No new migration providers, engines, or log
   storage; no service creation/editing, no new build providers, no Docker or
-  Kubernetes, no DMG, signing, notarization, or CI/CD (`tasks/021.md` §47).
+  Kubernetes, no DMG, signing, notarization, or CI/CD (`tasks/021.md` §47,
+  `tasks/022.md` §46).
 - The active workspace selection lives in memory only; it is not persisted
   across restarts.
 - The development icon (`src-tauri/icons/icon.png`) is an obvious placeholder;
   real artwork is a packaging concern for a later task.
+
+## 27. Workflow management and profiles (`tasks/022.md`)
+
+The Workflows screen turns the daemon's environment workflows into a guided,
+read-only-planned experience. It is a **consumer** of the Application Core: it
+selects configured profiles, groups, and services, previews the daemon's plan,
+asks the daemon to execute it, and then monitors the same workflow the TUI and
+MCP see. No dependency resolution, scheduling, Git, Maven, npm, or Liquibase
+logic exists in React or in the Tauri adapter.
+
+### Selecting targets
+
+- **Services** — a searchable, multi-select list of the active workspace's
+  services. Selection uses stable ids only; `Services` offers "Prepare
+  workflow…" which opens the screen with the current selection already applied.
+- **Profiles** — the workspace's configured profiles, resolved through the core
+  (`list_profiles`), each shown with the groups and services it selects. A
+  profile is a single selection source: choosing it replaces explicit services.
+- **Groups** — the workspace's configured groups (`list_groups`), each with its
+  member services.
+- **Exactly one source.** Explicit services, a profile, or a group — never more
+  than one. The adapter rejects any other combination with `INVALID_INPUT`, so a
+  placeholder or stale value can never be read as "the whole workspace".
+
+### Workflow options
+
+Options default to the **safe** values the daemon assumes when a field is
+omitted: synchronize repositories **on**, include required dependencies **on**,
+wait for health after starting **on**; build libraries, run Liquibase
+migrations, build services, start services, and choose a branch are **off**.
+Enabling migrations is an explicit, visible database mutation, and no workflow
+ever checks out a branch the user did not choose. Every option is sent as part
+of one nested `input` object, and the daemon re-validates and re-authorizes the
+request at execution time.
+
+### Planning (read-only)
+
+"Preview plan" calls `plan_prepare_environment`. The daemon returns the exact
+plan execution would schedule: the selected services, the **included
+dependencies** it added automatically, the **required libraries** in dependency
+order, the phases in canonical order (`validate`, `git-sync`,
+`library-prepare`, `migration`, `service-build`, `service-start`,
+`health-check`), the total step count, whether any step needs destructive
+authorization, and any warnings. The screen renders phases, steps, and the
+dependency additions and never reconstructs them. Planning schedules nothing —
+history stays unchanged until execution.
+
+### Execution and monitoring
+
+"Run workflow" submits the same request through `prepare_environment` and
+receives a workflow id. While the workflow is active the screen polls
+`get_workflow_status` and `list_tasks` on a short interval and refreshes
+immediately whenever a task settles (via the shared `terminalRevision`), showing
+the aggregate state (`queued`, `running`, `succeeded`, `partially_succeeded`,
+`failed`, `cancelled`), per-phase progress, and per-service task state. Cancellation
+uses the daemon's `cancel_workflow` through a confirmation dialog; it is
+best-effort and never rolls back completed work, so the GUI reports the state the
+engine observed — including partial completion — rather than assuming a rollback.
+
+### Results and history
+
+When the workflow settles the screen switches to results: the same aggregate
+counts, the per-phase breakdown, and every structured failure (task id, kind,
+code, and the executor's message). A workflow that partially succeeded is shown
+as such — success is never implied for steps that failed or were cancelled. A
+bounded history list (`list_workflows`, newest first, which the adapter clamps to
+a supported range and scopes to the active workspace) lets a developer re-open
+recent results.
+
+### Workspace scope and disconnection
+
+The screen is scoped to the active workspace; switching workspaces resets the
+selection, plan, and results. While the daemon is disconnected, execution and
+cancellation are disabled, the workflow id is preserved, and the screen reloads
+its state when the connection returns. A workflow is visible identically through
+the TUI and MCP, because all three observe the one authoritative daemon.

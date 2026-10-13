@@ -20,6 +20,12 @@
 //! Task 020 adds the Git, build, and library management commands plus the shared
 //! task/workflow/log commands every operation observes through
 //! (`tasks/020.md` §4–§29).
+//!
+//! Task 022 adds the profile, group, and environment-workflow commands: the
+//! Workflows screen plans through `plan_prepare_environment`, executes through
+//! `prepare_environment`, and reads `get_workflow_status`/`list_workflows` —
+//! all over the same IPC operations the TUI and MCP use (`tasks/022.md` §35,
+//! §36).
 
 use std::sync::Arc;
 
@@ -29,17 +35,19 @@ use tauri::{AppHandle, State};
 use crate::connection::ConnectionSnapshot;
 use crate::dto::{
     ArtifactVerificationView, BranchView, BuildCapabilitiesView, BuildTargetSummary,
-    BulkSummaryView, GitStatusView, GitSyncPreview, HealthDetailView, HealthRowView,
-    LibraryDependentView, LibrarySummary, LogPageView, MigrationRowView, MigrationStatusView,
-    OperationOutcome, RepositoryInspectionView, RepositorySummary, ServiceDetail, ServiceSummary,
-    TaskView, VersionAlignmentView, WorkflowCancellationView, WorkflowView, WorkspaceStatus,
-    WorkspaceSummary,
+    BulkSummaryView, EnvironmentPlanView, GitStatusView, GitSyncPreview, GroupView,
+    HealthDetailView, HealthRowView, LibraryDependentView, LibrarySummary, LogPageView,
+    MigrationRowView, MigrationStatusView, OperationOutcome, ProfileView, RepositoryInspectionView,
+    RepositorySummary, ServiceDetail, ServiceSummary, TaskView, VersionAlignmentView,
+    WorkflowCancellationView, WorkflowStatusView, WorkflowSummaryView, WorkflowView,
+    WorkspaceStatus, WorkspaceSummary,
 };
 use crate::error::CommandError;
 use crate::logs::LogQuery;
 use crate::state::AppState;
 use crate::tasks::TaskLogsQuery;
-use crate::{build, git, health, library, logs, migration, mutations, queries, tasks};
+use crate::workflow::PrepareEnvironmentInput;
+use crate::{build, git, health, library, logs, migration, mutations, queries, tasks, workflow};
 
 /// Runs one blocking query against the shared client.
 ///
@@ -885,6 +893,156 @@ pub async fn get_workflow(
 ) -> Result<WorkflowView, CommandError> {
     query(state.inner(), move |client| {
         tasks::get_workflow(client.as_ref(), &workflow_id)
+    })
+    .await
+}
+
+// -- profiles, groups, and environment workflows ------------------------------
+
+/// Lists a workspace's configured profiles with their groups expanded.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected workspace id, otherwise a structured
+/// `{ code, message }` error.
+#[tauri::command]
+pub async fn list_profiles(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Vec<ProfileView>, CommandError> {
+    query(state.inner(), move |client| {
+        workflow::list_profiles(client.as_ref(), &workspace_id)
+    })
+    .await
+}
+
+/// Returns one profile, scoped to the workspace it belongs to.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected identifier, `NOT_FOUND` when the profile
+/// belongs to a different workspace, otherwise a structured `{ code, message }`
+/// error.
+#[tauri::command]
+pub async fn get_profile(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    profile_id: String,
+) -> Result<ProfileView, CommandError> {
+    query(state.inner(), move |client| {
+        workflow::get_profile(client.as_ref(), &workspace_id, &profile_id)
+    })
+    .await
+}
+
+/// Lists a workspace's configured groups with their member services.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected workspace id, otherwise a structured
+/// `{ code, message }` error.
+#[tauri::command]
+pub async fn list_groups(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Vec<GroupView>, CommandError> {
+    query(state.inner(), move |client| {
+        workflow::list_groups(client.as_ref(), &workspace_id)
+    })
+    .await
+}
+
+/// Returns one group, scoped to the workspace it belongs to.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected identifier, `NOT_FOUND` when the group
+/// belongs to a different workspace, otherwise a structured `{ code, message }`
+/// error.
+#[tauri::command]
+pub async fn get_group(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    group_id: String,
+) -> Result<GroupView, CommandError> {
+    query(state.inner(), move |client| {
+        workflow::get_group(client.as_ref(), &workspace_id, &group_id)
+    })
+    .await
+}
+
+/// Builds the read-only plan for an environment preparation.
+///
+/// The plan is produced by the daemon's own composer and mutates nothing; the
+/// adapter adds no dependency or execution logic of its own.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for rejected input or an empty/ambiguous selection, plus
+/// the daemon's structured error (unknown workspace, profile, or group).
+#[tauri::command]
+pub async fn plan_prepare_environment(
+    state: State<'_, AppState>,
+    input: PrepareEnvironmentInput,
+) -> Result<EnvironmentPlanView, CommandError> {
+    query(state.inner(), move |client| {
+        workflow::plan(client.as_ref(), &input)
+    })
+    .await
+}
+
+/// Schedules the environment workflow through the daemon.
+///
+/// The daemon re-validates the request and enforces the shared policy at
+/// execution time; a previously generated plan is never treated as
+/// authorization.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for rejected input, plus the daemon's structured error —
+/// including `PermissionDenied` when a required authorization was not granted.
+#[tauri::command]
+pub async fn prepare_environment(
+    state: State<'_, AppState>,
+    input: PrepareEnvironmentInput,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        workflow::execute(client.as_ref(), &input)
+    })
+    .await
+}
+
+/// Returns the aggregated, structured status of one workflow.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected workflow id, `WorkflowNotFound` for an
+/// unknown workflow, otherwise the daemon's structured error.
+#[tauri::command]
+pub async fn get_workflow_status(
+    state: State<'_, AppState>,
+    workflow_id: String,
+) -> Result<WorkflowStatusView, CommandError> {
+    query(state.inner(), move |client| {
+        workflow::workflow_status(client.as_ref(), &workflow_id)
+    })
+    .await
+}
+
+/// Lists a bounded, newest-first window of a workspace's workflow history.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected workspace id, otherwise the daemon's
+/// structured error.
+#[tauri::command]
+pub async fn list_workflows(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    limit: Option<usize>,
+) -> Result<Vec<WorkflowSummaryView>, CommandError> {
+    query(state.inner(), move |client| {
+        workflow::list_workflows(client.as_ref(), &workspace_id, limit)
     })
     .await
 }

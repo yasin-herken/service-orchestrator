@@ -7,9 +7,11 @@ import type {
   BulkSummaryView,
   ConnectionSnapshot,
   DaemonStatus,
+  EnvironmentPlanView,
   GitStatusView,
   GitSyncPreview,
   GitSyncPreviewEntry,
+  GroupView,
   HealthDetailView,
   HealthOutcomeView,
   HealthRowView,
@@ -19,12 +21,15 @@ import type {
   MigrationRowView,
   MigrationStatusView,
   OperationOutcome,
+  ProfileView,
   RepositoryInspectionView,
   RepositorySummary,
   ServiceDetail,
   ServiceSummary,
   TaskView,
   VersionAlignmentView,
+  WorkflowStatusView,
+  WorkflowSummaryView,
   WorkflowView,
   WorkspaceStatus,
   WorkspaceSummary,
@@ -755,4 +760,173 @@ export function makeWorkflow(overrides: Partial<WorkflowView> = {}): WorkflowVie
     ],
     ...overrides,
   };
+}
+
+// -- profiles, groups, and environment workflows -------------------------------
+
+/** Builds a profile expanded for the demo workspace. */
+export function makeProfile(overrides: Partial<ProfileView> = {}): ProfileView {
+  return {
+    id: 'full-stack',
+    display_name: 'Full stack',
+    description: 'Backend plus frontend for local development',
+    workspace_id: 'demo',
+    services: ['orders-api'],
+    groups: ['core'],
+    resolved_services: ['orders-api', 'admin-ui'],
+    ...overrides,
+  };
+}
+
+/** Builds the demo workspace's profiles. */
+export function makeProfiles(): ProfileView[] {
+  return [makeProfile()];
+}
+
+/** Builds a service group expanded for the demo workspace. */
+export function makeGroup(overrides: Partial<GroupView> = {}): GroupView {
+  return {
+    id: 'core',
+    display_name: 'Core services',
+    description: null,
+    workspace_id: 'demo',
+    services: ['admin-ui'],
+    ...overrides,
+  };
+}
+
+/** Builds the demo workspace's groups. */
+export function makeGroups(): GroupView[] {
+  return [makeGroup()];
+}
+
+/** Builds a read-only environment plan with sensible defaults. */
+export function makeEnvironmentPlan(
+  overrides: Partial<EnvironmentPlanView> = {},
+): EnvironmentPlanView {
+  return {
+    workspace_id: 'demo',
+    target_branch: 'main',
+    selected_services: ['orders-api'],
+    resolved_services: ['orders-api', 'admin-ui'],
+    included_dependencies: ['admin-ui'],
+    required_libraries: ['shared-kit'],
+    phases: [
+      {
+        kind: 'git-sync',
+        steps: [
+          {
+            phase: 'git-sync',
+            task: 'git_sync',
+            service: 'orders-api',
+            library: null,
+            description: 'sync orders-api',
+          },
+        ],
+      },
+      {
+        kind: 'service-build',
+        steps: [
+          {
+            phase: 'service-build',
+            task: 'build_service',
+            service: 'orders-api',
+            library: null,
+            description: 'build orders-api',
+          },
+        ],
+      },
+    ],
+    step_count: 2,
+    requires_destructive_authorization: false,
+    warnings: ["working tree of 'admin-ui' has uncommitted local changes"],
+    ...overrides,
+  };
+}
+
+/** Builds an aggregated workflow status (running by default). */
+export function makeWorkflowStatus(
+  overrides: Partial<WorkflowStatusView> = {},
+): WorkflowStatusView {
+  return {
+    workflow_id: 'wf-env-1',
+    kind: 'prepare_environment',
+    state: 'running',
+    total: 3,
+    succeeded: 1,
+    failed: 0,
+    cancelled: 0,
+    skipped: 0,
+    pending: 2,
+    started_at: 1_700_000_000,
+    finished_at: null,
+    phases: [
+      { phase: 'git-sync', total: 1, succeeded: 1, failed: 0, pending: 0 },
+      { phase: 'service-build', total: 2, succeeded: 0, failed: 0, pending: 2 },
+    ],
+    failures: [],
+    ...overrides,
+  };
+}
+
+/** Builds a partially succeeded workflow status with one structured failure. */
+export function makePartiallySucceededStatus(): WorkflowStatusView {
+  return makeWorkflowStatus({
+    state: 'partially_succeeded',
+    succeeded: 2,
+    failed: 1,
+    pending: 0,
+    finished_at: 1_700_000_060,
+    phases: [
+      { phase: 'git-sync', total: 1, succeeded: 1, failed: 0, pending: 0 },
+      { phase: 'service-build', total: 2, succeeded: 1, failed: 1, pending: 0 },
+    ],
+    failures: [
+      {
+        task_id: 'task-build-admin',
+        kind: 'build_service',
+        service: 'admin-ui',
+        library: null,
+        code: 'BUILD_FAILED',
+        message: 'npm run build exited with code 1',
+      },
+    ],
+  });
+}
+
+/** Builds one bounded workflow-history row. */
+export function makeWorkflowSummary(
+  overrides: Partial<WorkflowSummaryView> = {},
+): WorkflowSummaryView {
+  return {
+    workflow_id: 'wf-env-1',
+    kind: 'prepare_environment',
+    state: 'succeeded',
+    workspace_id: 'demo',
+    total: 3,
+    succeeded: 3,
+    failed: 0,
+    cancelled: 0,
+    skipped: 0,
+    pending: 0,
+    started_at: 1_700_000_000,
+    finished_at: 1_700_000_045,
+    ...overrides,
+  };
+}
+
+/** The demo workspace's recent workflow history, newest first. */
+export function makeWorkflowHistory(): WorkflowSummaryView[] {
+  return [
+    makeWorkflowSummary(),
+    makeWorkflowSummary({
+      workflow_id: 'wf-env-0',
+      state: 'partially_succeeded',
+      total: 3,
+      succeeded: 2,
+      failed: 1,
+      started_at: 1_699_999_000,
+      finished_at: 1_699_999_040,
+    }),
+  ];
 }

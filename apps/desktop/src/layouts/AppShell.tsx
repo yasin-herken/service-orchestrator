@@ -12,6 +12,7 @@ import { MigrationsPage } from '../pages/MigrationsPage';
 import { PlaceholderPage } from '../pages/PlaceholderPage';
 import { ServicesPage } from '../pages/ServicesPage';
 import { TasksPage } from '../pages/TasksPage';
+import { WorkflowsPage } from '../pages/WorkflowsPage';
 import type { NavIntent, PageId } from '../types/nav';
 
 /**
@@ -39,6 +40,7 @@ export function AppShell() {
     'builds',
     'libraries',
     'migrations',
+    'workflows',
     'tasks',
     'logs',
     'health',
@@ -50,13 +52,16 @@ export function AppShell() {
       <div className="app-shell__main">
         <Header page={page} />
         <main className="app-shell__content">
-          {page === 'dashboard' ? <DashboardPage /> : null}
+          {page === 'dashboard' ? <DashboardPage onNavigate={navigate} /> : null}
           {page === 'services' ? <ServicesPage onNavigate={navigate} /> : null}
           {page === 'git' ? <GitPage /> : null}
           {page === 'builds' ? <BuildsPage /> : null}
           {page === 'libraries' ? <LibrariesPage /> : null}
           {page === 'migrations' ? (
             <MigrationsPage intent={intent} onNavigate={navigate} />
+          ) : null}
+          {page === 'workflows' ? (
+            <WorkflowsPage intent={intent} onNavigate={navigate} />
           ) : null}
           {page === 'tasks' ? <TasksPage intent={intent} onNavigate={navigate} /> : null}
           {page === 'logs' ? <LogsPage intent={intent} /> : null}
