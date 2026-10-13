@@ -9,9 +9,11 @@ import type {
   BulkSummaryView,
   ConnectionSnapshot,
   DaemonStatus,
+  EnvironmentPlanView,
   GitStatusView,
   GitSyncMode,
   GitSyncPreview,
+  GroupView,
   HealthDetailView,
   HealthRowView,
   LibraryDependentView,
@@ -21,6 +23,8 @@ import type {
   MigrationRowView,
   MigrationStatusView,
   OperationOutcome,
+  PrepareEnvironmentInput,
+  ProfileView,
   RepositoryInspectionView,
   RepositorySummary,
   ServiceDetail,
@@ -28,6 +32,8 @@ import type {
   TaskView,
   VersionAlignmentView,
   WorkflowCancellationView,
+  WorkflowStatusView,
+  WorkflowSummaryView,
   WorkspaceStatus,
   WorkspaceSummary,
   WorkflowView,
@@ -206,6 +212,32 @@ export interface OrchestratorDesktopApi {
   listTasks(limit?: number): Promise<TaskView[]>;
   /** One workflow's declared steps and dependency edges. */
   getWorkflow(workflowId: string): Promise<WorkflowView>;
+  /** The workspace's profiles, expanded with their resolved services. */
+  listProfiles(workspaceId: string): Promise<ProfileView[]>;
+  /** One profile, validated against its workspace. */
+  getProfile(workspaceId: string, profileId: string): Promise<ProfileView>;
+  /** The workspace's service groups with their members. */
+  listGroups(workspaceId: string): Promise<GroupView[]>;
+  /** One service group, validated against its workspace. */
+  getGroup(workspaceId: string, groupId: string): Promise<GroupView>;
+  /**
+   * A read-only environment plan for a selection.
+   *
+   * Planning executes nothing; the daemon computes the phases, steps, and
+   * dependency closure from configuration (`tasks/022.md` §12).
+   */
+  planPrepareEnvironment(input: PrepareEnvironmentInput): Promise<EnvironmentPlanView>;
+  /**
+   * Schedules the prepare-environment workflow for a selection.
+   *
+   * The daemon re-validates the request and its policy at execution time; the
+   * client-side flags are never treated as authorization.
+   */
+  prepareEnvironment(input: PrepareEnvironmentInput): Promise<OperationOutcome>;
+  /** A live snapshot of one workflow's phases, steps, and failures. */
+  getWorkflowStatus(workflowId: string): Promise<WorkflowStatusView>;
+  /** Bounded workspace-scoped workflow history, newest first. */
+  listWorkflows(workspaceId: string, limit?: number): Promise<WorkflowSummaryView[]>;
   /** A workspace's migration-enabled services with their latest task. */
   listMigrations(workspaceId: string): Promise<MigrationRowView[]>;
   /** One service's configuration-derived migration snapshot. */
@@ -361,6 +393,21 @@ export const desktopApi: OrchestratorDesktopApi = {
     call<WorkflowCancellationView>('cancel_workflow', { workflowId }),
   listTasks: (limit) => call<TaskView[]>('list_tasks', { limit }),
   getWorkflow: (workflowId) => call<WorkflowView>('get_workflow', { workflowId }),
+  listProfiles: (workspaceId) =>
+    call<ProfileView[]>('list_profiles', { workspaceId }),
+  getProfile: (workspaceId, profileId) =>
+    call<ProfileView>('get_profile', { workspaceId, profileId }),
+  listGroups: (workspaceId) => call<GroupView[]>('list_groups', { workspaceId }),
+  getGroup: (workspaceId, groupId) =>
+    call<GroupView>('get_group', { workspaceId, groupId }),
+  planPrepareEnvironment: (input) =>
+    call<EnvironmentPlanView>('plan_prepare_environment', { input }),
+  prepareEnvironment: (input) =>
+    call<OperationOutcome>('prepare_environment', { input }),
+  getWorkflowStatus: (workflowId) =>
+    call<WorkflowStatusView>('get_workflow_status', { workflowId }),
+  listWorkflows: (workspaceId, limit) =>
+    call<WorkflowSummaryView[]>('list_workflows', { workspaceId, limit }),
   listMigrations: (workspaceId) =>
     call<MigrationRowView[]>('list_migrations', { workspaceId }),
   getMigrationStatus: (serviceId) =>

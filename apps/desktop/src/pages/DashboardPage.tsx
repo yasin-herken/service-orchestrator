@@ -5,6 +5,7 @@ import { useTaskEvents } from '../context/TaskEventsContext';
 import { useWorkspaces } from '../context/WorkspaceContext';
 import { useAsync } from '../hooks/useAsync';
 import { desktopApi } from '../services/desktopApi';
+import type { PageId } from '../types/nav';
 import { countServices } from '../utils/serviceQuery';
 import { formatClock, pluralize } from '../utils/format';
 
@@ -12,9 +13,15 @@ import { formatClock, pluralize } from '../utils/format';
  * The read-only dashboard: real daemon data only (`tasks/018.md` §16).
  *
  * Counts are derived from the active workspace's service statuses — nothing is
- * hard-coded.
+ * hard-coded. It also offers the workflow entry point: preparing an
+ * environment from the dashboard simply navigates to the one Workflows screen
+ * rather than duplicating any workflow logic here (`tasks/022.md` §6).
  */
-export function DashboardPage() {
+export function DashboardPage({
+  onNavigate,
+}: {
+  onNavigate?: (page: PageId) => void;
+} = {}) {
   const { workspaces, activeWorkspace, loading, error, reload } = useWorkspaces();
   const { snapshot } = useConnection();
   const connected = snapshot.state === 'connected';
@@ -61,6 +68,19 @@ export function DashboardPage() {
   return (
     <div className="page">
       <section className="page__section" aria-label="Workspace overview">
+        <div className="toolbar">
+          <span className="toolbar__count">Workspace overview</span>
+          <div className="bulk-bar__actions">
+            <button
+              type="button"
+              className="button button--small button--primary"
+              disabled={!connected}
+              onClick={() => onNavigate?.('workflows')}
+            >
+              Prepare environment…
+            </button>
+          </div>
+        </div>
         <div className="stat-grid">
           <StatCard
             label="Active workspace"

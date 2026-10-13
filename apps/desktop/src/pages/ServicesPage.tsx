@@ -20,7 +20,7 @@ import {
 } from '../hooks/useServiceActions';
 import { desktopApi } from '../services/desktopApi';
 import type { ServiceDetail, ServiceSummary } from '../types/models';
-import type { PageId } from '../types/nav';
+import type { NavIntent, PageId } from '../types/nav';
 import { pluralize } from '../utils/format';
 import {
   filterServices,
@@ -68,7 +68,11 @@ interface PendingConfirmation {
  * single lifecycle actions, service details, confirmations, and real task
  * progress — all through the shared daemon (`tasks/019.md` §6–§19, §25–§30).
  */
-export function ServicesPage({ onNavigate }: { onNavigate?: (page: PageId) => void }) {
+export function ServicesPage({
+  onNavigate,
+}: {
+  onNavigate?: (page: PageId, intent?: NavIntent) => void;
+}) {
   const {
     activeWorkspace,
     activeWorkspaceId,
@@ -343,6 +347,20 @@ export function ServicesPage({ onNavigate }: { onNavigate?: (page: PageId) => vo
             Clear filters
           </button>
         ) : null}
+        <div className="bulk-bar__actions">
+          <button
+            type="button"
+            className="button button--small button--primary"
+            disabled={!connected}
+            onClick={() =>
+              onNavigate?.('workflows', {
+                workflowServiceIds: selectedServices.map((service) => service.id),
+              })
+            }
+          >
+            Prepare workflow…
+          </button>
+        </div>
       </div>
 
       {!connected ? (

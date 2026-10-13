@@ -35,6 +35,7 @@ pub mod queries;
 mod state;
 pub mod tasks;
 mod validation;
+pub mod workflow;
 
 use tauri::{Manager, Url};
 
@@ -141,6 +142,14 @@ pub fn run() {
             commands::cancel_workflow,
             commands::list_tasks,
             commands::get_workflow,
+            commands::list_profiles,
+            commands::get_profile,
+            commands::list_groups,
+            commands::get_group,
+            commands::plan_prepare_environment,
+            commands::prepare_environment,
+            commands::get_workflow_status,
+            commands::list_workflows,
             commands::list_migrations,
             commands::get_migration_status,
             commands::validate_migration,

@@ -663,3 +663,235 @@ export const TASK_EVENT = 'daemon://task';
 
 /** Event name carrying a `LogStreamEvent` from the Rust adapter. */
 export const LOG_EVENT = 'daemon://log';
+
+// -- profiles, groups, and environment workflows -------------------------------
+
+/**
+ * A configured developer profile expanded for its workspace (`ProfileView`).
+ *
+ * `resolved_services` is configuration-derived (explicit services plus the
+ * members of referenced groups); the full dependency closure comes from the
+ * read-only plan, never from the frontend (`tasks/022.md` §8, §12).
+ */
+export interface ProfileView {
+  id: string;
+  display_name: string;
+  description: string | null;
+  workspace_id: string;
+  /** Services referenced directly by the profile. */
+  services: string[];
+  /** Groups referenced by the profile. */
+  groups: string[];
+  /** Explicit services plus referenced group members, deduplicated. */
+  resolved_services: string[];
+}
+
+/** A configured service group expanded for its workspace (`GroupView`). */
+export interface GroupView {
+  id: string;
+  display_name: string;
+  description: string | null;
+  workspace_id: string;
+  /** Member services, in configured order. */
+  services: string[];
+}
+
+/** One planned step of an environment preparation (`PlanStepView`). */
+export interface PlanStepView {
+  /** The phase the step belongs to (`git-sync`, `migration`, …). */
+  phase: string;
+  /** The task kind the step performs (`git_sync`, `liquibase`, …). */
+  task: string;
+  /** The service the step acts on, when any. */
+  service: string | null;
+  /** The library the step acts on, when any. */
+  library: string | null;
+  /** A human-readable description. */
+  description: string;
+}
+
+/** A planned phase and its steps (`PlanPhaseView`). */
+export interface PlanPhaseView {
+  /** The phase label, in canonical execution order. */
+  kind: string;
+  /** The planned steps of the phase, in planned order. */
+  steps: PlanStepView[];
+}
+
+/**
+ * The daemon's read-only plan for preparing a development environment
+ * (`EnvironmentPlanView`).
+ *
+ * Every field is copied from the application core: the GUI renders this
+ * backend-generated plan and never reconstructs dependency or execution logic
+ * (`tasks/022.md` §12, §13).
+ */
+export interface EnvironmentPlanView {
+  workspace_id: string;
+  /** The branch that would be checked out, if any. */
+  target_branch: string | null;
+  /** Services the caller explicitly selected. */
+  selected_services: string[];
+  /** Every service that would participate, including dependencies. */
+  resolved_services: string[];
+  /** Services added automatically as required dependencies. */
+  included_dependencies: string[];
+  /** Libraries that would be prepared, in dependency order. */
+  required_libraries: string[];
+  /** Planned phases, in execution order. */
+  phases: PlanPhaseView[];
+  /** Total number of steps across every phase. */
+  step_count: number;
+  /** Whether any step requires destructive authorization. */
+  requires_destructive_authorization: boolean;
+  /** Non-fatal observations reported by the planner. */
+  warnings: string[];
+}
+
+/** Per-phase progress within a running workflow (`WorkflowPhaseProgressView`). */
+export interface WorkflowPhaseProgressView {
+  /** The phase label. */
+  phase: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  /** Tasks still queued, blocked, or running. */
+  pending: number;
+}
+
+/** A structured failure within a workflow (`WorkflowTaskFailureView`). */
+export interface WorkflowTaskFailureView {
+  task_id: string;
+  /** The task kind label. */
+  kind: string;
+  service: string | null;
+  library: string | null;
+  /** A stable, machine-readable error code. */
+  code: string;
+  message: string;
+}
+
+/**
+ * Aggregate workflow states reported by the daemon.
+ *
+ * The state is derived by the core from the workflow's tasks; the GUI never
+ * computes one itself (`tasks/022.md` §19, §25).
+ */
+export type WorkflowRunState =
+  | 'queued'
+  | 'running'
+  | 'succeeded'
+  | 'partially_succeeded'
+  | 'failed'
+  | 'cancelled';
+
+/** Human-readable labels for `WorkflowRunState`. */
+export const WORKFLOW_RUN_STATE_LABELS: Record<WorkflowRunState, string> = {
+  queued: 'Queued',
+  running: 'Running',
+  succeeded: 'Succeeded',
+  partially_succeeded: 'Partially succeeded',
+  failed: 'Failed',
+  cancelled: 'Cancelled',
+};
+
+/** States a workflow can no longer leave. */
+const WORKFLOW_TERMINAL_STATES: ReadonlySet<string> = new Set([
+  'succeeded',
+  'partially_succeeded',
+  'failed',
+  'cancelled',
+]);
+
+/** Whether a workflow state is terminal. */
+export function isTerminalWorkflowState(state: string): boolean {
+  return WORKFLOW_TERMINAL_STATES.has(state);
+}
+
+/**
+ * An aggregated, structured status for one workflow (`WorkflowStatusView`).
+ *
+ * Counts, phase progress, and structured failures come straight from the
+ * application core; the GUI never fabricates percentages or outcomes.
+ */
+export interface WorkflowStatusView {
+  workflow_id: string;
+  /** The workflow kind label (`prepare_environment`, …). */
+  kind: string;
+  /** The aggregate state (`queued`, `running`, `partially_succeeded`, …). */
+  state: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  skipped: number;
+  /** Tasks still queued, blocked, or running. */
+  pending: number;
+  /** When the first task started, seconds since the epoch. */
+  started_at: number | null;
+  /** When the last task finished, seconds since the epoch. */
+  finished_at: number | null;
+  /** Progress per phase, in canonical phase order. */
+  phases: WorkflowPhaseProgressView[];
+  /** Every failed task, with its structured error. */
+  failures: WorkflowTaskFailureView[];
+}
+
+/**
+ * One workflow on the bounded, workspace-scoped history list
+ * (`WorkflowSummaryView`).
+ *
+ * History is derived from the task engine's retained tasks: it is bounded and
+ * disappears with daemon restarts — nothing is persisted or invented.
+ */
+export interface WorkflowSummaryView {
+  workflow_id: string;
+  kind: string;
+  state: string;
+  workspace_id: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  cancelled: number;
+  skipped: number;
+  pending: number;
+  started_at: number | null;
+  finished_at: number | null;
+}
+
+/**
+ * Input for planning and executing an environment workflow
+ * (`PrepareEnvironmentInput`).
+ *
+ * Exactly one of `services`, `profile`, or `group` must be set; the daemon
+ * rejects anything else. Omitted flags fall back to the adapter's safe
+ * defaults (sync and dependency inclusion on; migrations, library builds,
+ * service builds, and startup off), and no confirmation flag exists on this
+ * path — the daemon re-validates policy at execution time
+ * (`tasks/022.md` §11, §32).
+ */
+export interface PrepareEnvironmentInput {
+  workspace_id: string;
+  /** Explicitly selected service identifiers. */
+  services?: string[];
+  /** Profile identifier (mutually exclusive with `services`/`group`). */
+  profile?: string;
+  /** Group identifier (mutually exclusive with `services`/`profile`). */
+  group?: string;
+  /** An optional branch to check out after synchronizing. */
+  branch?: string;
+  /** Synchronize repositories first. Defaults to `true`. */
+  sync?: boolean;
+  /** Include the required dependency closure. Defaults to `true`. */
+  include_dependencies?: boolean;
+  /** Build the required libraries. Defaults to `false`. */
+  build_libraries?: boolean;
+  /** Run Liquibase migrations. Defaults to `false`. */
+  run_liquibase?: boolean;
+  /** Build the selected services. Defaults to `false`. */
+  build?: boolean;
+  /** Start the selected services. Defaults to `false`. */
+  start?: boolean;
+  /** Wait for health after starting. Defaults to `true`. */
+  wait_for_health?: boolean;
+}

@@ -8,8 +8,10 @@ import {
   makeBuildTargets,
   makeConnected,
   makeDaemonStatus,
+  makeEnvironmentPlan,
   makeGitStatus,
   makeGitSyncPreview,
+  makeGroup,
   makeHealthDetail,
   makeHealthRows,
   makeInspection,
@@ -18,6 +20,7 @@ import {
   makeMigrationRows,
   makeMigrationStatus,
   makeOperationOutcome,
+  makeProfile,
   makeRepositories,
   makeServiceDetail,
   makeServices,
@@ -25,6 +28,8 @@ import {
   makeTasks,
   makeVerification,
   makeWorkflow,
+  makeWorkflowHistory,
+  makeWorkflowStatus,
   makeWorkspace,
   makeWorkspaceStatus,
 } from './fixtures';
@@ -199,4 +204,19 @@ export function happyPathDefaults(): void {
     makeOperationOutcome({ kind: 'readiness_check' }),
   );
   mockDesktopApi.getLogs.mockResolvedValue(makeLogPage());
+  mockDesktopApi.listProfiles.mockResolvedValue([makeProfile()]);
+  mockDesktopApi.getProfile.mockResolvedValue(makeProfile());
+  mockDesktopApi.listGroups.mockResolvedValue([makeGroup()]);
+  mockDesktopApi.getGroup.mockResolvedValue(makeGroup());
+  mockDesktopApi.planPrepareEnvironment.mockResolvedValue(makeEnvironmentPlan());
+  mockDesktopApi.prepareEnvironment.mockResolvedValue(
+    makeOperationOutcome({
+      status: 'workflow',
+      task_id: null,
+      workflow_id: 'wf-env-1',
+      kind: 'prepare_environment',
+    }),
+  );
+  mockDesktopApi.getWorkflowStatus.mockResolvedValue(makeWorkflowStatus());
+  mockDesktopApi.listWorkflows.mockResolvedValue(makeWorkflowHistory());
 }

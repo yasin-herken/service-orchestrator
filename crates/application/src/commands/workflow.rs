@@ -760,11 +760,15 @@ impl Application {
                     if service.health_checks.is_empty() {
                         continue;
                     }
+                    // The health executor decodes its target from the step's
+                    // parameters exactly as the lifecycle executors do, so the
+                    // step must carry the same resolved service target.
+                    let target = self.service_runtime_target(workspace, service)?;
                     composer.add(
                         TaskKind::HealthCheck,
                         vec![step],
                         Some(format!("health {id}")),
-                        BTreeMap::new(),
+                        target.to_parameters(),
                         Some(id.clone()),
                         None,
                     );

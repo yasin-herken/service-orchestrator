@@ -1018,7 +1018,7 @@ SDK `rmcp` 3.5.1.
 
 The `apps/desktop` application is the graphical interface (`docs/desktop-gui.md`,
 `docs/adr/018-tauri-desktop-gui.md`, `docs/adr/019-desktop-service-management.md`,
-`docs/adr/020-desktop-git-build-library.md`).
+`docs/adr/020-desktop-git-build-library.md`, `tasks/022.md`).
 It is launched with `npm run tauri dev` during development; the Tauri crate is
 deliberately its own Cargo workspace, excluded from the root one, so the
 `wry`/`tao`/`objc` dependency tree is compiled only for the GUI.
@@ -1102,6 +1102,22 @@ deliberately its own Cargo workspace, excluded from the root one, so the
   `daemon://log` events). Each maps onto an existing core capability: there is
   no second migration manager, health manager, task engine, or log storage, and
   the TUI and MCP observe the same authoritative state (`tasks/021.md` §2, §43).
+- **Workflow management and profile commands.** The adapter exposes profile and
+  group reads (`list_profiles`, `get_profile`, `list_groups`, `get_group`,
+  scoped to the owning workspace), environment planning and execution
+  (`plan_prepare_environment` and `prepare_environment`, which share one request
+  mapping so a preview cannot drift from execution), aggregated status
+  (`get_workflow_status`), and a bounded, workspace-scoped history window
+  (`list_workflows`). Planning and execution run entirely in the daemon's
+  Application Core; the adapter holds no dependency resolution, scheduling, Git,
+  Maven, npm, or Liquibase logic, and the frontend's confirmation flags are never
+  treated as authorization (`tasks/022.md` §12, §32). Because the daemon keeps no
+  persisted workflow table, `list_workflows` derives its window from the engine's
+  active and retained tasks and reads each workflow's workspace from the resolved
+  parameters of its steps. Documenting this path surfaced one small core fix:
+  the composer now attaches the resolved service target parameters to the
+  in-workflow health step, so the `HealthCheck` executor can decode its target
+  exactly as it does for a manual check.
 - **Forwarded events.** The adapter subscribes to the daemon's task-event
   stream and re-emits events verbatim as `daemon://task`, plus a synthetic
   `Lagged` payload when the subscription falls behind; the frontend never polls
