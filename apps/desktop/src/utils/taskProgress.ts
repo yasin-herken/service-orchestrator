@@ -1,11 +1,9 @@
 import type { TrackedTask } from '../context/TaskEventsContext';
-
-/** Task statuses that will not change again. */
-const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'skipped']);
+import { isTerminalTaskStatus } from './taskStatus';
 
 /** Whether a task status is terminal. */
 export function isTerminalStatus(status: string): boolean {
-  return TERMINAL.has(status);
+  return isTerminalTaskStatus(status);
 }
 
 /** The service ids that currently have a non-terminal (busy) task. */

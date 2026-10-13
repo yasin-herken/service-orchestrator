@@ -363,6 +363,18 @@ tasks are grouped by the `workflow` id the daemon attaches to each `Task`.
 percentages and never marks an operation successful on its own
 (`tasks/019.md` §24, §25; `tasks/020.md` §10, §17, §27).
 
+**Terminal states are never overwritten.** The tracked-task map and its
+`terminalRevision` live in a single state object, so a terminal transition and
+its reload are applied together. A settled task is frozen: a late `TaskProgress`
+frame — the engine can retain a reporter and emit one after a terminal event — a
+duplicate `TaskSucceeded`, or any out-of-order update can neither move a settled
+task back to a non-terminal state nor trigger a second authoritative reload. A
+task created already terminal counts once, and a replayed `TaskCreated` for a
+settled task counts nothing. This is the smallest reliable ordering guard,
+because the daemon's forwarded stream carries no per-event sequence number
+(`tasks/024.md` §20, §24). A fresh snapshot on reconnect remains the backstop for
+any event the local subscription dropped.
+
 ## 6. Connection model
 
 The adapter is the **single source of truth** for connection state, so the
@@ -932,6 +944,12 @@ three screens use **one** task-monitoring implementation, not three:
   `cancel_workflow`. Cancellation is best-effort and never rolls back work
   already done, so the GUI reports whatever the engine observed — including
   partial completion — rather than assuming a rollback (§29).
+- **One shared status vocabulary.** The services, Git, builds, and libraries
+  tables derive their "last operation" label and their terminal-status
+  classification from one source (`src/utils/taskStatus.ts` and
+  `utils/format.ts`), so the same task reads identically wherever it appears.
+  Tracked task state always comes from the daemon's forwarded events, never from
+  a second registry (`tasks/024.md` §5, §12, §24).
 
 ## 21. Error handling and confirmations
 
@@ -950,14 +968,20 @@ three screens use **one** task-monitoring implementation, not three:
   others; the Git inspection view keeps a structured error per repository.
 - **No optimistic success.** The outcome recorded is the daemon's; a row's state
   only changes when the daemon reports it.
+- **Detail panels never go blank.** While a detail lookup is in flight the panel
+  shows a spinner; a failed lookup shows the structured `{ code, message }` with
+  a Retry that re-reads the daemon, and only a genuinely absent observation
+  shows an explicit empty state. A workflow lookup failure on the Tasks detail
+  is surfaced the same way instead of leaving a silent gap (§13, §15).
 
 ## 22. Keyboard shortcuts
 
 | Key | Context | Effect |
 | --- | --- | --- |
 | `Tab` / `Shift+Tab` | everywhere | move focus (visible focus ring) |
-| `Space` | a focused entity row | toggle that row's selection |
+| `Space` | a focused selectable entity row | toggle that row's selection |
 | `Enter` | a focused entity row | open the detail panel |
+| `Space` / `Enter` | a focused row with no selection (Tasks, Health) | open the detail panel |
 | `Space` / `Enter` | a focused button | activate it |
 | `Esc` | any dialog | close it (cancel) |
 
@@ -966,6 +990,11 @@ selection, busy, and state as text. Tables use `scope`-ed headers and captions
 (visually hidden where a heading is redundant), status is never conveyed by
 colour alone, and every toolbar count is announced through an `aria-live`
 region.
+
+Every dialog moves focus to its first control when it opens, traps
+`Tab`/`Shift+Tab` inside the dialog, and restores focus to the element that
+opened it when it closes, so a keyboard user cannot tab behind a modal
+(`tasks/024.md` §9, §34).
 
 ## 23. Performance
 
@@ -1064,6 +1093,16 @@ Frontend (`apps/desktop`):
   confirmation, partial-success results, bounded history, workspace-scope
   reset, plan failures, and the daemon-disconnect behaviour that disables
   execution while preserving the workflow id.
+- `tasks/024.md` coverage: task-event ordering and terminal-state freezing
+  (`context/taskEvents.test.tsx` — a late progress frame and a duplicate
+  terminal event leave a settled task and its `terminalRevision` unchanged);
+  dialog focus trap and restore (`components/Dialog.test.tsx`); the structured
+  health-detail error with a working Retry (`pages/health-page.test.tsx`); the
+  structured workflow-load error on the Tasks detail
+  (`pages/tasks-page.test.tsx`); stable reveal-row identity in the environment
+  editor (`components/configuration/EnvironmentEditor.test.tsx`); and the shared
+  terminal-status/`operationLabel` sources (`utils/taskStatus.test.ts`,
+  `utils/format.test.ts`).
 
 Commands used for validation:
 
@@ -1110,6 +1149,12 @@ npm run build && npm run typecheck && npm run test
   dropped count for those streams; a `lagged` event that *does* reach the
   adapter is shown verbatim, but an end-to-end dropped counter requires a small
   daemon change and is deferred.
+- **Daemon-side task-event drops are likewise not observable.** A slow task
+  subscriber's lagged events are silently dropped by the daemon rather than
+  forwarded as a `Lagged` count on that path. The GUI therefore relies on
+  terminal-state freezing and the snapshot taken on reconnect (§5) for
+  correctness, rather than on receiving every intermediate progress frame; a
+  missed progress frame cannot corrupt a settled task or its one reload.
 - **Only service logs stream in realtime.** The daemon's subscription surface
   is per-service, so the workspace and task scopes follow by polling the cursor
   once a second. This is a bounded, explicit fallback — not a second log system
@@ -1285,7 +1330,10 @@ still refuse.
 Environment variables can be marked **secret**. In the editor a secret value is
 masked (`type=password`) until the developer explicitly reveals it, and the daemon
 redacts it (`***`) in diffs and logs while writing it back verbatim when
-unchanged.
+unchanged. Each row's reveal state is keyed by a stable row id, not by its
+position, so removing or reordering a row never reveals a different secret, and
+the reveal control's accessible name follows the action it performs
+(`Reveal`/`Hide`) (`tasks/024.md` §31, §46).
 
 ### Concurrency and disconnection
 

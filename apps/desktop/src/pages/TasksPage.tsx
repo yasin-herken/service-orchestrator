@@ -457,6 +457,7 @@ export function TasksPage({
           tracked={trackedById.get(selected.id) ?? null}
           workflow={workflow.data ?? null}
           workflowLoading={workflow.loading}
+          workflowError={workflow.error}
           siblings={siblings}
           cancelling={cancelling}
           cancelResult={cancelResult}

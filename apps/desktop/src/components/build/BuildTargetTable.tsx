@@ -2,13 +2,8 @@ import { useEffect, useRef } from 'react';
 
 import type { TrackedTask } from '../../context/TaskEventsContext';
 import type { BuildTargetSummary } from '../../types/models';
+import { operationLabel } from '../../utils/format';
 import { buildOperationLabel, exposedOperations } from './BuildCapabilitiesList';
-
-/** A concise label for the last-operation cell. */
-function operationLabel(task: TrackedTask): string {
-  const status = task.status.charAt(0).toUpperCase() + task.status.slice(1);
-  return `${task.kind} · ${status}`;
-}
 
 /** Whether a build target can actually be built by the daemon today. */
 export function canBuild(target: BuildTargetSummary): boolean {

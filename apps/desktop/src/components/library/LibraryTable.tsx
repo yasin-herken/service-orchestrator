@@ -3,12 +3,7 @@ import { useEffect, useRef } from 'react';
 import { GitBadge } from '../StatusBadge';
 import type { TrackedTask } from '../../context/TaskEventsContext';
 import type { LibrarySummary } from '../../types/models';
-
-/** A concise label for the last-operation cell. */
-function operationLabel(task: TrackedTask): string {
-  const status = task.status.charAt(0).toUpperCase() + task.status.slice(1);
-  return `${task.kind} · ${status}`;
-}
+import { operationLabel } from '../../utils/format';
 
 /**
  * The library table: stable-id selection, artifact coordinates, configured

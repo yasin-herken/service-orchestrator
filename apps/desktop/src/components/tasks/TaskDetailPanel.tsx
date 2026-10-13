@@ -1,7 +1,7 @@
 import { LogViewer } from './LogViewer';
 import { TaskStatusIndicator, isTerminalTaskStatus, taskStatusLabel } from './TaskStatusIndicator';
 import type { TrackedTask } from '../../context/TaskEventsContext';
-import type { TaskView, WorkflowView } from '../../types/models';
+import type { DesktopError, TaskView, WorkflowView } from '../../types/models';
 import { formatDateTime, formatMillis } from '../../utils/format';
 
 /** A single workflow relationship, rendered from real ids — never names. */
@@ -23,6 +23,7 @@ export function TaskDetailPanel({
   tracked,
   workflow,
   workflowLoading,
+  workflowError,
   siblings,
   cancelling,
   cancelResult,
@@ -36,6 +37,8 @@ export function TaskDetailPanel({
   tracked: TrackedTask | null;
   workflow: WorkflowView | null;
   workflowLoading: boolean;
+  /** Structured failure of the workflow lookup, when it failed. */
+  workflowError: DesktopError | null;
   /** Other tasks of the same workflow, from the same bounded listing. */
   siblings: TaskView[];
   cancelling: boolean;
@@ -173,6 +176,13 @@ export function TaskDetailPanel({
         <div className="detail-panel__block">
           <h3 className="detail-panel__block-title">Workflow relationships</h3>
           {workflowLoading ? <p className="muted">Loading workflow…</p> : null}
+          {!workflowLoading && workflowError ? (
+            <div className="error-details" role="alert">
+              <p className="error-details__label">Could not load the workflow</p>
+              <p className="error-details__message">{workflowError.message}</p>
+              <p className="error-details__code">{workflowError.code}</p>
+            </div>
+          ) : null}
           {workflow ? (
             <ul className="detail-list detail-list--mono">
               {workflow.steps.map((step) => (
@@ -182,7 +192,7 @@ export function TaskDetailPanel({
                 </li>
               ))}
             </ul>
-          ) : !workflowLoading ? (
+          ) : !workflowLoading && !workflowError ? (
             <p className="muted">The daemon did not report this workflow.</p>
           ) : null}
           {siblings.length > 0 ? (

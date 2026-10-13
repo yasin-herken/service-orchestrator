@@ -70,7 +70,8 @@ export function HealthPage({
   const [detailId, setDetailId] = useState<string | null>(null);
   const [detail, setDetail] = useState<HealthDetailView | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
-  const [detailError, setDetailError] = useState<string | null>(null);
+  const [detailError, setDetailError] = useState<DesktopError | null>(null);
+  const [detailNonce, setDetailNonce] = useState(0);
   const [submitted, setSubmitted] = useState<SubmittedHealth | null>(null);
   const [failure, setFailure] = useState<{ title: string; error: DesktopError } | null>(
     null,
@@ -115,7 +116,7 @@ export function HealthPage({
       },
       (cause: unknown) => {
         if (!cancelled) {
-          setDetailError(toDesktopError(cause).message);
+          setDetailError(toDesktopError(cause));
           setDetailLoading(false);
         }
       },
@@ -123,7 +124,7 @@ export function HealthPage({
     return () => {
       cancelled = true;
     };
-  }, [detailId, connected, activeWorkspaceId, terminalRevision]);
+  }, [detailId, connected, activeWorkspaceId, detailNonce, terminalRevision]);
 
   /** Schedules one health operation and tracks it in the progress dialog. */
   const runOperation = useCallback(
@@ -247,6 +248,7 @@ export function HealthPage({
           onCheck={() => void runOperation(detailId, 'check')}
           onReadiness={() => void runOperation(detailId, 'readiness')}
           onViewLogs={() => onNavigate?.('logs', { serviceId: detailId })}
+          onRetry={() => setDetailNonce((value) => value + 1)}
         />
       ) : null}
 

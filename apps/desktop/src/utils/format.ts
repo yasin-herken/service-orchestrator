@@ -1,3 +1,5 @@
+import { taskStatusLabel } from './taskStatus';
+
 /** Formats a Unix timestamp (seconds) as a local `HH:MM` clock string. */
 export function formatClock(unixSeconds: number): string {
   const date = new Date(unixSeconds * 1000);
@@ -57,4 +59,15 @@ export function formatMillis(millis: number | null): string {
     return `${Math.round(millis)} ms`;
   }
   return formatDuration(millis / 1_000);
+}
+
+/**
+ * A compact "last operation" label for a tracked task: its kind and status
+ * (`build_service · Succeeded`).
+ *
+ * One shared implementation so the services, Git, builds, and libraries tables
+ * never drift from each other (`tasks/024.md` §5, §12).
+ */
+export function operationLabel(task: { kind: string; status: string }): string {
+  return `${task.kind} · ${taskStatusLabel(task.status)}`;
 }

@@ -119,6 +119,28 @@ describe('health details', () => {
   });
 });
 
+describe('health detail loading and errors', () => {
+  it('shows a structured error with a working retry instead of a blank panel', async () => {
+    mockDesktopApi.getHealth.mockRejectedValueOnce({
+      code: 'DAEMON_UNAVAILABLE',
+      message: 'the daemon is not running',
+    });
+    const user = await openHealth();
+
+    await user.click(screen.getAllByRole('row')[1]);
+    const panel = await screen.findByRole('region', { name: 'Health detail' });
+
+    expect(await within(panel).findByText('the daemon is not running')).toBeInTheDocument();
+    expect(within(panel).getByText('DAEMON_UNAVAILABLE')).toBeInTheDocument();
+
+    // Retry re-reads the daemon's observation; the panel recovers to the real
+    // detail rather than staying on the error (`tasks/024.md` §13, §15).
+    await user.click(within(panel).getByRole('button', { name: 'Retry' }));
+    expect(await within(panel).findByText('Runtime and health')).toBeInTheDocument();
+    expect(within(panel).queryByText('the daemon is not running')).not.toBeInTheDocument();
+  });
+});
+
 describe('manual health checks', () => {
   it('runs a check through the daemon task engine, never from React', async () => {
     const user = await openHealth();

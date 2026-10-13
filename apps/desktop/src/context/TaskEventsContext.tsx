@@ -11,6 +11,7 @@ import {
 import { desktopApi } from '../services/desktopApi';
 import type { TaskEvent } from '../types/models';
 import { describeTaskEvent, taskEventVariant } from '../utils/taskEvents';
+import { isTerminalTaskStatus } from '../utils/taskStatus';
 
 /** One entry in the bounded task-activity feed. */
 export interface TaskActivityEntry {
@@ -84,8 +85,17 @@ const MAX_TASKS = 200;
 /** How many workflow records are retained. */
 const MAX_WORKFLOWS = 50;
 
-/** Task statuses that mean the task will not change again. */
-const TERMINAL_STATUSES = new Set(['succeeded', 'failed', 'cancelled', 'skipped']);
+/**
+ * The tracked-task map plus the reload revision, kept in one state object so a
+ * terminal transition and its revision bump are applied atomically and a
+ * duplicate terminal event can never bump the revision twice
+ * (`tasks/024.md` §20, §24).
+ */
+interface TaskTrackingState {
+  byId: Map<string, TrackedTask>;
+  /** Increments once per task that newly reaches a terminal state. */
+  revision: number;
+}
 
 const TaskEventsContext = createContext<TaskEventsContextValue | null>(null);
 
@@ -177,7 +187,7 @@ function trimTasks(tasks: Map<string, TrackedTask>): Map<string, TrackedTask> {
     return tasks;
   }
   const settled = [...tasks.values()]
-    .filter((task) => TERMINAL_STATUSES.has(task.status))
+    .filter((task) => isTerminalTaskStatus(task.status))
     .sort((a, b) => a.updatedAt - b.updatedAt);
   const trimmed = new Map(tasks);
   for (const task of settled) {
@@ -215,9 +225,11 @@ function trimWorkflows(
  */
 export function TaskEventsProvider({ children }: { children: ReactNode }) {
   const [recent, setRecent] = useState<TaskActivityEntry[]>([]);
-  const [tasks, setTasks] = useState<Map<string, TrackedTask>>(new Map());
+  const [tracking, setTracking] = useState<TaskTrackingState>(() => ({
+    byId: new Map(),
+    revision: 0,
+  }));
   const [workflows, setWorkflows] = useState<Map<string, TrackedWorkflow>>(new Map());
-  const [terminalRevision, setTerminalRevision] = useState(0);
 
   const applyEvent = useCallback((event: TaskEvent) => {
     const variant = taskEventVariant(event);
@@ -265,14 +277,20 @@ export function TaskEventsProvider({ children }: { children: ReactNode }) {
       if (!parsed) {
         return;
       }
-      setTasks((current) => {
-        const next = new Map(current);
+      setTracking((current) => {
+        const existing = current.byId.get(parsed.id);
+        const next = new Map(current.byId);
         next.set(parsed.id, parsed);
-        return trimTasks(next);
+        // A freshly created task that is already terminal counts once; a
+        // duplicate `TaskCreated` for an already-settled task counts nothing.
+        const becameTerminal =
+          isTerminalTaskStatus(parsed.status) &&
+          !(existing !== undefined && isTerminalTaskStatus(existing.status));
+        return {
+          byId: trimTasks(next),
+          revision: current.revision + (becameTerminal ? 1 : 0),
+        };
       });
-      if (TERMINAL_STATUSES.has(parsed.status)) {
-        setTerminalRevision((value) => value + 1);
-      }
       return;
     }
 
@@ -286,10 +304,17 @@ export function TaskEventsProvider({ children }: { children: ReactNode }) {
     const message =
       variant === 'TaskMessage' ? readString(body, 'message') : null;
 
-    setTasks((current) => {
-      const existing = current.get(id);
+    setTracking((current) => {
+      const existing = current.byId.get(id);
+      // A settled task is frozen: an executor can still emit progress after a
+      // terminal event, and a duplicate/out-of-order update must never move a
+      // terminal task back to a non-terminal state or trigger a second reload
+      // (`tasks/024.md` §20, §24).
+      if (existing !== undefined && isTerminalTaskStatus(existing.status)) {
+        return current;
+      }
       const kind = readKind(body.kind) ?? existing?.kind ?? 'unknown';
-      const next = new Map(current);
+      const next = new Map(current.byId);
       next.set(id, {
         id,
         kind,
@@ -312,12 +337,12 @@ export function TaskEventsProvider({ children }: { children: ReactNode }) {
           existing?.progressMessage ?? null,
         updatedAt: at,
       });
-      return trimTasks(next);
+      const becameTerminal = status !== null && isTerminalTaskStatus(status);
+      return {
+        byId: trimTasks(next),
+        revision: current.revision + (becameTerminal ? 1 : 0),
+      };
     });
-
-    if (status !== null && TERMINAL_STATUSES.has(status)) {
-      setTerminalRevision((value) => value + 1);
-    }
   }, []);
 
   useEffect(() => {
@@ -350,8 +375,8 @@ export function TaskEventsProvider({ children }: { children: ReactNode }) {
   }, [applyEvent]);
 
   const taskList = useMemo(
-    () => [...tasks.values()].sort((a, b) => b.updatedAt - a.updatedAt),
-    [tasks],
+    () => [...tracking.byId.values()].sort((a, b) => b.updatedAt - a.updatedAt),
+    [tracking.byId],
   );
   const workflowList = useMemo(
     () => [...workflows.values()].sort((a, b) => b.updatedAt - a.updatedAt),
@@ -363,9 +388,9 @@ export function TaskEventsProvider({ children }: { children: ReactNode }) {
       recent,
       tasks: taskList,
       workflows: workflowList,
-      terminalRevision,
+      terminalRevision: tracking.revision,
     }),
-    [recent, taskList, workflowList, terminalRevision],
+    [recent, taskList, workflowList, tracking.revision],
   );
 
   return <TaskEventsContext.Provider value={value}>{children}</TaskEventsContext.Provider>;
