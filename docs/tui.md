@@ -180,7 +180,7 @@ the cursor, uppercase acts on the whole selection.
 | `b` / `f` / `y` / `p` | Build / fetch / sync / pull |
 | `h` | Health check |
 | `l` | View logs |
-| `S` / `X` / `R` | Start / stop / restart the selection |
+| `S` / `X` | Start / stop the selection |
 | `B` / `F` / `Y` / `H` | Build / fetch / sync / health-check the selection |
 | `a` / `c` / `t` | Select all visible / clear selection / cycle the filter |
 | `P` | Prepare the environment for the selection (also on the Dashboard) |
@@ -198,8 +198,8 @@ artifact, `a` inspect version alignment, `r` refresh status.
 **Migrations** — `s` status, `p` pending, `P` preview, `v` validate, `a` apply,
 `l` logs.
 
-**Tasks** — `Enter`/`l` view task logs, `x` cancel, `t` cycle the status filter,
-`W` cancel an active workflow.
+**Tasks** — `Enter`/`l` view task logs, `x` cancel the current task,
+`t` cycle the status filter.
 
 **Logs** — `f` toggle follow, `c` clear, `v` cycle the minimum level,
 `↑`/`↓` scroll (which pauses follow).
@@ -248,7 +248,7 @@ Every operation is an application use case:
 | Tasks | read through the `TaskObserver` boundary; cancel through `cancel_task` |
 | Logs | `get_service_logs`, `get_task_logs`, `subscribe_service_logs` |
 | Health | `check_service_health`, `list_service_health` |
-| Workspace | `sync_workspace`, `build_workspace` |
+| Workspace | `sync_workspace`, `build_workspace` (wired in the adapter but not currently bound to a key) |
 | Environment | `plan_prepare_environment`, `prepare_environment`, `get_workflow_status`, `cancel_workflow` |
 
 The interface holds no operation logic of its own. It maps a key to an `Action`,
@@ -290,8 +290,8 @@ the target branch, the per-phase step counts, warnings, and whether any step
 requires destructive authorization. Confirming calls `prepare_environment`
 through the trusted confirmation path; the resulting workflow is tracked in the
 shared engine and observed on the Tasks screen. No workflow step is hard-coded
-in the interface. `W` on the Tasks screen cancels an active workflow
-(`docs/environment-workflows.md`).
+in the interface. Cancelling a running workflow is not currently exposed by a key
+binding (`docs/environment-workflows.md`).
 
 ---
 

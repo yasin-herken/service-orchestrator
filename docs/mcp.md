@@ -242,8 +242,8 @@ agent never has to construct a shell command: there is deliberately **no
 
 | Tool | Permission | Returns |
 |---|---|---|
-| `check_service_health` | safe write | task id |
-| `check_service_readiness` | safe write | task id |
+| `check_service_health` | read (async) | task id |
+| `check_service_readiness` | read (async) | task id |
 | `get_service_health` | read | last observed health |
 | `list_service_health` | read | health for every service |
 | `get_service_diagnostics` | read | structured diagnostics |
