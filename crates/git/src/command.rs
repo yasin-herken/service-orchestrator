@@ -160,6 +160,32 @@ pub(crate) fn clean_args() -> Vec<String> {
     vec!["clean".to_owned(), "-fd".to_owned()]
 }
 
+/// Inherited environment variables removed from every Git process.
+///
+/// The daemon's environment is inherited by child processes. A value such as
+/// `GIT_DIR` or `GIT_WORK_TREE` in that environment would make Git operate on a
+/// repository other than the resolved checkout, and `GIT_SSH_COMMAND`,
+/// `GIT_EXTERNAL_DIFF`, or a substituted `GIT_CONFIG` could make Git execute
+/// arbitrary code. Removing them keeps every Git operation scoped to the
+/// repository the application resolved (`AGENTS.md` §21, §32).
+///
+/// The developer's global and system Git configuration is deliberately left in
+/// place so existing authentication (credential helpers, SSH configuration) and
+/// `includeIf` behavior keep working.
+pub(crate) const HARDENED_ENVIRONMENT_REMOVALS: &[&str] = &[
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_COMMON_DIR",
+    "GIT_SSH",
+    "GIT_SSH_COMMAND",
+    "GIT_EXTERNAL_DIFF",
+    "GIT_CONFIG",
+    "GIT_CONFIG_COUNT",
+];
+
 /// Non-interactive environment applied to every Git process.
 ///
 /// Without these, Git can block forever waiting for a terminal credential
@@ -275,5 +301,21 @@ mod tests {
         assert_eq!(environment.get("GIT_TERMINAL_PROMPT").unwrap().value, "0");
         assert!(environment.contains("GIT_ASKPASS"));
         assert!(environment.contains("SSH_ASKPASS"));
+    }
+
+    #[test]
+    fn hardened_removals_cover_repository_redirection_and_code_execution() {
+        for name in [
+            "GIT_DIR",
+            "GIT_WORK_TREE",
+            "GIT_INDEX_FILE",
+            "GIT_SSH_COMMAND",
+            "GIT_EXTERNAL_DIFF",
+        ] {
+            assert!(
+                HARDENED_ENVIRONMENT_REMOVALS.contains(&name),
+                "{name} must be removed from the Git environment"
+            );
+        }
     }
 }

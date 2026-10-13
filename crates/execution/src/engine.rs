@@ -65,6 +65,42 @@ impl Default for EngineConfig {
     }
 }
 
+/// The default bound applied when an interface lists tasks without a limit.
+///
+/// A task list is client-facing state; an interface that forgets to bound its
+/// request should still receive a bounded response (`AGENTS.md` §35).
+pub const DEFAULT_TASK_LIST_LIMIT: usize = 100;
+
+/// The hard upper bound on any task-listing request.
+///
+/// Even an explicit large limit is clamped to this, so a single request can
+/// never be made to serialize an unbounded task history into an IPC frame or an
+/// MCP response (`AGENTS.md` §35).
+pub const MAX_TASK_LIST_LIMIT: usize = 1000;
+
+/// Clamps a requested task-list limit to [`MAX_TASK_LIST_LIMIT`].
+#[must_use]
+pub const fn clamp_task_limit(limit: usize) -> usize {
+    if limit > MAX_TASK_LIST_LIMIT {
+        MAX_TASK_LIST_LIMIT
+    } else {
+        limit
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{clamp_task_limit, MAX_TASK_LIST_LIMIT};
+
+    #[test]
+    fn task_limit_is_clamped_to_the_hard_maximum() {
+        assert_eq!(clamp_task_limit(0), 0);
+        assert_eq!(clamp_task_limit(10), 10);
+        assert_eq!(clamp_task_limit(MAX_TASK_LIST_LIMIT), MAX_TASK_LIST_LIMIT);
+        assert_eq!(clamp_task_limit(usize::MAX), MAX_TASK_LIST_LIMIT);
+    }
+}
+
 /// Builds a [`TaskEngine`].
 ///
 /// Executors are registered by task kind; a task whose kind has no executor

@@ -11,6 +11,7 @@
 
 #![allow(dead_code)]
 
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -160,4 +161,22 @@ environment = "{environment}"
 /// Creates a migration manager with the standard providers and system host.
 pub(crate) fn manager(config: Arc<Config>) -> MigrationManager {
     MigrationManager::new(ProcessManager::new().unwrap(), config)
+}
+
+/// Writes an executable script into `workspace` and returns its absolute path.
+///
+/// A configured command is a structured program plus arguments and may never be
+/// a `sh -c` command line (`tasks/026.md` §7). A project frequently reaches for
+/// a small wrapper script instead, so the fixtures use one too: the script is
+/// invoked directly as its own program.
+pub(crate) fn script(workspace: &Workspace, name: &str, body: &str) -> String {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let path = workspace.entity.join(name);
+    let mut file = std::fs::File::create(&path).expect("the script is creatable");
+    file.write_all(format!("#!/bin/sh\n{body}\n").as_bytes())
+        .expect("the script is written");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+        .expect("the script is executable");
+    path.to_string_lossy().into_owned()
 }

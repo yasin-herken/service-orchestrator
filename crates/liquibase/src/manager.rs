@@ -41,7 +41,7 @@ use std::time::Duration;
 use service_orchestrator_application::{MigrationError, ResolvedMigrationTarget};
 use service_orchestrator_config::{Config, ConfigManager, LiquibaseConfig, StaticConfigManager};
 use service_orchestrator_domain::{
-    CommandKind, Environment, MigrationOperation, MigrationProviderType,
+    redact, CommandKind, Environment, MigrationOperation, MigrationProviderType,
     MigrationTargetEnvironment, ServiceId,
 };
 use service_orchestrator_execution::Cancellation;
@@ -402,8 +402,8 @@ fn classify(
             operation: context.operation,
             database_identity: context.database_identity(),
             exit_code: output.code,
-            stdout: bound(&redact(&output.stdout)),
-            stderr: bound(&redact(&output.stderr)),
+            stdout: bound(&scrub(&output.stdout)),
+            stderr: bound(&scrub(&output.stderr)),
         }),
         _ if is_lock_conflict(&output) => Err(MigrationError::LockConflict {
             service: context.service_id.clone(),
@@ -457,7 +457,7 @@ fn detail(output: &CommandOutput) -> Option<String> {
     } else {
         output.stderr.trim()
     };
-    let redacted = redact(combined);
+    let redacted = scrub(combined);
     if redacted.trim().is_empty() {
         None
     } else {
@@ -465,10 +465,17 @@ fn detail(output: &CommandOutput) -> Option<String> {
     }
 }
 
-/// Removes any line that looks like it carries a credential.
-fn redact(text: &str) -> String {
+/// Removes any line that looks like it carries a credential and then scrubs
+/// secret-looking values from what remains.
+///
+/// Two layers are used deliberately: dropping a whole line when it names a
+/// JDBC URL or a password flag is the surest way to remove a connection string,
+/// while the shared [`redact`] rule catches `key=value` and credential-bearing
+/// URL shapes inside lines that survive (`AGENTS.md` §31).
+fn scrub(text: &str) -> String {
     text.lines()
         .filter(|line| !line_is_secret(line))
+        .map(redact)
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -647,33 +654,41 @@ start = "./mvnw spring-boot:run"
         assert!(outcome.database_identity.contains("local"));
     }
 
+    /// A failed migration output for `classify`, without spawning a shell.
+    fn failed_output(stderr: &str, code: i32) -> CommandOutput {
+        CommandOutput {
+            code: Some(code),
+            reason: ExitReason::Failed,
+            stdout: String::new(),
+            stderr: stderr.to_owned(),
+            truncated: false,
+        }
+    }
+
     #[tokio::test]
-    #[cfg(unix)]
     async fn a_lock_conflict_is_classified() {
-        let text = CONFIG.replace(
-            "update = { program = \"/bin/echo\", args = [\"applied\"] }",
-            "update = { program = \"/bin/sh\", args = [\"-c\", \"echo 'Could not acquire change log lock' >&2; exit 1\"] }",
-        );
-        let manager = manager(&text);
-        let error = manager
-            .execute(&target(MigrationOperation::Apply), None, None)
-            .await
-            .unwrap_err();
+        // Classification is exercised directly so the test needs no shell
+        // command (which validated configuration now refuses).
+        let manager = manager(CONFIG);
+        let context = manager
+            .context(&target(MigrationOperation::Apply))
+            .expect("the service is configured");
+        let error = classify(
+            &context,
+            failed_output("Could not acquire change log lock", 1),
+            None,
+        )
+        .unwrap_err();
         assert_eq!(error.code(), "MIGRATION_LOCK_CONFLICT");
     }
 
     #[tokio::test]
-    #[cfg(unix)]
     async fn a_failed_migration_does_not_claim_a_rollback() {
-        let text = CONFIG.replace(
-            "update = { program = \"/bin/echo\", args = [\"applied\"] }",
-            "update = { program = \"/bin/sh\", args = [\"-c\", \"echo boom >&2; exit 2\"] }",
-        );
-        let manager = manager(&text);
-        let error = manager
-            .execute(&target(MigrationOperation::Apply), None, None)
-            .await
-            .unwrap_err();
+        let manager = manager(CONFIG);
+        let context = manager
+            .context(&target(MigrationOperation::Apply))
+            .expect("the service is configured");
+        let error = classify(&context, failed_output("boom", 2), None).unwrap_err();
         match error {
             MigrationError::Failed {
                 exit_code, message, ..
@@ -728,9 +743,22 @@ start = "./mvnw spring-boot:run"
     #[tokio::test]
     async fn redaction_drops_credential_lines() {
         let text = "starting\njdbc:postgresql://db/app?password=hunter2\nok";
-        let redacted = redact(text);
+        let redacted = scrub(text);
         assert!(!redacted.contains("hunter2"));
         assert!(redacted.contains("starting"));
         assert!(redacted.contains("ok"));
+    }
+
+    #[test]
+    fn redaction_scrubs_secret_values_on_surviving_lines() {
+        // A line without a known credential marker is kept, but a secret-looking
+        // `key=value` value on it is still masked by the shared rule. (`token=`
+        // is not one of this adapter's whole-line markers, so the line survives
+        // to be value-scrubbed.)
+        let text = "connecting with AUTH_TOKEN=abc123\nmigration complete";
+        let redacted = scrub(text);
+        assert!(!redacted.contains("abc123"));
+        assert!(redacted.contains("AUTH_TOKEN=***"));
+        assert!(redacted.contains("migration complete"));
     }
 }

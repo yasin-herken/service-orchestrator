@@ -580,7 +580,7 @@ pub(crate) fn parse_command(
                 return None;
             };
             match CommandSpec::new(program.clone(), args.to_vec()) {
-                Ok(spec) => Some(spec),
+                Ok(spec) => reject_shell_command(location, spec, errors),
                 Err(error) => {
                     errors.push(
                         ValidationError::new(location, error.to_string()).suggested_fix(
@@ -596,6 +596,33 @@ pub(crate) fn parse_command(
             parse_structured_command(location, structured, errors)
         }
     }
+}
+
+/// Rejects a command that would run a shell interpreter with `-c`.
+///
+/// Commands are validated as structured program-plus-arguments so a value from
+/// configuration can never be re-interpreted by a shell (`AGENTS.md` §32). A
+/// configured `sh -c "…"` would defeat that boundary by making the entire
+/// command line shell-interpreted, so it is refused at validation time rather
+/// than at execution time. Running a shell *script* without `-c` remains
+/// allowed.
+fn reject_shell_command(
+    location: &str,
+    spec: CommandSpec,
+    errors: &mut Vec<ValidationError>,
+) -> Option<CommandSpec> {
+    if spec.invokes_shell() {
+        errors.push(
+            ValidationError::new(
+                location,
+                "a shell command is not permitted; commands run as a structured \
+                 program and arguments, never through a shell",
+            )
+            .expected("a program with arguments, such as './mvnw clean install'"),
+        );
+        return None;
+    }
+    Some(spec)
 }
 
 fn parse_structured_command(
@@ -629,7 +656,7 @@ fn parse_structured_command(
         parse_environment(&format!("{location}.environment"), &structured.environment);
     errors.append(&mut env_errors);
     spec.environment = environment;
-    Some(spec)
+    reject_shell_command(location, spec, errors)
 }
 
 /// Parses an environment variable map.

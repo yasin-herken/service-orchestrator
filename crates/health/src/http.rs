@@ -151,8 +151,26 @@ struct HttpTarget {
 ///
 /// Only the pieces the provider needs are extracted; userinfo, query strings,
 /// and fragments are preserved in the path but no userinfo is ever sent.
+///
+/// # Injection safety
+///
+/// The URL is written verbatim into the request line and `Host` header, so a
+/// value containing whitespace or control characters (notably a carriage
+/// return or line feed) could otherwise inject additional request headers. The
+/// whole URL is therefore rejected when it contains whitespace or control
+/// characters, and the host must consist only of hostname characters
+/// (`AGENTS.md` §32, `tasks/012.md` §28).
 fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
     let trimmed = url.trim();
+    if trimmed.is_empty() {
+        return Err("url must not be empty".to_owned());
+    }
+    if trimmed.chars().any(char::is_control) {
+        return Err("url must not contain control characters".to_owned());
+    }
+    if trimmed.chars().any(char::is_whitespace) {
+        return Err("url must not contain whitespace".to_owned());
+    }
     let Some(rest) = trimmed.strip_prefix("http://") else {
         if trimmed.starts_with("https://") {
             return Err(
@@ -181,6 +199,12 @@ fn parse_http_url(url: &str) -> Result<HttpTarget, String> {
     };
     if host.is_empty() {
         return Err("url has no host".to_owned());
+    }
+    if !host
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '-' | '_'))
+    {
+        return Err(format!("url host '{host}' contains invalid characters"));
     }
     Ok(HttpTarget {
         host,
@@ -323,6 +347,20 @@ mod tests {
     fn rejects_https_and_relative_urls() {
         assert!(parse_http_url("https://localhost:8081/health").is_err());
         assert!(parse_http_url("/actuator/health").is_err());
+    }
+
+    #[test]
+    fn rejects_control_characters_and_whitespace() {
+        // A CRLF in the URL would let a configured value inject request headers.
+        assert!(parse_http_url("http://localhost:8081/health\r\nX-Evil: 1").is_err());
+        assert!(parse_http_url("http://localhost:8081/health\nGET /x").is_err());
+        assert!(parse_http_url("http://local host:8081/health").is_err());
+    }
+
+    #[test]
+    fn rejects_hosts_with_invalid_characters() {
+        assert!(parse_http_url("http://exa<mple>:8081/health").is_err());
+        assert!(parse_http_url("http://localhost;/health").is_err());
     }
 
     #[test]

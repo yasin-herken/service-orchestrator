@@ -121,7 +121,7 @@ two authoritative engines.
 | `<config_dir>/run/daemon.sock` | The IPC endpoint (owner-only, `0600`). |
 | `<config_dir>/run/daemon.pid` | The daemon's process id, while running. |
 | `<config_dir>/run/daemon.lock` | The advisory single-instance lock. |
-| `<config_dir>/run/daemon.log` | Standard output/error of an auto-started daemon. |
+| `<config_dir>/run/daemon.log` | Standard output/error of an auto-started daemon (owner-only, `0600`). |
 
 The `run/` directory is created with `0700` permissions.
 
@@ -145,8 +145,11 @@ no remote access.
 
 The transport is **length-prefixed JSON**: a big-endian `u32` byte length followed
 by that many bytes of UTF-8 JSON. A frame is capped at 8 MiB, so a malformed or
-hostile client cannot make the daemon allocate unbounded memory. There is no
-shell string and no arbitrary command execution anywhere in the protocol.
+hostile client cannot make the daemon allocate unbounded memory. The daemon also
+caps the number of simultaneous connections and bounds the wait for a
+connection's *first* request, so a flood of connections or an idle connection
+cannot exhaust the daemon (§11). There is no shell string and no arbitrary
+command execution anywhere in the protocol.
 
 ### Client → server
 
@@ -381,19 +384,30 @@ Clients handle a dropped daemon connection:
 
 - **Local only.** The endpoint is a Unix domain socket in a per-user `0700`
   directory, with the socket itself at `0600`. There is no public network port.
-- **Bounded input.** Requests are size-capped and rejected if malformed or
-  mistyped.
+  A daemon that is auto-started writes its log owner-only (`0600`) as well.
+- **Bounded input.** Requests are size-capped (8 MiB frames) and rejected if
+  malformed or mistyped. The number of simultaneous connections is capped
+  (`128`), and the first request on a connection must arrive within 30 seconds,
+  so a flood or an idle connection cannot exhaust the daemon's file descriptors
+  or task count. After the first request, a subscribed client may stay idle and
+  receive pushed events; only the initial read is timed out.
+- **Kernel-verified peer.** The daemon reads each connection's peer credentials
+  and compares the peer UID to its own. The `client` field in the envelope is
+  **not** authentication: it is a hint, used only together with the kernel UID
+  and an explicit destructive intent (§ below).
 - **No shell.** Every operation maps to a typed application use case; a client
   cannot send an arbitrary command.
 - **Secrets are never serialized.** Configuration-derived secrets stay redacted
   on every path, including across IPC.
 - **The policy engine always runs.** A request carries the caller's
   `allow_destructive` intent and its `ClientKind`. The daemon honors the intent
-  **only** for an interactive (`tui`) peer, and then still runs the shared policy
-  engine. A non-interactive client (MCP, CLI) can never self-confirm a
-  destructive operation, and neither can a client bypass the check by setting a
-  boolean. This is the same rule the TUI and MCP already followed, now enforced
-  at the single daemon boundary.
+  **only** when all three trust signals hold — the request asks for it, the
+  client kind is interactive (`tui`/`desktop`), and the kernel-verified peer UID
+  matches the daemon's — and then still runs the shared policy engine. A
+  non-interactive client (MCP, CLI) can never self-confirm a destructive
+  operation, and neither can a client bypass the check by setting a boolean.
+  This is the same rule the TUI and MCP already followed, now enforced at the
+  single daemon boundary (`docs/security.md` §3).
 
 ---
 
@@ -433,8 +447,11 @@ information is shown.
 - **One daemon per configuration.** The endpoint is derived from the
   configuration directory, so two different configurations run two daemons. There
   is no cross-daemon coordination.
-- **Local, single-user.** There is no authentication, remote access, or
-  multi-user model; the security boundary is the owner-only socket.
+- **Local, single-user.** There is no authentication beyond the kernel
+  peer-UID check, no remote access, and no multi-user model; the security
+  boundary is the owner-only socket and the same-user trust model. Any process
+  already running as the user can connect, so the daemon is not a defense
+  against the user's own processes (`docs/security.md` §11).
 - **Event delivery is best-effort.** A subscriber that falls behind drops events
   and must resynchronise; events are not persisted.
 - **Configuration is read-only to clients.** The daemon owns the validated

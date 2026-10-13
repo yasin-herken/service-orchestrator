@@ -21,7 +21,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use service_orchestrator_application::{BuildError, ResolvedBuildTarget};
-use service_orchestrator_domain::{BuildOperation, BuildSystem};
+use service_orchestrator_domain::{redact, BuildOperation, BuildSystem};
 use service_orchestrator_execution::Cancellation;
 use service_orchestrator_process::{ExitReason, ProcessError, ProcessManager};
 
@@ -220,8 +220,8 @@ fn classify(
             system: target.build_system,
             operation: target.operation,
             exit_code: output.code,
-            stdout: bound(&output.stdout),
-            stderr: bound(&output.stderr),
+            stdout: bound(&redact(&output.stdout)),
+            stderr: bound(&redact(&output.stderr)),
         }),
         _ => Err(BuildError::CommandFailed {
             name: target.name.clone(),
@@ -252,7 +252,7 @@ fn failure_message(output: &CommandOutput) -> String {
             None => "build failed before reporting an exit status".to_owned(),
         }
     } else {
-        bound(first.trim())
+        bound(&redact(first.trim()))
     }
 }
 
@@ -266,7 +266,7 @@ fn detail(output: &CommandOutput) -> Option<String> {
     if combined.is_empty() {
         None
     } else {
-        Some(bound(combined))
+        Some(bound(&redact(combined)))
     }
 }
 

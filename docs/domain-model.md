@@ -177,7 +177,9 @@ These three describe requirements without prescribing an implementation.
 - **`CommandSet` / `CommandSpec`** — structured commands: a `program` and an
   argument vector, never a shell string. `CommandSet` is an ordered list of
   `CommandKind`/`CommandSpec` pairs, which serializes cleanly to JSON. A helper,
-  `CommandSpec::invokes_shell`, flags the rare `sh -c` case for policy scrutiny.
+  `CommandSpec::invokes_shell`, recognises the `sh -c` case; configuration
+  validation uses it to **reject** a configured shell command rather than run it
+  (`AGENTS.md` §32, `docs/security.md` §6).
 
 `Environment` carries variables and marks secrets; secret values always render
 as `***`.

@@ -369,8 +369,17 @@ safety rule the application enforces (`AGENTS.md` §14, §29, §30, §31):
   resource, a log, or an error (`AGENTS.md` §31).
 - **No arbitrary shell.** There is no `run_shell` tool; a mutation is always an
   explicit, named use case.
+- **Bounded responses.** A task listing is bounded even when no `limit` is
+  supplied (default 100, clamped to a hard maximum of 1000), and log queries are
+  bounded pages, so a tool call can never return an unbounded history
+  (`AGENTS.md` §35).
 - **Structured errors are authoritative.** An agent should read `error.code`
   rather than retrying blindly; the failure envelope is the contract.
+
+The adapter does not treat repository content, logs, or command output as
+instructions: authorization is computed by the daemon from the kernel-verified
+peer UID, the client kind, and the explicit intent, never from model output or
+untrusted content (`docs/security.md` §4).
 
 The same rules apply to the TUI. Because both interfaces call the same
 application core, an operation a human sees in the TUI behaves identically

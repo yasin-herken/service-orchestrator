@@ -89,6 +89,6 @@ pub use ports::{
     ResolvedBuildTarget, ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository,
     ResolvedServiceTarget, RuntimeStateStore, ServiceHealth, ServiceProcessInfo,
     ServiceRuntimeError, ServiceRuntimeIndex, ServiceRuntimeState, SuggestedCommand,
-    WorkspaceProbe, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
+    WorkspaceProbe, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP, MAX_DIFF_BYTES,
 };
 pub use service_orchestrator_policy::{Authorization, PolicyDecision, PolicyEngine};

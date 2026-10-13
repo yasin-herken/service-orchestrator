@@ -40,7 +40,7 @@ use crate::command::{
     branch_list_args, checkout_args, checkout_track_args, clean_args, clone_args,
     diff_numstat_args, diff_patch_args, fetch_args, non_interactive_environment, pull_args,
     reset_hard_args, rev_parse_head_args, status_args, verify_local_branch_args,
-    verify_remote_branch_args, GIT_PROGRAM,
+    verify_remote_branch_args, GIT_PROGRAM, HARDENED_ENVIRONMENT_REMOVALS,
 };
 use crate::coordinator::RepositoryCoordinator;
 use crate::runner::{CommandOutput, GitRunner};
@@ -174,7 +174,11 @@ impl CliGitManager {
             })?
             .args(args)
             .working_dir(working_dir)
-            .with_environment(non_interactive_environment());
+            .with_environment(non_interactive_environment())
+            // An inherited `GIT_DIR`, `GIT_WORK_TREE`, `GIT_SSH_COMMAND`, and
+            // friends could redirect or bend this operation; remove them
+            // (`AGENTS.md` §21, §32).
+            .remove_envs(HARDENED_ENVIRONMENT_REMOVALS.iter().copied());
         if let Some(timeout) = options.timeout {
             spec = spec.with_timeout(timeout);
         }

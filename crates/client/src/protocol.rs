@@ -193,14 +193,18 @@ impl DiffParams {
     ///
     /// The cancellation token is intentionally left unset: cancellation is
     /// daemon-owned and is never supplied by a client (`tasks/015.md` §9, §22).
+    /// The options are rebuilt through the builder so `max_bytes` is clamped to
+    /// the application's maximum even when a client bypasses the MCP layer and
+    /// sends a raw IPC request (`AGENTS.md` §35, §10).
     #[must_use]
     pub fn into_options(self) -> DiffOptions {
-        DiffOptions {
-            staged: self.staged,
-            max_bytes: self.max_bytes,
-            timeout: self.timeout_millis.map(std::time::Duration::from_millis),
-            cancellation: None,
+        let mut options = DiffOptions::new()
+            .staged(self.staged)
+            .with_max_bytes(self.max_bytes);
+        if let Some(millis) = self.timeout_millis {
+            options = options.with_timeout(std::time::Duration::from_millis(millis));
         }
+        options
     }
 }
 
@@ -390,6 +394,22 @@ mod tests {
             "cancellation is daemon-owned"
         );
         assert_eq!(rebuilt.max_bytes, 4096);
+    }
+
+    #[test]
+    fn an_oversized_diff_request_is_clamped_when_rebuilt() {
+        // A client that bypasses the MCP layer and sends a raw IPC request
+        // cannot ask for an unbounded patch.
+        let params = DiffParams {
+            staged: false,
+            max_bytes: usize::MAX,
+            timeout_millis: None,
+        };
+        let rebuilt = params.into_options();
+        assert_eq!(
+            rebuilt.max_bytes,
+            service_orchestrator_application::MAX_DIFF_BYTES
+        );
     }
 
     #[test]
