@@ -4,17 +4,34 @@ import type { RawEnvValueView } from '../../types/models';
 
 /** A single editable environment entry. */
 interface EnvRow {
+  /**
+   * A stable identity independent of position.
+   *
+   * The reveal state and React keys are keyed by this id, not by the array
+   * index: removing a row must not shift the "revealed" flag onto a different
+   * secret, and reordering must not remount unrelated inputs (`tasks/024.md`
+   * §5, §12).
+   */
+  id: string;
   key: string;
   value: string;
   secret: boolean;
 }
 
+/** Monotonic source of stable row ids (unique per mounted editor history). */
+let rowIdCounter = 0;
+
+function nextRowId(): string {
+  rowIdCounter += 1;
+  return `env-${rowIdCounter}`;
+}
+
 /** Normalizes the wire value into an editable row. */
 function toRow(key: string, value: RawEnvValueView): EnvRow {
   if (typeof value === 'string') {
-    return { key, value, secret: false };
+    return { id: nextRowId(), key, value, secret: false };
   }
-  return { key, value: value.value, secret: value.secret };
+  return { id: nextRowId(), key, value: value.value, secret: value.secret };
 }
 
 /** Converts editable rows back into the wire shape, dropping empty keys. */
@@ -49,15 +66,39 @@ export function EnvironmentEditor({
   const [rows, setRows] = useState<EnvRow[]>(() =>
     Object.entries(value).map(([key, entry]) => toRow(key, entry)),
   );
-  const [revealed, setRevealed] = useState<ReadonlySet<number>>(new Set());
+  const [revealed, setRevealed] = useState<ReadonlySet<string>>(new Set());
 
   const commit = (next: EnvRow[]) => {
     setRows(next);
     onChange(toEnvironment(next));
   };
 
-  const update = (index: number, patch: Partial<EnvRow>) => {
-    commit(rows.map((row, i) => (i === index ? { ...row, ...patch } : row)));
+  const update = (id: string, patch: Partial<EnvRow>) => {
+    commit(rows.map((row) => (row.id === id ? { ...row, ...patch } : row)));
+  };
+
+  const remove = (id: string) => {
+    commit(rows.filter((row) => row.id !== id));
+    setRevealed((current) => {
+      if (!current.has(id)) {
+        return current;
+      }
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+  };
+
+  const toggleReveal = (id: string) => {
+    setRevealed((current) => {
+      const next = new Set(current);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
   };
 
   return (
@@ -68,28 +109,28 @@ export function EnvironmentEditor({
       ) : null}
       <ul className="config-env">
         {rows.map((row, index) => (
-          <li key={index} className="config-env__row">
+          <li key={row.id} className="config-env__row">
             <input
               className="input config-env__key"
               aria-label={`Environment name ${index + 1}`}
               placeholder="NAME"
               value={row.key}
-              onChange={(event) => update(index, { key: event.target.value })}
+              onChange={(event) => update(row.id, { key: event.target.value })}
             />
             <input
               className="input config-env__value"
               aria-label={`Environment value ${index + 1}`}
-              type={row.secret && !revealed.has(index) ? 'password' : 'text'}
+              type={row.secret && !revealed.has(row.id) ? 'password' : 'text'}
               placeholder="value"
               value={row.value}
-              onChange={(event) => update(index, { value: event.target.value })}
+              onChange={(event) => update(row.id, { value: event.target.value })}
             />
             <label className="config-env__secret">
               <input
                 type="checkbox"
                 checked={row.secret}
                 onChange={(event) =>
-                  update(index, { secret: event.target.checked })
+                  update(row.id, { secret: event.target.checked })
                 }
               />
               <span>Secret</span>
@@ -98,27 +139,19 @@ export function EnvironmentEditor({
               <button
                 type="button"
                 className="button button--small"
-                aria-label={`Reveal environment value ${index + 1}`}
-                onClick={() =>
-                  setRevealed((current) => {
-                    const next = new Set(current);
-                    if (next.has(index)) {
-                      next.delete(index);
-                    } else {
-                      next.add(index);
-                    }
-                    return next;
-                  })
-                }
+                aria-label={`${
+                  revealed.has(row.id) ? 'Hide' : 'Reveal'
+                } environment value ${index + 1}`}
+                onClick={() => toggleReveal(row.id)}
               >
-                {revealed.has(index) ? 'Hide' : 'Reveal'}
+                {revealed.has(row.id) ? 'Hide' : 'Reveal'}
               </button>
             ) : null}
             <button
               type="button"
               className="button button--small"
               aria-label={`Remove environment variable ${index + 1}`}
-              onClick={() => commit(rows.filter((_, i) => i !== index))}
+              onClick={() => remove(row.id)}
             >
               Remove
             </button>
@@ -128,7 +161,9 @@ export function EnvironmentEditor({
       <button
         type="button"
         className="button button--small"
-        onClick={() => commit([...rows, { key: '', value: '', secret: false }])}
+        onClick={() =>
+          commit([...rows, { id: nextRowId(), key: '', value: '', secret: false }])
+        }
       >
         Add variable
       </button>

@@ -109,6 +109,23 @@ describe('task details', () => {
     await within(panel).findByText(/apply migrations/);
   });
 
+  it('surfaces a structured workflow-load error instead of a silent gap', async () => {
+    mockDesktopApi.getWorkflow.mockRejectedValueOnce({
+      code: 'WORKFLOW_NOT_FOUND',
+      message: 'the workflow is unknown to the daemon',
+    });
+    const user = await openTasks();
+
+    const row = screen.getAllByRole('row').find((r) => r.textContent?.includes('start_service'));
+    await user.click(row!);
+
+    const panel = await screen.findByRole('region', { name: 'Task detail' });
+    expect(
+      await within(panel).findByText('the workflow is unknown to the daemon'),
+    ).toBeInTheDocument();
+    expect(within(panel).getByText('WORKFLOW_NOT_FOUND')).toBeInTheDocument();
+  });
+
   it('shows the declared workflow steps and dependencies', async () => {
     mockDesktopApi.getWorkflow.mockResolvedValue(
       makeWorkflow({

@@ -1,4 +1,5 @@
 import { StatusBadge, type BadgeTone } from '../StatusBadge';
+import { isTerminalTaskStatus, taskStatusLabel } from '../../utils/taskStatus';
 
 /** Badge tones for the task lifecycle statuses. */
 const TASK_TONES: Record<string, BadgeTone> = {
@@ -12,18 +13,7 @@ const TASK_TONES: Record<string, BadgeTone> = {
   unknown: 'neutral',
 };
 
-/** Whether a task status is terminal (will not change again). */
-const TERMINAL = new Set(['succeeded', 'failed', 'cancelled', 'skipped']);
-
-/** Whether a task status means the task will not change again. */
-export function isTerminalTaskStatus(status: string): boolean {
-  return TERMINAL.has(status);
-}
-
-/** Human-readable label for a task status. */
-export function taskStatusLabel(status: string): string {
-  return status.charAt(0).toUpperCase() + status.slice(1);
-}
+export { isTerminalTaskStatus, taskStatusLabel };
 
 /**
  * A status pill for a task lifecycle status.

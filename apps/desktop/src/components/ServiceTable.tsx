@@ -2,6 +2,7 @@ import { useEffect, useRef } from 'react';
 
 import type { TrackedTask } from '../context/TaskEventsContext';
 import type { ServiceSummary } from '../types/models';
+import { operationLabel } from '../utils/format';
 import type { ServiceSortKey, SortDirection } from '../utils/serviceQuery';
 import { HealthBadge, ProcessBadge } from './StatusBadge';
 
@@ -20,12 +21,6 @@ const COLUMNS: { key: ServiceSortKey | 'workspace'; label: string; numeric?: boo
   { key: 'branch', label: 'Branch' },
   { key: 'port', label: 'Port', numeric: true },
 ];
-
-/** A concise status label for the last-operation cell. */
-function operationLabel(task: TrackedTask): string {
-  const status = task.status.charAt(0).toUpperCase() + task.status.slice(1);
-  return `${task.kind} · ${status}`;
-}
 
 /**
  * The services table: stable-id selection via checkboxes, detail navigation by

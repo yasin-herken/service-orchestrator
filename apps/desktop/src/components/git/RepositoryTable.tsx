@@ -3,6 +3,7 @@ import { useEffect, useRef } from 'react';
 import { GitBadge } from '../StatusBadge';
 import type { TrackedTask } from '../../context/TaskEventsContext';
 import type { RepositorySummary } from '../../types/models';
+import { operationLabel } from '../../utils/format';
 import type { RepositorySortKey } from '../../utils/repositoryQuery';
 import type { SortDirection } from '../../utils/serviceQuery';
 
@@ -18,12 +19,6 @@ const COLUMNS: { key: RepositorySortKey; label: string }[] = [
   { key: 'branch', label: 'Branch' },
   { key: 'git_state', label: 'State' },
 ];
-
-/** A concise label for the last-operation cell. */
-function operationLabel(task: TrackedTask): string {
-  const status = task.status.charAt(0).toUpperCase() + task.status.slice(1);
-  return `${task.kind} · ${status}`;
-}
 
 /**
  * The Git repository table: stable-id selection, sorting, detail navigation,

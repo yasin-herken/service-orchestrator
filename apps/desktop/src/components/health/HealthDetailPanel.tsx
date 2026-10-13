@@ -1,5 +1,6 @@
 import { HealthBadge, ProcessBadge } from '../StatusBadge';
-import type { HealthDetailView, HealthOutcomeView } from '../../types/models';
+import { EmptyState, ErrorState, LoadingState } from '../StateViews';
+import type { DesktopError, HealthDetailView, HealthOutcomeView } from '../../types/models';
 import { formatDateTime, formatMillis } from '../../utils/format';
 
 /** One observed check with its type, requirement, result, and reason. */
@@ -34,19 +35,41 @@ export function HealthDetailPanel({
   onCheck,
   onReadiness,
   onViewLogs,
+  onRetry,
 }: {
   detail: HealthDetailView | null;
   loading: boolean;
-  error: string | null;
+  error: DesktopError | null;
   checking: boolean;
   disabled: boolean;
   onClose: () => void;
   onCheck: () => void;
   onReadiness: () => void;
   onViewLogs: () => void;
+  onRetry: () => void;
 }) {
   if (!detail) {
-    return null;
+    // Never render a blank panel: while the first observation loads show a
+    // spinner, on failure show the structured error with a retry, and only
+    // then an explicit empty state (`tasks/024.md` §13, §15).
+    return (
+      <section className="detail-panel" role="region" aria-label="Health detail">
+        <header className="detail-panel__block-header">
+          <h2 className="detail-panel__block-title">Health detail</h2>
+          <button type="button" className="button button--small" onClick={onClose}>
+            Close
+          </button>
+        </header>
+        {loading ? <LoadingState label="Loading health detail…" /> : null}
+        {!loading && error ? <ErrorState error={error} onRetry={onRetry} /> : null}
+        {!loading && !error ? (
+          <EmptyState
+            title="No health detail"
+            description="The daemon did not report an observation for this service."
+          />
+        ) : null}
+      </section>
+    );
   }
   const { row } = detail;
   const historyKnown =
@@ -65,10 +88,10 @@ export function HealthDetailPanel({
 
       <div className="detail-panel__block">
         <h3 className="detail-panel__block-title">Runtime and health</h3>
-        {loading ? <p className="muted">Loading health detail…</p> : null}
+        {loading ? <p className="muted">Refreshing health detail…</p> : null}
         {error ? (
           <p className="detail-panel__state-item" role="alert">
-            {error}
+            {error.message} <span className="muted">({error.code})</span>
           </p>
         ) : null}
         <div className="detail-panel__state">
