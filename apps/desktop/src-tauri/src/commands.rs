@@ -24,20 +24,22 @@
 use std::sync::Arc;
 
 use service_orchestrator_client::{DaemonStatus, RemoteClient};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::connection::ConnectionSnapshot;
 use crate::dto::{
     ArtifactVerificationView, BranchView, BuildCapabilitiesView, BuildTargetSummary,
-    BulkSummaryView, GitStatusView, GitSyncPreview, LibraryDependentView, LibrarySummary,
-    LogPageView, OperationOutcome, RepositoryInspectionView, RepositorySummary, ServiceDetail,
-    ServiceSummary, TaskView, VersionAlignmentView, WorkflowCancellationView, WorkspaceStatus,
+    BulkSummaryView, GitStatusView, GitSyncPreview, HealthDetailView, HealthRowView,
+    LibraryDependentView, LibrarySummary, LogPageView, MigrationRowView, MigrationStatusView,
+    OperationOutcome, RepositoryInspectionView, RepositorySummary, ServiceDetail, ServiceSummary,
+    TaskView, VersionAlignmentView, WorkflowCancellationView, WorkflowView, WorkspaceStatus,
     WorkspaceSummary,
 };
 use crate::error::CommandError;
+use crate::logs::LogQuery;
 use crate::state::AppState;
 use crate::tasks::TaskLogsQuery;
-use crate::{build, git, library, mutations, queries, tasks};
+use crate::{build, git, health, library, logs, migration, mutations, queries, tasks};
 
 /// Runs one blocking query against the shared client.
 ///
@@ -853,4 +855,316 @@ pub async fn cancel_workflow(
         tasks::cancel_workflow(client.as_ref(), &workflow_id)
     })
     .await
+}
+
+/// Lists active tasks plus a bounded slice of recent history.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected limit, or the daemon's structured error.
+#[tauri::command]
+pub async fn list_tasks(
+    state: State<'_, AppState>,
+    limit: Option<usize>,
+) -> Result<Vec<TaskView>, CommandError> {
+    query(state.inner(), move |client| {
+        tasks::list_tasks(client.as_ref(), limit)
+    })
+    .await
+}
+
+/// Returns a workflow's declared steps and dependency edges.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected workflow id, or the daemon's structured error.
+#[tauri::command]
+pub async fn get_workflow(
+    state: State<'_, AppState>,
+    workflow_id: String,
+) -> Result<WorkflowView, CommandError> {
+    query(state.inner(), move |client| {
+        tasks::get_workflow(client.as_ref(), &workflow_id)
+    })
+    .await
+}
+
+// -- migrations ---------------------------------------------------------------
+
+/// Lists a workspace's migration-enabled services with their latest task.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected workspace id, or the daemon's structured error.
+#[tauri::command]
+pub async fn list_migrations(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Vec<MigrationRowView>, CommandError> {
+    query(state.inner(), move |client| {
+        migration::list_migrations(client.as_ref(), &workspace_id)
+    })
+    .await
+}
+
+/// Returns one service's configuration-derived migration snapshot.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected service id, `InvalidOperation` when the
+/// service has no migration configuration, or the daemon's structured error.
+#[tauri::command]
+pub async fn get_migration_status(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<MigrationStatusView, CommandError> {
+    query(state.inner(), move |client| {
+        migration::get_migration_status(client.as_ref(), &service_id)
+    })
+    .await
+}
+
+/// Schedules a migration-configuration validation task.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected service id, or the daemon's structured error.
+#[tauri::command]
+pub async fn validate_migration(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        migration::validate_migration(client.as_ref(), &service_id)
+    })
+    .await
+}
+
+/// Schedules a migration-status inspection task.
+///
+/// # Errors
+///
+/// Same as [`validate_migration`].
+#[tauri::command]
+pub async fn inspect_migration_status(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        migration::inspect_status(client.as_ref(), &service_id)
+    })
+    .await
+}
+
+/// Schedules a pending-changeset inspection task.
+///
+/// # Errors
+///
+/// Same as [`validate_migration`].
+#[tauri::command]
+pub async fn inspect_migration_pending(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        migration::inspect_pending(client.as_ref(), &service_id)
+    })
+    .await
+}
+
+/// Schedules a read-only SQL preview task.
+///
+/// # Errors
+///
+/// Same as [`validate_migration`].
+#[tauri::command]
+pub async fn preview_migration(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        migration::preview(client.as_ref(), &service_id)
+    })
+    .await
+}
+
+/// Applies pending migrations for one service.
+///
+/// `confirmed` forwards the user's explicit confirmation to the daemon as the
+/// request's destructive-authorization intent; the daemon independently
+/// verifies the client kind and peer identity, and its policy decision is
+/// final (`tasks/021.md` §8, §9).
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected service id, `PermissionDenied` when the
+/// target requires authorization that was not granted, or the daemon's
+/// structured error.
+#[tauri::command]
+pub async fn apply_migration(
+    state: State<'_, AppState>,
+    service_id: String,
+    confirmed: bool,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        migration::apply(client.as_ref(), &service_id, confirmed)
+    })
+    .await
+}
+
+/// Applies migrations for the selected services as one coordinated workflow.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected identifier or empty selection,
+/// `PermissionDenied` when a non-local target was not authorized, or the
+/// daemon's structured error.
+#[tauri::command]
+pub async fn apply_selected_migrations(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    service_ids: Vec<String>,
+    confirmed: bool,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        migration::apply_selected(client.as_ref(), &workspace_id, &service_ids, confirmed)
+    })
+    .await
+}
+
+// -- health -------------------------------------------------------------------
+
+/// Lists a workspace's services with observed runtime and health state.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected workspace id, or the daemon's structured error.
+#[tauri::command]
+pub async fn list_health(
+    state: State<'_, AppState>,
+    workspace_id: String,
+) -> Result<Vec<HealthRowView>, CommandError> {
+    query(state.inner(), move |client| {
+        health::list_health(client.as_ref(), &workspace_id)
+    })
+    .await
+}
+
+/// Returns one service's detailed health view.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected identifier, `NOT_FOUND` when the service
+/// belongs to a different workspace, or the daemon's structured error.
+#[tauri::command]
+pub async fn get_health(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    service_id: String,
+) -> Result<HealthDetailView, CommandError> {
+    query(state.inner(), move |client| {
+        health::get_health(client.as_ref(), &service_id, &workspace_id)
+    })
+    .await
+}
+
+/// Runs only the required readiness checks for one service.
+///
+/// # Errors
+///
+/// Same as [`check_service_health`].
+#[tauri::command]
+pub async fn check_service_readiness(
+    state: State<'_, AppState>,
+    service_id: String,
+) -> Result<OperationOutcome, CommandError> {
+    query(state.inner(), move |client| {
+        mutations::check_service_readiness(client.as_ref(), &service_id)
+    })
+    .await
+}
+
+// -- unified logs -------------------------------------------------------------
+
+/// Answers one bounded, cursor-paginated log query.
+///
+/// The scope is hierarchical: a task id selects that task's logs, otherwise a
+/// service id selects that service's logs, otherwise the workspace-wide
+/// application log is queried — all through the existing Observability layer
+/// (`tasks/021.md` §23, §27).
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected identifier or severity, or the daemon's
+/// structured error.
+#[tauri::command]
+// Tauri commands take one flat argument per query field; seven is the
+// practical ceiling for the unified log query before it becomes unusable.
+#[allow(clippy::too_many_arguments)]
+pub async fn get_logs(
+    state: State<'_, AppState>,
+    task_id: Option<String>,
+    service_id: Option<String>,
+    workspace_id: Option<String>,
+    source: Option<String>,
+    minimum_level: Option<String>,
+    text: Option<String>,
+    after: Option<u64>,
+    limit: Option<usize>,
+) -> Result<LogPageView, CommandError> {
+    let params = LogQuery {
+        task_id,
+        service_id,
+        workspace_id,
+        source,
+        minimum_level,
+        text,
+        after,
+        limit,
+    };
+    query(state.inner(), move |client| {
+        logs::get_logs(client.as_ref(), &params)
+    })
+    .await
+}
+
+/// Attaches a frontend subscription to a service's realtime log stream.
+///
+/// The adapter multiplexes one IPC subscription per service to any number of
+/// frontend subscriptions and pushes `daemon://log` events tagged with
+/// `subscription_id` (`tasks/021.md` §24).
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected service id or an empty/duplicate
+/// subscription id, or the daemon's structured error.
+#[tauri::command]
+pub async fn subscribe_service_logs(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    subscription_id: String,
+    service_id: String,
+) -> Result<(), CommandError> {
+    let client = state.ensure_client().await?;
+    let result = state
+        .log_fanout()
+        .subscribe(app, client, subscription_id, service_id)
+        .await;
+    match &result {
+        Ok(()) => state.push(&crate::connection::ProbeOutcome::Connected),
+        Err(error) => state.observe(error),
+    }
+    result
+}
+
+/// Detaches a frontend subscription; the last one stops the service's reader.
+///
+/// Unknown subscription ids are ignored, so cleanup on unmount is idempotent.
+#[tauri::command]
+pub async fn unsubscribe_service_logs(
+    state: State<'_, AppState>,
+    subscription_id: String,
+) -> Result<(), CommandError> {
+    state.log_fanout().unsubscribe(&subscription_id).await;
+    Ok(())
 }

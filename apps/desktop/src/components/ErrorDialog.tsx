@@ -1,3 +1,5 @@
+import type { ReactNode } from 'react';
+
 import { Dialog } from './Dialog';
 import type { DesktopError } from '../types/models';
 
@@ -11,11 +13,14 @@ export function ErrorDialog({
   title,
   error,
   labels,
+  hint,
   onClose,
 }: {
   title: string;
   error: DesktopError;
   labels: readonly string[];
+  /** Optional actionable guidance rendered under the reason (e.g. how to satisfy an authorization policy). */
+  hint?: ReactNode;
   onClose: () => void;
 }) {
   return (
@@ -45,6 +50,7 @@ export function ErrorDialog({
           <dd className="dialog__code">{error.code}</dd>
         </div>
       </dl>
+      {hint ? <p className="dialog__note">{hint}</p> : null}
       <p className="dialog__note muted">
         The daemon rejected or could not complete the operation. No state was
         changed optimistically.

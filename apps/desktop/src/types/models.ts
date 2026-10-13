@@ -460,6 +460,8 @@ export interface TaskView {
   service_id: string | null;
   library_id: string | null;
   workflow_id: string | null;
+  /** The owning workspace, resolved from configuration when it could be. */
+  workspace_id: string | null;
   created_at: number;
   started_at: number | null;
   finished_at: number | null;
@@ -509,6 +511,116 @@ export interface LogPageView {
   truncated: boolean;
 }
 
+/** One step of a workflow, in display form. */
+export interface WorkflowStepView {
+  id: string;
+  description: string | null;
+  /** The kind of task the step performs (`migration_apply`, …). */
+  task_kind: string;
+  /** The ids of the steps that must complete before this one. */
+  depends_on: string[];
+}
+
+/**
+ * A workflow's declared structure, in display form.
+ *
+ * Relationships come from real step ids, task kinds, and dependency edges —
+ * never from parsing task names (`tasks/021.md` §16).
+ */
+export interface WorkflowView {
+  id: string;
+  kind: string;
+  steps: WorkflowStepView[];
+}
+
+// -- migrations ----------------------------------------------------------------
+
+/**
+ * A service's migration setup in display form.
+ *
+ * The snapshot is configuration-derived and performs no database operation:
+ * `pending` and `locked` are explicit unknowns (`null`) until a real provider
+ * inspection task answers (`tasks/021.md` §4, §6).
+ */
+export interface MigrationStatusView {
+  service_id: string;
+  workspace_id: string;
+  /** Whether migrations are enabled for the service. */
+  enabled: boolean;
+  /** The configured migration provider (`liquibase`, …). */
+  provider: string;
+  /** How the provider is invoked (`cli`, `maven`, …). */
+  execution_mode: string;
+  /** The declared environment of the target database (`local`, `staging`, …). */
+  environment: string;
+  /** A display-safe identity of the target database (never credentials). */
+  database_identity: string;
+  /** Whether applying to the target requires explicit authorization. */
+  requires_authorization: boolean;
+  timeout_seconds: number | null;
+  /** Pending changesets, when known — always `null` from the snapshot. */
+  pending: number | null;
+  /** Whether the target is locked, when known — always `null` from the snapshot. */
+  locked: boolean | null;
+}
+
+/** One row of the Migrations table: configuration plus the latest task. */
+export interface MigrationRowView {
+  status: MigrationStatusView;
+  latest_task: TaskView | null;
+}
+
+// -- health --------------------------------------------------------------------
+
+/** One row of the Health table: runtime state plus last observed health. */
+export interface HealthRowView {
+  service_id: string;
+  display_name: string;
+  workspace_id: string;
+  /** The last observed process state — deliberately distinct from health. */
+  process_state: ProcessState;
+  health_state: HealthState;
+  /** When the service was last checked, seconds since the Unix epoch. */
+  checked_at: number | null;
+  last_healthy_at: number | null;
+  last_unhealthy_at: number | null;
+  consecutive_failures: number;
+  process_check: HealthOutcomeView | null;
+  tcp_check: HealthOutcomeView | null;
+  http_check: HealthOutcomeView | null;
+}
+
+/** The detailed health view of one service. */
+export interface HealthDetailView {
+  row: HealthRowView;
+  /** The latest outcome of every configured check, with duration and reason. */
+  checks: HealthOutcomeView[];
+  managed: boolean;
+  pid: number | null;
+  ports: number[];
+  last_failure: DiagnosticFailureView | null;
+  /** The most recent error-level log lines, oldest first. */
+  recent_errors: string[];
+}
+
+// -- realtime log streaming ----------------------------------------------------
+
+/**
+ * A realtime log-stream event pushed to the adapter's `daemon://log` event.
+ *
+ * `kind` discriminates: `entry` carries a log line, `lagged` reports entries
+ * the daemon dropped for this subscriber, and `closed` ends the stream.
+ */
+export interface LogStreamEvent {
+  subscription_id: string;
+  service_id: string;
+  kind: 'entry' | 'lagged' | 'closed';
+  entry: LogEntryView | null;
+  /** How many entries the daemon dropped, for `lagged` events. */
+  dropped: number | null;
+  message: string | null;
+}
+
 /** Daemon connection state as reported by the adapter. */
 export type ConnectionState =
   | 'connecting'
@@ -548,3 +660,6 @@ export const DAEMON_CONNECTION_EVENT = 'daemon://connection';
 
 /** Event name carrying a forwarded `TaskEvent` from the Rust adapter. */
 export const TASK_EVENT = 'daemon://task';
+
+/** Event name carrying a `LogStreamEvent` from the Rust adapter. */
+export const LOG_EVENT = 'daemon://log';

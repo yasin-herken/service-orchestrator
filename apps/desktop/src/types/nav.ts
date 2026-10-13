@@ -11,6 +11,20 @@ export type PageId =
   | 'health'
   | 'settings';
 
+/**
+ * A cross-screen navigation payload (`tasks/021.md` §30).
+ *
+ * It carries stable identifiers only — a task id or a service id — so a failed
+ * migration can open its task, a failed task can open its logs, and an
+ * unhealthy service can open its health detail without parsing anything.
+ */
+export interface NavIntent {
+  /** The task the target screen should open. */
+  taskId?: string;
+  /** The service the target screen should select. */
+  serviceId?: string;
+}
+
 /** One navigation entry in the sidebar. */
 export interface PageDefinition {
   id: PageId;
@@ -22,8 +36,8 @@ export interface PageDefinition {
 /**
  * The navigation model, shared by the sidebar and the shell.
  *
- * Only `dashboard` and `services` have functional content in this task; the
- * rest render clearly labelled placeholders (`tasks/018.md` §14).
+ * `settings` still renders a placeholder; every other screen has real content
+ * backed by the shared daemon (`tasks/018.md` §14, `tasks/021.md` §30).
  */
 export const PAGES: readonly PageDefinition[] = [
   { id: 'dashboard', label: 'Dashboard', title: 'Dashboard' },

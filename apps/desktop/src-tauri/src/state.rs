@@ -46,6 +46,8 @@ pub struct AppState {
     client: Mutex<Option<Arc<RemoteClient>>>,
     /// Ensures the task-event forwarder task starts exactly once.
     forwarder_started: AtomicBool,
+    /// The per-service realtime log multiplexer used by the Logs screen.
+    log_fanout: Arc<crate::log_fanout::LogFanout>,
 }
 
 impl AppState {
@@ -74,7 +76,14 @@ impl AppState {
             connect_lock: tokio::sync::Mutex::new(()),
             client: Mutex::new(None),
             forwarder_started: AtomicBool::new(false),
+            log_fanout: Arc::new(crate::log_fanout::LogFanout::default()),
         }
+    }
+
+    /// Returns the realtime log multiplexer shared by the log commands.
+    #[must_use]
+    pub fn log_fanout(&self) -> &Arc<crate::log_fanout::LogFanout> {
+        &self.log_fanout
     }
 
     /// Returns the IPC socket endpoint this state probes.
@@ -207,11 +216,11 @@ fn connect_once(
             // Export before connecting so every later reconnect inside the
             // shared client spawns this same binary.
             std::env::set_var(DAEMON_BIN_ENV, binary);
-            RemoteClient::connect(config_path, ClientKind::Cli)
+            RemoteClient::connect(config_path, ClientKind::Desktop)
         }
         None if is_reachable(socket) => {
             // A daemon is already running; never risk spawning the GUI itself.
-            RemoteClient::connect_existing(config_path, ClientKind::Cli)
+            RemoteClient::connect_existing(config_path, ClientKind::Desktop)
         }
         None => {
             return Err(CommandError::new(

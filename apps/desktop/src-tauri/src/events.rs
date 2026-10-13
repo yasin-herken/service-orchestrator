@@ -19,6 +19,13 @@ pub const CONNECTION_EVENT: &str = "daemon://connection";
 /// local subscription fell behind.
 pub const TASK_EVENT: &str = "daemon://task";
 
+/// Event name carrying a realtime log-stream payload.
+///
+/// The payload is a [`LogStreamEvent`](crate::dto::LogStreamEvent): an
+/// `entry`, a `lagged` drop report, or a `closed` end-of-stream, tagged with
+/// the frontend subscription it belongs to (`tasks/021.md` §24).
+pub const LOG_EVENT: &str = "daemon://log";
+
 /// Maps a task event onto its JSON payload.
 ///
 /// Returns [`None`] only if serialization fails, which would indicate the
@@ -59,5 +66,6 @@ mod tests {
     fn event_names_match_the_frontend_contract() {
         assert_eq!(CONNECTION_EVENT, "daemon://connection");
         assert_eq!(TASK_EVENT, "daemon://task");
+        assert_eq!(LOG_EVENT, "daemon://log");
     }
 }

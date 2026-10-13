@@ -76,9 +76,9 @@ describe('application shell', () => {
     const user = userEvent.setup();
     await renderApp();
 
-    await user.click(screen.getByRole('button', { name: 'Migrations' }));
+    await user.click(screen.getByRole('button', { name: 'Settings' }));
     expect(screen.getByText('Not implemented')).toBeInTheDocument();
-    expect(screen.getByRole('heading', { name: 'Migrations', level: 2 })).toBeInTheDocument();
+    expect(screen.getByRole('heading', { name: 'Settings', level: 2 })).toBeInTheDocument();
     expect(screen.getByText(/intentionally not built yet/i)).toBeInTheDocument();
     expect(screen.queryByRole('table')).not.toBeInTheDocument();
   });

@@ -2854,6 +2854,8 @@ dependencies = [
  "service-orchestrator-daemon",
  "service-orchestrator-domain",
  "service-orchestrator-execution",
+ "service-orchestrator-health",
+ "service-orchestrator-logging",
  "tauri",
  "tauri-build",
  "tokio",
@@ -2881,11 +2883,48 @@ dependencies = [
 ]
 
 [[package]]
+name = "service-orchestrator-health"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde_json",
+ "service-orchestrator-application",
+ "service-orchestrator-config",
+ "service-orchestrator-domain",
+ "service-orchestrator-execution",
+ "thiserror 2.0.21",
+ "tokio",
+]
+
+[[package]]
+name = "service-orchestrator-logging"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "service-orchestrator-application",
+ "service-orchestrator-domain",
+ "service-orchestrator-execution",
+ "service-orchestrator-process",
+ "tokio",
+]
+
+[[package]]
 name = "service-orchestrator-policy"
 version = "0.1.0"
 dependencies = [
  "service-orchestrator-domain",
  "thiserror 2.0.21",
+]
+
+[[package]]
+name = "service-orchestrator-process"
+version = "0.1.0"
+dependencies = [
+ "nix",
+ "serde",
+ "service-orchestrator-domain",
+ "thiserror 2.0.21",
+ "tokio",
 ]
 
 [[package]]

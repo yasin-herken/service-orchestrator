@@ -10,10 +10,13 @@
 //! frontend keeps a bounded buffer and follows a task with stable pagination
 //! rather than unbounded memory (`tasks/020.md` §18, §35).
 
+use std::collections::{HashMap, HashSet};
+
 use service_orchestrator_application::{LogLevel, LogRequest};
 use service_orchestrator_client::OrchestratorClient;
+use service_orchestrator_domain::{LibraryId, ServiceId, Task, WorkspaceId};
 
-use crate::dto::{BulkSummaryView, LogPageView, TaskView, WorkflowCancellationView};
+use crate::dto::{BulkSummaryView, LogPageView, TaskView, WorkflowCancellationView, WorkflowView};
 use crate::error::CommandError;
 use crate::validation::{parse_task_id, parse_workflow_id};
 
@@ -25,6 +28,15 @@ const MAX_LOG_LIMIT: usize = 1_000;
 
 /// The default number of log entries per page.
 const DEFAULT_LOG_LIMIT: usize = 500;
+
+/// The default number of tasks the Tasks screen loads.
+const DEFAULT_TASK_LIMIT: usize = 200;
+
+/// The hard cap on the task history loaded in one request.
+///
+/// Bounded on purpose: the screen pages and filters client-side and never asks
+/// for unlimited history (`tasks/021.md` §15).
+const MAX_TASK_LIMIT: usize = 1_000;
 
 /// A bounded, filterable request for a task's logs.
 ///
@@ -53,6 +65,121 @@ pub fn get_task(client: &dyn OrchestratorClient, task_id: &str) -> Result<TaskVi
     let task_id = parse_task_id(task_id)?;
     let task = client.get_task(&task_id).map_err(CommandError::from)?;
     Ok(TaskView::from(&task))
+}
+
+/// Lists active tasks plus a bounded slice of recent history.
+///
+/// Running tasks come from the engine's live view and recent tasks from its
+/// bounded retention; duplicates are removed by id, keeping the fresher
+/// running record. Each row's owning workspace is resolved from configuration
+/// (one pass over workspaces, services, and libraries) so the screen can scope
+/// and filter without guessing (`tasks/021.md` §10, §12, §15).
+///
+/// # Errors
+///
+/// Returns `INVALID_INPUT` for a rejected limit, or the daemon's structured
+/// error for anything else.
+pub fn list_tasks(
+    client: &dyn OrchestratorClient,
+    limit: Option<usize>,
+) -> Result<Vec<TaskView>, CommandError> {
+    let limit = limit.unwrap_or(DEFAULT_TASK_LIMIT).clamp(1, MAX_TASK_LIMIT);
+    let running = client.list_running_tasks();
+    let recent = client.list_recent_tasks(limit);
+
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut tasks: Vec<Task> = Vec::new();
+    for task in running.into_iter().chain(recent) {
+        if seen.insert(task.id.to_string()) {
+            tasks.push(task);
+        }
+    }
+
+    let owners = OwnerIndex::build(client)?;
+    let mut rows: Vec<TaskView> = tasks
+        .iter()
+        .map(|task| {
+            let view = TaskView::from(task);
+            let workspace = task
+                .service
+                .as_ref()
+                .and_then(|service| owners.service_workspace(service))
+                .or_else(|| {
+                    task.library
+                        .as_ref()
+                        .and_then(|library| owners.library_workspace(library))
+                });
+            match workspace {
+                Some(workspace) => view.with_workspace(workspace.to_string()),
+                None => view,
+            }
+        })
+        .collect();
+    // Newest first so the screen opens on the latest activity.
+    rows.sort_by(|a, b| b.created_at.cmp(&a.created_at).then(b.id.cmp(&a.id)));
+    Ok(rows)
+}
+
+/// Returns a workflow's declared steps and dependency edges.
+///
+/// # Errors
+///
+/// Returns `INVALID_INPUT` for a rejected workflow id, or the daemon's
+/// structured error (including an unknown workflow) for anything else.
+pub fn get_workflow(
+    client: &dyn OrchestratorClient,
+    workflow_id: &str,
+) -> Result<WorkflowView, CommandError> {
+    let workflow_id = parse_workflow_id(workflow_id)?;
+    let workflow = client
+        .get_workflow(&workflow_id)
+        .map_err(CommandError::from)?;
+    Ok(WorkflowView::from(&workflow))
+}
+
+/// Maps services and libraries to their owning workspace, resolved once per
+/// `list_tasks` call from configuration.
+struct OwnerIndex {
+    services: HashMap<ServiceId, WorkspaceId>,
+    libraries: HashMap<LibraryId, WorkspaceId>,
+}
+
+impl OwnerIndex {
+    /// Builds the index by walking every workspace's services and libraries.
+    ///
+    /// # Errors
+    ///
+    /// Returns the daemon's structured error when a listing fails.
+    fn build(client: &dyn OrchestratorClient) -> Result<Self, CommandError> {
+        let mut services = HashMap::new();
+        let mut libraries = HashMap::new();
+        for workspace in client.list_workspaces().map_err(CommandError::from)? {
+            for service in client
+                .list_services(&workspace.id)
+                .map_err(CommandError::from)?
+            {
+                services.insert(service.id, workspace.id.clone());
+            }
+            for library in client
+                .list_libraries(&workspace.id)
+                .map_err(CommandError::from)?
+            {
+                libraries.insert(library.id, workspace.id.clone());
+            }
+        }
+        Ok(Self {
+            services,
+            libraries,
+        })
+    }
+
+    fn service_workspace(&self, service: &ServiceId) -> Option<&WorkspaceId> {
+        self.services.get(service)
+    }
+
+    fn library_workspace(&self, library: &LibraryId) -> Option<&WorkspaceId> {
+        self.libraries.get(library)
+    }
 }
 
 /// Aggregates a workflow's tasks into a bulk-operation summary.
@@ -153,7 +280,7 @@ pub fn cancel_workflow(
 /// # Errors
 ///
 /// Returns `INVALID_INPUT` for an unknown severity.
-fn parse_level(raw: &str) -> Result<LogLevel, CommandError> {
+pub(crate) fn parse_level(raw: &str) -> Result<LogLevel, CommandError> {
     match raw.trim() {
         "trace" => Ok(LogLevel::Trace),
         "debug" => Ok(LogLevel::Debug),

@@ -423,6 +423,14 @@ mod tests {
             "an interactive peer that asks for it is trusted"
         );
         assert!(
+            destructive_allowed(&request(ClientKind::Desktop, true), true),
+            "the desktop GUI is an interactive peer with a human at the keyboard"
+        );
+        assert!(
+            !destructive_allowed(&request(ClientKind::Desktop, true), false),
+            "a desktop peer from another user is never trusted"
+        );
+        assert!(
             !destructive_allowed(&request(ClientKind::Tui, true), false),
             "a peer whose UID does not match the daemon is never trusted"
         );

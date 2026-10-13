@@ -22,27 +22,36 @@ displays.
 ## 1. Scope
 
 This document covers the shell, the dashboard, **service lifecycle
-management** (`tasks/019.md`), and **Git, build, and library management**
-(`tasks/020.md`): listing and selecting services, repositories, build targets,
-and libraries; start/stop/restart; Git fetch/pull/checkout/sync (single and bulk)
-with a read-only preview; single and bulk builds; library build/install/sync and
-preparation; dependency version alignment; task progress; structured logs;
-cancellation; realtime refresh; and confirmation/error handling.
+management** (`tasks/019.md`), **Git, build, and library management**
+(`tasks/020.md`), and **migration, task, health, and logs management**
+(`tasks/021.md`): listing and selecting services, repositories, build targets,
+libraries, and migration targets; start/stop/restart; Git
+fetch/pull/checkout/sync (single and bulk) with a read-only preview; single and
+bulk builds; library build/install/sync and preparation; dependency version
+alignment; migration validate/inspect/preview/apply; task browsing, filtering,
+details, and cancellation; the health dashboard with manual checks; unified
+realtime and historical logs; task progress; structured logs; cancellation;
+realtime refresh; and confirmation/error handling.
 
 | Delivered | Not yet delivered (later tasks) |
 | --- | --- |
-| Application shell: sidebar, header, workspace selector | Migration management GUI |
-| Dashboard: real workspace/daemon counters, task activity feed | Full health and logs dashboards |
-| Services table: state, health, branch, port, last operation | Service or workspace creation/editing |
-| Multi-selection with stable ids, select-all-visible, by type/state | Docker and Kubernetes targets |
-| Start / stop / restart, single and bulk | DMG packaging, code signing, notarization, CI/CD |
-| Service detail panel with configuration, observed state, diagnostics | Destructive Git operations (`git reset`, `git clean`, force stop) |
-| Git screen: repositories, selection, fetch/pull/checkout/sync, bulk preview | Automatic Maven POM rewriting or version changes |
-| Build screen: provider-agnostic targets and capabilities, single/bulk builds | New build providers |
-| Library screen: artifacts, dependents, verification, version alignment, prepare | A dedicated interactive client kind (see §8) |
+| Application shell: sidebar, header, workspace selector | Service or workspace creation/editing |
+| Dashboard: real workspace/daemon counters, task activity feed | Docker and Kubernetes targets |
+| Services table: state, health, branch, port, last operation | DMG packaging, code signing, notarization, CI/CD |
+| Multi-selection with stable ids, select-all-visible, by type/state | Destructive Git operations (`git reset`, `git clean`, force stop) |
+| Start / stop / restart, single and bulk | Automatic Maven POM rewriting or version changes |
+| Service detail panel with configuration, observed state, diagnostics | New build providers |
+| Git screen: repositories, selection, fetch/pull/checkout/sync, bulk preview | New migration providers or engines |
+| Build screen: provider-agnostic targets and capabilities, single/bulk builds | Service creation/editing GUI |
+| Library screen: artifacts, dependents, verification, version alignment, prepare | |
+| Migration screen: targets, snapshot, SQL preview, confirmed apply, bulk workflow | |
+| Tasks screen: bounded history, seven states, filters, details, cancellation | |
+| Health screen: runtime vs health, per-check detail, manual checks | |
+| Logs screen: unified viewer, scopes, follow, filters, bounded buffer | |
 | Shared task monitoring: progress dialog, cancellation, bounded logs | |
 | Realtime task-driven refresh; confirmation, error, and progress dialogs | |
 | Connection status with disconnect banner, Retry, and safe reconnect | |
+| Cross-screen navigation by task id and service id | |
 
 No business logic lives in the GUI. Starting a service runs the daemon's
 `StartService` use case, a bulk sync runs the daemon's `SyncRepositories`
@@ -223,6 +232,32 @@ limit to a hard maximum, and supports a severity floor and a text filter, so the
 viewer follows a task with stable pagination instead of unbounded memory
 (§15, §20).
 
+### Migrations, tasks, health, and unified logs (`tasks/021.md` §32, §33)
+
+| Command | Backing use case | Returns |
+| --- | --- | --- |
+| `list_migrations` | configuration snapshot + latest migration task | one row per migration-enabled service |
+| `get_migration_status` | the service's migration snapshot | provider, mode, target, environment, pending/locked (unknown until inspected) |
+| `validate_migration` | `migration_validate` task | an `OperationOutcome` |
+| `inspect_migration_status` | `migration_status` task | an `OperationOutcome` |
+| `inspect_migration_pending` | `migration_pending` task | an `OperationOutcome` |
+| `preview_migration` | `migration_preview` task (read-only) | an `OperationOutcome` |
+| `apply_migration` | `migration_apply` task (`confirmed` forwarded as intent) | an `OperationOutcome` |
+| `apply_selected_migrations` | one coordinated `apply_migrations` workflow | an `OperationOutcome` |
+| `list_tasks` | `list_tasks` (bounded, newest first, workspace-tagged) | the active + recent history |
+| `get_workflow` | `get_workflow` | declared steps and dependency edges |
+| `list_health` | service status + Health Manager index | runtime and health kept separate |
+| `get_health` | one service's health detail | checks, diagnostics, last failure |
+| `check_service_health` | `check_service_health` task | an `OperationOutcome` |
+| `check_service_readiness` | `check_service_readiness` task | an `OperationOutcome` |
+| `get_logs` | unified log query (task → service → workspace scope) | one bounded, cursor-paginated page |
+| `subscribe_service_logs` / `unsubscribe_service_logs` | per-service log subscription | `daemon://log` events (`entry`/`lagged`/`closed`) |
+
+Every migration, health, and readiness operation except `migration_status` is
+task-producing, so progress is observed through the task engine rather than a
+blocking call. `pending` and `locked` are `None` until a real inspection task
+answers (§14).
+
 ### Errors
 
 A failing command rejects with `{ code, message }`:
@@ -234,7 +269,8 @@ A failing command rejects with `{ code, message }`:
 - `NOT_FOUND` — the entity belongs to a different workspace;
 - the application error's variant name (for example `WorkspaceNotFound`,
   `ServiceNotFound`, `LibraryNotFound`), including a **permission denial** from
-  the policy engine and structured Git/build/library codes such as
+  the policy engine — surfaced as `PermissionDenied` with the daemon's
+  explanation — and structured Git/build/library codes such as
   `BUILD_UNSUPPORTED_OPERATION`;
 - `INTERNAL` — an adapter-side failure.
 
@@ -372,14 +408,22 @@ connect lock, so a burst of commands cannot start several daemons.
 | Secrets | never returned by a command; the adapter exposes only the shapes above |
 
 The webview cannot ask the operating system for anything: its whole surface is
-the commands and the two events. Input is validated at the Rust boundary, and
+the commands and the three events. Input is validated at the Rust boundary, and
 **every mutating command passes through the daemon's policy engine** exactly as
-the TUI and MCP do — the GUI is classified as a `Cli` client and lifecycle,
-Git-sync, build, and library-prepare operations are `Permission::SafeWrite`. A
-confirmation dialog is a user-interface affordance only; the daemon authorizes every request itself and
+the TUI and MCP do — the GUI connects with the dedicated `Desktop` client kind,
+which the daemon classifies as interactive, and lifecycle, Git-sync, build, and
+library-prepare operations are `Permission::SafeWrite`. A confirmation dialog is
+a user-interface affordance only; the daemon authorizes every request itself and
 the GUI never treats a confirmation as authorization (`tasks/019.md` §27, §35;
-`tasks/020.md` §31). Destructive operations (`git reset`, `git clean`, force
-stop) are not exposed by this interface at all.
+`tasks/020.md` §31; `tasks/021.md` §8). Protected operations such as applying
+migrations send the confirmation boolean as *intent* (`confirmed: true`), and the
+daemon independently requires the three trust signals — the request asks for it,
+the client kind is interactive, and the kernel-verified peer UID matches the
+daemon's — before upgrading a request to `Authorization::allow_destructive()`.
+A refusal surfaces as the structured `PermissionDenied` code plus the daemon's
+explanation, and the GUI never retries it automatically (§21, §26). Destructive
+operations (`git reset`, `git clean`, force stop) are not exposed by this
+interface at all.
 
 ## 8. Frontend architecture
 
@@ -678,7 +722,155 @@ branch — including uncommitted changes — without any checkout. No branch is
 forced (never `master`), and no version is changed and no POM is rewritten
 (§24, §25, §26). At least one phase must be selected to run.
 
-## 14. Shared task monitoring (`tasks/020.md` §27–§29)
+## 14. Migration management (`tasks/021.md` §4–§9)
+
+The Migrations screen reuses the migration configuration, preview, and
+application capabilities of the Application Core through the daemon; it adds no
+provider, no engine, and no storage.
+
+- **The table** has one row per migration-enabled service of the active
+  workspace (`list_migrations`): service, environment, provider + execution
+  mode, database identity, enabled, pending changesets, latest migration task,
+  and last run. The environment badge is coloured *and* labelled, and a
+  non-local target carries an explicit "authorization required" tag.
+- **Unknown stays unknown.** `pending` and `locked` are configuration-snapshot
+  facts the core cannot answer without a database round trip, so the GUI shows
+  "Unknown" until a real `migration_pending` inspection task answers; a service
+  that never ran shows "Never run". The GUI never guesses a pending count.
+- **Detail panel** shows the full configuration snapshot (provider, execution
+  mode, target, environment, timeout, authorization requirement, capabilities)
+  plus the latest task, and offers validate, inspect status, inspect pending,
+  SQL preview, apply, and view-logs actions.
+- **Apply** always passes through an explicit danger-tone confirmation that
+  names the environment and database identity, then calls `apply_migration`
+  with `confirmed: true`. The boolean is intent, never authorization: the
+  daemon re-verifies the client kind and the kernel-verified peer UID. On
+  success the shared `OperationProgressDialog` shows real task-engine progress.
+- **Bulk apply** selects services with checkboxes and submits one
+  `apply_migrations` coordinated workflow (`apply_selected_migrations`); the GUI
+  never loops over services itself, so database locking and ordering stay with
+  the backend.
+- **Safety** (`tasks/021.md` §9): nothing runs automatically, a failed
+  migration is never retried, a Liquibase lock is never released from the GUI,
+  and cancelling a running migration task never claims to roll back database
+  changes — the confirmation text says so explicitly.
+- **No secrets.** The database identity rendered comes from the daemon's
+  configuration snapshot; environment variables (including the `DB_PASSWORD`
+  in the fixture configuration) are never returned by any command, so no
+  frontend-only redaction is relied upon.
+
+### SQL preview
+
+`preview_migration` schedules a **read-only** task. The GUI waits for the task
+to settle, reads its own structured logs (`get_task_logs`), prefers entries the
+daemon labelled `source = "migration"`, and renders them in a monospace dialog
+with search + highlight, a wrap toggle, and copy-to-clipboard (with an honest
+"unavailable" fallback). Output beyond 2,000 lines is truncated and labelled as
+such, and the dialog states that nothing was executed and that the preview may
+be stale if the database changes before apply. A preview that never produced
+SQL reports the task's own failure code rather than opening an empty dialog.
+
+## 15. Task management (`tasks/021.md` §10–§16)
+
+- **One bounded listing.** The Tasks screen calls `list_tasks(200)` (the daemon
+  clamps further, newest first, workspace-tagged) and renders active plus recent
+  history in a shared `TaskTable`; it never streams an unbounded history.
+- **All seven states stay distinct.** `queued`, `running`, `succeeded`,
+  `failed`, `cancelled`, `skipped`, and `blocked` each keep their own label —
+  a cancelled task is never shown as "completed". Progress is indeterminate
+  whenever the engine reports no reliable total.
+- **Filters** cover status, workspace, task type, service/library, workflow,
+  time window (15 min / 1 h / 24 h), and free text, applied client-side over the
+  bounded listing so they are instant at history scale. The workspace filter
+  defaults to the active workspace and resets when the workspace changes.
+- **Details** show identity, state, workspace/service/library/workflow,
+  progress, timestamps, the structured failure (code, message, detail), and the
+  workflow's declared steps and dependency edges from `get_workflow` — real step
+  ids and task kinds, never parsed task names — plus the workflow's sibling
+  tasks from the same event stream.
+- **Cancellation** delegates to `cancel_task` / `cancel_workflow`; the returned
+  task state is the authority (`tasks/021.md` §14). The GUI reports the
+  daemon's answer and never claims that cancelling rolled back completed work.
+  A `PermissionDenied` refusal is surfaced verbatim in the panel.
+- **Cross-navigation** — "View logs" opens the Logs screen pinned to that task
+  (§19).
+
+## 16. Health dashboard (`tasks/021.md` §17–§22)
+
+- **Runtime and health are separate columns.** A `running` process may be
+  `unhealthy`; the two badges never collapse into one verdict. A service never
+  observed shows explicit "Not checked" cells and an `unknown` health badge —
+  never a fabricated healthy state.
+- **Per-check cells** (process, TCP, HTTP) show each check's observed state,
+  its duration, and its failure message; the last check and the last transition
+  timestamps come from real observations, and `consecutive_failures` is the
+  daemon's counter.
+- **The detail panel** lists every observed check with its type, requirement
+  (required/optional), target, duration, message, and observation time, plus
+  diagnostics (managed process, PID, ports) and the structured last failure
+  with recent error lines. **History is reported as unavailable** when no
+  transition has ever been observed, rather than invented (`tasks/021.md` §22).
+- **Manual checks** (`check_service_health`, `check_service_readiness`) are
+  scheduled as tasks; React never probes an endpoint and no second scheduler
+  exists. Real progress comes from the shared `OperationProgressDialog`.
+- **Realtime** (`tasks/021.md` §21): the daemon's event surface carries no
+  dedicated health event, so the screen refreshes the authoritative observation
+  once when a health-kind task settles (`terminalRevision`) — one reload per
+  settle, no polling loop.
+- **Cross-navigation** — "View service logs" opens the Logs screen pinned to
+  that service (§19).
+
+## 17. Realtime and historical logs (`tasks/021.md` §23–§28)
+
+One shared `UnifiedLogViewer` serves every screen; there is one log
+implementation, one query path, and one viewer.
+
+- **Scopes.** Workspace (all services of the active workspace), one service, or
+  one task — resolved by the daemon (`get_logs` scope order: task → service →
+  workspace membership). The Logs screen offers a scope selector; cross-screen
+  navigation seeds it.
+- **Realtime for services.** A service scope with Follow enabled attaches one
+  adapter subscription (`subscribe_service_logs`) and filters
+  `daemon://log` events by `subscription_id`; the subscription and the listener
+  are detached on scope change, on toggling Follow, and on unmount. `lagged`
+  and `closed` events are surfaced verbatim ("N entries were dropped; this view
+  may be incomplete") instead of silently pretending the view is complete.
+- **Polling for other scopes.** Workspace and task scopes have no push
+  subscription in the daemon's current event surface, so Follow polls the
+  cursor (`after`) once a second; this is documented behaviour, not a hidden
+  fallback (§26).
+- **Bounded everywhere.** The client buffer holds at most 1,000 entries
+  (oldest dropped first, with an explicit notice), each page requests at most
+  500 entries, appends de-duplicate by sequence, and a truncated page is
+  labelled "older entries exist beyond this page".
+- **Historical filters** — level floor, source, and free text — are part of the
+  query, so the daemon filters; pagination continues from `next_cursor` instead
+  of reloading the first page.
+- **"Clear view" clears only the visible buffer**; stored logs are never
+  touched from React, and no destructive log operation exists in the adapter.
+- **Copy** serializes exactly the visible buffer; if the clipboard API is
+  unavailable the viewer says so and asks the user to select manually.
+
+## 18. Error handling for the new screens
+
+Structured daemon errors are shown in the shared `ErrorDialog` with the action,
+the target, and the daemon's `{ code, message }`. A `PermissionDenied` refusal
+additionally carries an explanation that the confirmation dialog alone is never
+treated as authorization and that the daemon's policy decision is final — for
+example when the daemon cannot verify an authorized interactive request for a
+protected migration apply (§7, §26). No screen retries a refused or failed
+protected operation automatically.
+
+## 19. Cross-screen navigation (`tasks/021.md` §30)
+
+`AppShell` holds a small `NavIntent` (`taskId` and/or `serviceId` — stable
+identifiers only, nothing parsed from display text) alongside the active page.
+`navigate(page, intent)` passes it to the target screen, which uses it to open
+the exact entity: a failed migration opens its task on the Tasks screen, a
+failed task opens its logs, and an unhealthy service opens its health detail.
+The intent is consumed once; filters reset on arrival and on workspace switch.
+
+## 20. Shared task monitoring (`tasks/020.md` §27–§29)
 
 Git, build, and library operations all return task or workflow ids, and all
 three screens use **one** task-monitoring implementation, not three:
@@ -696,7 +888,7 @@ three screens use **one** task-monitoring implementation, not three:
   already done, so the GUI reports whatever the engine observed — including
   partial completion — rather than assuming a rollback (§29).
 
-## 15. Error handling and confirmations
+## 21. Error handling and confirmations
 
 - **Confirmations.** Single `start` and `check health` run directly; `stop`,
   `restart`, and *any* operation with more than one target require confirmation.
@@ -714,7 +906,7 @@ three screens use **one** task-monitoring implementation, not three:
 - **No optimistic success.** The outcome recorded is the daemon's; a row's state
   only changes when the daemon reports it.
 
-## 16. Keyboard shortcuts
+## 22. Keyboard shortcuts
 
 | Key | Context | Effect |
 | --- | --- | --- |
@@ -730,7 +922,7 @@ selection, busy, and state as text. Tables use `scope`-ed headers and captions
 colour alone, and every toolbar count is announced through an `aria-live`
 region.
 
-## 17. Performance
+## 23. Performance
 
 - **Cheap lists.** Repository and build-target lists are configuration-derived;
   no Git operation or per-service provider query runs on open beyond one
@@ -747,7 +939,7 @@ region.
 This keeps the GUI responsive at the documented scale of 40–100+ repositories
 and services.
 
-## 18. Development
+## 24. Development
 
 ```bash
 cd apps/desktop
@@ -771,23 +963,31 @@ Useful environment variables:
 Rule of thumb for manual testing: point the GUI at a copy of a configuration in
 a scratch directory so it cannot disturb a developer's real daemon.
 
-## 19. Testing and validation
+## 25. Testing and validation
 
 Backend (`apps/desktop/src-tauri`):
 
 - unit tests cover the connection state machine, error mapping, view models,
   identifier validation, command mapping, mutation mapping, event payloads,
   daemon-binary resolution, Git sync-mode parsing, the bulk-build request shape,
-  library prepare options, and log-level parsing;
+  library prepare options, log-level parsing, migration request mapping, task
+  query and cancellation mapping, health query mapping, log query mapping
+  (scope resolution and cursor semantics), and authorization-error
+  propagation (`PermissionDenied`), per `tasks/021.md` §41 — no real migration
+  and no external service is run in adapter unit tests;
 - `tests/daemon_ipc.rs` starts a **real daemon** on a private socket with fake
   executors over a shared in-memory runtime-state store and drives the adapter's
   query and mutation functions through the real `RemoteClient`. It asserts the
   exact wire shape the frontend consumes, structured error codes, single and
   bulk lifecycle and Git behaviour, provider capabilities, bulk-build and
   library partial failures, version-alignment mismatch, cancellation, Git/build/
-  library input validation, and that several clients share one authoritative
-  daemon. It uses **fixture workspaces and fakes only** — no real developer
-  repository and no real process.
+  library input validation, migration listing/status/preview/apply (including
+  the staging-authorization assertions that stand in for the §42 isolated
+  database item), health queries and readiness, unified log queries and cursor
+  pagination, task listing/cancellation, and that several clients share one
+  authoritative daemon — the cross-interface consistency of `tasks/021.md` §43.
+  It uses **fixture workspaces and fakes only** — no real developer repository,
+  no real process, and no real database.
 
 Frontend (`apps/desktop`):
 
@@ -799,7 +999,13 @@ Frontend (`apps/desktop`):
   the Builds screen (capabilities, single/bulk build, disabled unsupported,
   logs), the Libraries screen (list, detail, dependents, verification,
   alignment, prepare), workflow progress from task events, realtime refresh,
-  disconnection, cancellation, and the loading/error/empty states.
+  disconnection, cancellation, and the loading/error/empty states;
+- `tasks/021.md` coverage: migration listing/status/SQL preview/confirmed and
+  bulk apply/authorization refusal, task filtering/details/cancellation,
+  health rendering and event-driven refresh, log scopes/streaming/filters/
+  pagination/follow/buffer limits/subscription cleanup, cross-screen
+  navigation, workspace switching with stale-response protection, and
+  daemon-disconnect behaviour that disables mutating actions.
 
 Commands used for validation:
 
@@ -820,7 +1026,7 @@ cd apps/desktop
 npm run build && npm run typecheck && npm run test
 ```
 
-## 20. Limitations
+## 26. Limitations
 
 - **Realtime refresh is task-driven.** The daemon's forwarded `ServerEvent`
   stream carries task, log, and shutdown events — not service runtime, health, or
@@ -839,11 +1045,33 @@ npm run build && npm run typecheck && npm run test
   internal phases).
 - **Version alignment is read-only.** Misalignment is reported; there is no
   one-click upgrade, and no POM is ever rewritten.
-- **No dedicated client kind.** The GUI presents itself as a `Cli` client
-  (`tasks/018.md` §6); a dedicated interactive kind remains deferred.
-- **Out of scope by design.** No migration management GUI, no full health or
-  logs dashboard, no service editing, no new build providers, no Docker or
-  Kubernetes, no DMG, signing, notarization, or CI/CD (`tasks/020.md` §43).
+- **Dropped log events are not observable over IPC.** The daemon's event bus
+  applies backpressure by lagging slow subscribers, and the desktop forwarder
+  currently swallows the lag notification for log and task streams
+  (`crates/daemon/src/server.rs`). The GUI therefore cannot report a daemon-side
+  dropped count for those streams; a `lagged` event that *does* reach the
+  adapter is shown verbatim, but an end-to-end dropped counter requires a small
+  daemon change and is deferred.
+- **Only service logs stream in realtime.** The daemon's subscription surface
+  is per-service, so the workspace and task scopes follow by polling the cursor
+  once a second. This is a bounded, explicit fallback — not a second log system
+  — and it is disabled while the daemon is unreachable.
+- **Health history is observation-derived.** The core keeps the latest health
+  observation and transition timestamps, not a per-check time series; the
+  detail panel reports history as unavailable when nothing was observed rather
+  than fabricating one (`tasks/021.md` §22).
+- **Migration pending counts stay unknown until inspected.** `pending` and
+  `locked` are not configuration facts; they show "Unknown" until a real
+  `migration_pending` task answers, and the GUI never guesses.
+- **No isolated real-database migration test.** The §42 integration item
+  "authorized migration works against an isolated test database" is covered by
+  a local fixture with a fake migration executor plus staging-authorization
+  assertions (`apps/desktop/src-tauri/tests/daemon_ipc.rs`); no test in this
+  repository provisions a disposable real database, so a real Liquibase
+  round trip against an isolated database remains a manual verification.
+- **Out of scope by design.** No new migration providers, engines, or log
+  storage; no service creation/editing, no new build providers, no Docker or
+  Kubernetes, no DMG, signing, notarization, or CI/CD (`tasks/021.md` §47).
 - The active workspace selection lives in memory only; it is not persisted
   across restarts.
 - The development icon (`src-tauri/icons/icon.png`) is an obvious placeholder;

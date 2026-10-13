@@ -10,15 +10,21 @@ import {
   makeDaemonStatus,
   makeGitStatus,
   makeGitSyncPreview,
+  makeHealthDetail,
+  makeHealthRows,
   makeInspection,
   makeLibraries,
   makeLogPage,
+  makeMigrationRows,
+  makeMigrationStatus,
   makeOperationOutcome,
   makeRepositories,
   makeServiceDetail,
   makeServices,
   makeTaskView,
+  makeTasks,
   makeVerification,
+  makeWorkflow,
   makeWorkspace,
   makeWorkspaceStatus,
 } from './fixtures';
@@ -160,4 +166,37 @@ export function happyPathDefaults(): void {
     cancelled_tasks: 1,
     already_complete: false,
   });
+  mockDesktopApi.listTasks.mockResolvedValue(makeTasks());
+  mockDesktopApi.getWorkflow.mockResolvedValue(makeWorkflow());
+  mockDesktopApi.listMigrations.mockResolvedValue(makeMigrationRows());
+  mockDesktopApi.getMigrationStatus.mockResolvedValue(makeMigrationStatus());
+  mockDesktopApi.validateMigration.mockResolvedValue(
+    makeOperationOutcome({ kind: 'migration_validate' }),
+  );
+  mockDesktopApi.inspectMigrationStatus.mockResolvedValue(
+    makeOperationOutcome({ kind: 'migration_status' }),
+  );
+  mockDesktopApi.inspectMigrationPending.mockResolvedValue(
+    makeOperationOutcome({ kind: 'migration_pending' }),
+  );
+  mockDesktopApi.previewMigration.mockResolvedValue(
+    makeOperationOutcome({ kind: 'migration_preview' }),
+  );
+  mockDesktopApi.applyMigration.mockResolvedValue(
+    makeOperationOutcome({ kind: 'migration_apply' }),
+  );
+  mockDesktopApi.applySelectedMigrations.mockResolvedValue(
+    makeOperationOutcome({
+      status: 'workflow',
+      task_id: null,
+      workflow_id: 'wf-migrate',
+      kind: 'apply_migrations',
+    }),
+  );
+  mockDesktopApi.listHealth.mockResolvedValue(makeHealthRows());
+  mockDesktopApi.getHealth.mockResolvedValue(makeHealthDetail());
+  mockDesktopApi.checkServiceReadiness.mockResolvedValue(
+    makeOperationOutcome({ kind: 'readiness_check' }),
+  );
+  mockDesktopApi.getLogs.mockResolvedValue(makeLogPage());
 }

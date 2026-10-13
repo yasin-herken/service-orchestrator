@@ -28,3 +28,33 @@ export function formatDuration(totalSeconds: number): string {
 export function pluralize(count: number, word: string): string {
   return `${count} ${word}${count === 1 ? '' : 's'}`;
 }
+
+/** Formats a Unix timestamp (seconds) as a local date and time, or `—`. */
+export function formatDateTime(unixSeconds: number | null): string {
+  if (unixSeconds === null || unixSeconds === undefined) {
+    return '—';
+  }
+  const date = new Date(unixSeconds * 1000);
+  if (Number.isNaN(date.getTime())) {
+    return '—';
+  }
+  return date.toLocaleString([], {
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  });
+}
+
+/** Formats a duration in milliseconds as a compact human string. */
+export function formatMillis(millis: number | null): string {
+  if (millis === null || !Number.isFinite(millis)) {
+    return '—';
+  }
+  if (millis < 1_000) {
+    return `${Math.round(millis)} ms`;
+  }
+  return formatDuration(millis / 1_000);
+}

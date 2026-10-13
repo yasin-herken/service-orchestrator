@@ -144,6 +144,26 @@ pub fn check_service_health(
     Ok(OperationOutcome::from(result))
 }
 
+/// Runs only the required readiness checks for one service.
+///
+/// Readiness (are the required checks passing?) is distinct from liveness
+/// and from reachability; the daemon runs the same configured checks with a
+/// required-only scope (`tasks/021.md` §18, §20).
+///
+/// # Errors
+///
+/// Same as [`start_service`].
+pub fn check_service_readiness(
+    client: &dyn OrchestratorClient,
+    service_id: &str,
+) -> Result<OperationOutcome, CommandError> {
+    let service_id = parse_service_id(service_id)?;
+    let result = client
+        .check_service_readiness(&service_id)
+        .map_err(CommandError::from)?;
+    Ok(OperationOutcome::from(result))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

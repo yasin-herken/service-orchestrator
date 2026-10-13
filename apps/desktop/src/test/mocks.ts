@@ -11,9 +11,14 @@ import type {
   GitStatusView,
   GitSyncMode,
   GitSyncPreview,
+  HealthDetailView,
+  HealthRowView,
   LibraryDependentView,
   LibrarySummary,
   LogPageView,
+  LogStreamEvent,
+  MigrationRowView,
+  MigrationStatusView,
   OperationOutcome,
   RepositoryInspectionView,
   RepositorySummary,
@@ -23,16 +28,19 @@ import type {
   TaskView,
   VersionAlignmentView,
   WorkflowCancellationView,
+  WorkflowView,
   WorkspaceStatus,
   WorkspaceSummary,
 } from '../types/models';
-import type { PrepareOptions, TaskLogsQuery } from '../services/desktopApi';
+import type { LogsQuery, PrepareOptions, TaskLogsQuery } from '../services/desktopApi';
 
 type ConnectionHandler = (snapshot: ConnectionSnapshot) => void;
 type TaskHandler = (event: TaskEvent) => void;
+type LogHandler = (event: LogStreamEvent) => void;
 
 const connectionHandlers = new Set<ConnectionHandler>();
 const taskHandlers = new Set<TaskHandler>();
+const logHandlers = new Set<LogHandler>();
 
 function subscribeConnections(handler: ConnectionHandler): Promise<() => void> {
   connectionHandlers.add(handler);
@@ -42,6 +50,11 @@ function subscribeConnections(handler: ConnectionHandler): Promise<() => void> {
 function subscribeTasks(handler: TaskHandler): Promise<() => void> {
   taskHandlers.add(handler);
   return Promise.resolve(() => taskHandlers.delete(handler));
+}
+
+function subscribeLogs(handler: LogHandler): Promise<() => void> {
+  logHandlers.add(handler);
+  return Promise.resolve(() => logHandlers.delete(handler));
 }
 
 /**
@@ -128,11 +141,30 @@ export const mockDesktopApi = {
   getTaskLogs: vi.fn<(taskId: string, query?: TaskLogsQuery) => Promise<LogPageView>>(),
   cancelTask: vi.fn<(taskId: string) => Promise<TaskView>>(),
   cancelWorkflow: vi.fn<(workflowId: string) => Promise<WorkflowCancellationView>>(),
+  listTasks: vi.fn<(limit?: number) => Promise<TaskView[]>>(),
+  getWorkflow: vi.fn<(workflowId: string) => Promise<WorkflowView>>(),
+  listMigrations: vi.fn<(workspaceId: string) => Promise<MigrationRowView[]>>(),
+  getMigrationStatus: vi.fn<(serviceId: string) => Promise<MigrationStatusView>>(),
+  validateMigration: vi.fn<(serviceId: string) => Promise<OperationOutcome>>(),
+  inspectMigrationStatus: vi.fn<(serviceId: string) => Promise<OperationOutcome>>(),
+  inspectMigrationPending: vi.fn<(serviceId: string) => Promise<OperationOutcome>>(),
+  previewMigration: vi.fn<(serviceId: string) => Promise<OperationOutcome>>(),
+  applyMigration: vi.fn<(serviceId: string, confirmed: boolean) => Promise<OperationOutcome>>(),
+  applySelectedMigrations: vi.fn<
+    (workspaceId: string, serviceIds: string[], confirmed: boolean) => Promise<OperationOutcome>
+  >(),
+  listHealth: vi.fn<(workspaceId: string) => Promise<HealthRowView[]>>(),
+  getHealth: vi.fn<(workspaceId: string, serviceId: string) => Promise<HealthDetailView>>(),
+  checkServiceReadiness: vi.fn<(serviceId: string) => Promise<OperationOutcome>>(),
+  getLogs: vi.fn<(query?: LogsQuery) => Promise<LogPageView>>(),
+  subscribeServiceLogs: vi.fn<(subscriptionId: string, serviceId: string) => Promise<void>>(),
+  unsubscribeServiceLogs: vi.fn<(subscriptionId: string) => Promise<void>>(),
   getConnectionState: vi.fn<() => Promise<ConnectionSnapshot>>(),
   onConnectionChanged: vi.fn<(handler: ConnectionHandler) => Promise<() => void>>(
     subscribeConnections,
   ),
   onTaskEvent: vi.fn<(handler: TaskHandler) => Promise<() => void>>(subscribeTasks),
+  onLogEvent: vi.fn<(handler: LogHandler) => Promise<() => void>>(subscribeLogs),
 };
 
 /** Delivers a connection snapshot to every mounted subscriber. */
@@ -149,11 +181,22 @@ export function emitTaskEvent(event: TaskEvent): void {
   }
 }
 
+/** Delivers a realtime log-stream event to every mounted subscriber. */
+export function emitLogEvent(event: LogStreamEvent): void {
+  for (const handler of [...logHandlers]) {
+    handler(event);
+  }
+}
+
 /** Clears subscriptions and mock behaviour between tests. */
 export function resetMockDesktopApi(): void {
   connectionHandlers.clear();
   taskHandlers.clear();
+  logHandlers.clear();
   vi.resetAllMocks();
   mockDesktopApi.onConnectionChanged.mockImplementation(subscribeConnections);
   mockDesktopApi.onTaskEvent.mockImplementation(subscribeTasks);
+  mockDesktopApi.onLogEvent.mockImplementation(subscribeLogs);
+  mockDesktopApi.subscribeServiceLogs.mockResolvedValue(undefined);
+  mockDesktopApi.unsubscribeServiceLogs.mockResolvedValue(undefined);
 }
