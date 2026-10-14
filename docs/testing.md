@@ -52,6 +52,7 @@ real child processes).
 | Security | `./scripts/test-security.sh` | Security-dense suites and untrusted-input tests (see §6). |
 | Frontend | `./scripts/test-frontend.sh` | TypeScript type check + Vitest. |
 | End-to-end | `./scripts/test-e2e.sh` | Real MCP stdio binary, real daemon IPC, and (opt-in) the Tauri desktop adapter. |
+| Acceptance | `./scripts/test-acceptance.sh` | The real `service-orchestrator` binary end to end: real daemon over the real Unix-socket IPC, real MCP stdio, real local Git fixtures, a real Node.js service, and real HTTP health checks (`tasks/030.md`). |
 | All | `./scripts/test-all.sh` | fmt, check, unit, integration, security, clippy, frontend tests, frontend build. |
 
 Extra switches:
@@ -61,6 +62,12 @@ Extra switches:
   the separate Tauri toolchain and is the slowest step, so it is opt-in.
 - `INCLUDE_PERFORMANCE=1 ./scripts/test-e2e.sh` — also runs the `#[ignore]`d
   scale/measurement harnesses with `--ignored`.
+- `INCLUDE_REAL_TOOLCHAIN=1 ./scripts/test-acceptance.sh` — also runs the
+  `#[ignore]`d real Maven and real Liquibase acceptance tests. The Liquibase
+  branch is wrapped in a throwaway Maven `settings.xml` (no mirrors) and an
+  isolated local repository, so the developer's `~/.m2` is never read or written.
+- `INCLUDE_PERFORMANCE=1 ./scripts/test-acceptance.sh` — also runs the
+  scale/measurement harnesses.
 
 Every script uses `set -euo pipefail` and returns a **non-zero exit code** when
 any test fails. The security script additionally fails if a filter matches **no**
@@ -84,6 +91,13 @@ cargo fmt --check
   `tests/support/mod.rs` module is shared where a fixture is reused.
 - **Cross-crate end-to-end tests** live at the repository root
   (`tests/mcp_stdio.rs`) and in the daemon and desktop crates.
+- **The Task 030 acceptance suite** lives at the repository root
+  (`tests/acceptance.rs`). It drives the **real `service-orchestrator` binary**:
+  a real daemon over the real Unix-socket IPC, a real MCP stdio server, real
+  local Git repositories with a real bare remote, a real Node.js HTTP fixture
+  service, and real HTTP health probes. Each scenario owns a private temp root,
+  a private socket (pinned through `SERVICE_ORCHESTRATOR_SOCKET`), and its own
+  daemon, which is stopped and removed on drop.
 - **The Tauri desktop adapter** is its own workspace
   (`apps/desktop/src-tauri`); its unit tests are inline and its IPC integration
   tests live in `apps/desktop/src-tauri/tests/daemon_ipc.rs`.
@@ -98,7 +112,7 @@ Every layer is isolated by construction (`tasks/027.md` §37, §39):
 | --- | --- |
 | Configuration | Parsed from in-memory strings or a fixture `config.toml` in a throwaway temp directory. Real `~/.service-orchestrator` is never read or written. |
 | Git | Temporary local repositories and local bare remotes created and torn down by the test. No network, no GitHub, no developer checkout. |
-| Maven / npm | Fake process managers for unit tests; the `#[ignore]`d Maven/JVM integration tests are the only ones that touch a real toolchain. The developer's real `~/.m2` and npm caches are not used by the default suite. |
+| Maven / npm | Fake process managers for unit tests; the `#[ignore]`d Maven/JVM integration tests are the only ones that touch a real toolchain. Every real Maven build pins its own `settings.xml` and `-Dmaven.repo.local`, and the acceptance script isolates the Liquibase run the same way, so the developer's real `~/.m2` and npm caches are never read or written by any suite. |
 | Databases / migrations | Target authorization and planning are tested without a database; the only real-toolchain migration tests are `#[ignore]`d and require an explicit opt-in. |
 | Processes | Small, standard helper executables (`/bin/sh`, `sleep`, `printf`) spawned into their own process group and always stopped or killed. |
 | Daemon / IPC | A private Unix-domain socket under a per-test temp directory, pinned through `SERVICE_ORCHESTRATOR_SOCKET`; the socket and lock file are removed on drop. |
@@ -190,4 +204,7 @@ explicitly with `--ignored`.
 - [`performance-report.md`](performance-report.md) — the measurement harnesses.
 - [`reliability-report.md`](reliability-report.md) — the reliability findings
   the regression tests lock down.
+- [`acceptance-test-matrix.md`](acceptance-test-matrix.md),
+  [`final-acceptance-report.md`](final-acceptance-report.md) — the Task 030
+  acceptance results.
 - [`architecture.md`](architecture.md) — the layers these tests exercise.
