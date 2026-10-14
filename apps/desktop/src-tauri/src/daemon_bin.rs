@@ -13,18 +13,32 @@ use service_orchestrator_client::DAEMON_BIN_ENV;
 /// The executable name of the daemon host binary.
 pub const DAEMON_BINARY: &str = "service-orchestrator";
 
+/// The `Contents/Resources` directory of a macOS application bundle whose
+/// executable lives in `Contents/MacOS`.
+const BUNDLE_RESOURCES: &str = "Resources";
+
 /// Resolves the daemon executable for a host program.
 ///
 /// Resolution order:
 ///
 /// 1. an explicit override (the [`DAEMON_BIN_ENV`] environment variable), used
 ///    as-is only when it points at an existing file;
-/// 2. `PATH`;
-/// 3. a sibling of `current_exe` (installed or `cargo build` layout);
-/// 4. `target/{debug,release}` directories walking up from `current_exe`,
+/// 2. a sibling of `current_exe` (the installed/packaged layout: Tauri bundles
+///    the external binary beside the GUI in `Contents/MacOS`, and `cargo build`
+///    places both in `target/{debug,release}`);
+/// 3. `<bundle>/Contents/Resources/` next to a packaged GUI executable, so a
+///    bundle that stores the orchestration binary as a resource is still found;
+/// 4. `PATH`;
+/// 5. `target/{debug,release}` directories walking up from `current_exe`,
 ///    which covers the `npm run tauri dev` layout where the GUI binary lives
 ///    under `apps/desktop/src-tauri/target/debug/` while the shared binary is
 ///    built in the repository's root `target/`.
+///
+/// The bundled candidate deliberately wins over `PATH`: a packaged application
+/// must be self-contained, and a `service-orchestrator` the user happens to have
+/// installed elsewhere must not silently replace the version shipped inside the
+/// bundle (`tasks/031.md` §12, §13, §15). `PATH` remains the fallback for the
+/// development layout where the shared binary is only built, not bundled.
 ///
 /// Returns [`None`] when no candidate exists, so the caller can produce one
 /// actionable error instead of spawning a doomed process.
@@ -37,6 +51,19 @@ pub fn resolve_daemon_binary(
     if let Some(path) = explicit_override {
         return path.is_file().then(|| path.to_path_buf());
     }
+    if let Some(executable_dir) = current_exe.parent() {
+        let sibling = executable_dir.join(DAEMON_BINARY);
+        if sibling.is_file() {
+            return Some(sibling);
+        }
+        // Packaged macOS layout: Contents/MacOS/<gui> + Contents/Resources/…
+        if let Some(contents) = executable_dir.parent() {
+            let bundled = contents.join(BUNDLE_RESOURCES).join(DAEMON_BINARY);
+            if bundled.is_file() {
+                return Some(bundled);
+            }
+        }
+    }
     if let Some(raw_path) = search_path {
         for directory in std::env::split_paths(raw_path) {
             let candidate = directory.join(DAEMON_BINARY);
@@ -44,11 +71,6 @@ pub fn resolve_daemon_binary(
                 return Some(candidate);
             }
         }
-    }
-    let executable_dir = current_exe.parent()?;
-    let sibling = executable_dir.join(DAEMON_BINARY);
-    if sibling.is_file() {
-        return Some(sibling);
     }
     for ancestor in current_exe.ancestors().skip(1) {
         for profile in ["debug", "release"] {
@@ -121,7 +143,7 @@ mod tests {
     }
 
     #[test]
-    fn path_is_searched_before_sibling_locations() {
+    fn path_is_searched_when_no_bundled_daemon_exists() {
         let dir = scratch("path");
         let bin_dir = dir.join("bin");
         let on_path = bin_dir.join(DAEMON_BINARY);
@@ -132,6 +154,56 @@ mod tests {
         let resolved =
             resolve_daemon_binary(&app_dir.join("gui-app"), None, Some(bin_dir.as_os_str()));
         assert_eq!(resolved, Some(on_path));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_bundled_sibling_wins_over_a_daemon_on_path() {
+        // A packaged application must use the binary shipped inside its bundle,
+        // not an unrelated `service-orchestrator` the user has on PATH
+        // (tasks/031.md §15).
+        let dir = scratch("bundle-wins");
+        let bin_dir = dir.join("bin");
+        touch(&bin_dir.join(DAEMON_BINARY));
+        let macos_dir = dir.join("App.app").join("Contents").join("MacOS");
+        let bundled = macos_dir.join(DAEMON_BINARY);
+        touch(&bundled);
+        touch(&macos_dir.join("gui-app"));
+
+        let resolved =
+            resolve_daemon_binary(&macos_dir.join("gui-app"), None, Some(bin_dir.as_os_str()));
+        assert_eq!(resolved, Some(bundled));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_daemon_in_bundle_resources_is_found() {
+        // Some bundles store the orchestration binary as a resource instead of
+        // a sibling in Contents/MacOS.
+        let dir = scratch("resources");
+        let macos_dir = dir.join("App.app").join("Contents").join("MacOS");
+        let resources = dir.join("App.app").join("Contents").join("Resources");
+        let bundled = resources.join(DAEMON_BINARY);
+        touch(&bundled);
+        touch(&macos_dir.join("gui-app"));
+
+        let resolved = resolve_daemon_binary(&macos_dir.join("gui-app"), None, None);
+        assert_eq!(resolved, Some(bundled));
+        let _ = fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn a_packaged_layout_ignores_a_target_directory_further_up() {
+        // The bundle wins even when a stray target/debug tree sits above it.
+        let dir = scratch("packaged-target");
+        let macos_dir = dir.join("App.app").join("Contents").join("MacOS");
+        let bundled = macos_dir.join(DAEMON_BINARY);
+        touch(&bundled);
+        touch(&macos_dir.join("gui-app"));
+        touch(&dir.join("target").join("debug").join(DAEMON_BINARY));
+
+        let resolved = resolve_daemon_binary(&macos_dir.join("gui-app"), None, None);
+        assert_eq!(resolved, Some(bundled));
         let _ = fs::remove_dir_all(dir);
     }
 
