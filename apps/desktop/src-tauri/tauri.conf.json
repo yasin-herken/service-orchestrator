@@ -16,7 +16,29 @@
     }
   },
   "bundle": {
-    "active": false,
-    "targets": "all"
+    "active": true,
+    "targets": ["app", "dmg"],
+    "category": "DeveloperTool",
+    "copyright": "Copyright © 2026 Service Orchestrator contributors. Licensed under Apache-2.0.",
+    "shortDescription": "Local macOS developer environment orchestration.",
+    "longDescription": "Service Orchestrator manages microservice repositories, builds, database migrations, running services, and development workflows from one local macOS application. The desktop GUI is a thin client of the shared local daemon, so it observes exactly the same state as the terminal UI and MCP server.",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.png"
+    ],
+    "externalBin": ["binaries/service-orchestrator"],
+    "macOS": {
+      "minimumSystemVersion": "11.0",
+      "hardenedRuntime": true,
+      "entitlements": "entitlements.plist",
+      "dmg": {
+        "windowSize": { "width": 660, "height": 400 },
+        "appPosition": { "x": 180, "y": 170 },
+        "applicationFolderPosition": { "x": 480, "y": 170 }
+      }
+    }
   }
 }

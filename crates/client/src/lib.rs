@@ -20,11 +20,13 @@
 
 mod client;
 pub mod ops;
+mod path_env;
 mod protocol;
 mod remote;
 mod socket;
 
 pub use client::{ConfigSummary, OrchestratorClient};
+pub use path_env::{discovered_tool_directories, effective_search_path, merge_search_path};
 pub use protocol::{
     codes, read_frame, unavailable, write_frame, ClientKind, ConfigurationChanged, DiffParams,
     RequestEnvelope, ResponseEnvelope, ServerEvent, ServerMessage, MAX_FRAME_BYTES,

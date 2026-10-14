@@ -41,10 +41,10 @@ profiles, and groups through a validated, reviewed commit; task
 progress; structured logs; cancellation;
 realtime refresh; and confirmation/error handling.
 
-| Delivered | Not yet delivered (later tasks) |
+| Delivered | Not yet delivered |
 | --- | --- |
 | Application shell: sidebar, header, workspace selector | Docker and Kubernetes targets |
-| Dashboard: real workspace/daemon counters, task activity feed | DMG packaging, code signing, notarization, CI/CD |
+| Dashboard: real workspace/daemon counters, task activity feed | Automatic updates |
 | Services table: state, health, branch, port, last operation | Destructive Git operations (`git reset`, `git clean`, force stop) |
 | Multi-selection with stable ids, select-all-visible, by type/state | Automatic Maven POM rewriting or version changes |
 | Start / stop / restart, single and bulk | New build providers |
@@ -75,7 +75,7 @@ GUI only submits a request and then displays the authoritative result.
 apps/desktop/
 ├── index.html                 # webview entry
 ├── package.json               # scripts: dev, build, typecheck, test, tauri
-├── scripts/preflight.mjs      # builds the root service-orchestrator binary
+├── scripts/preflight.mjs      # builds + stages the root service-orchestrator binary
 ├── vite.config.ts             # dev server on :5173, strict port
 ├── vitest.config.ts           # jsdom + testing-library
 ├── tsconfig.json              # strict, no `any`
@@ -104,9 +104,10 @@ apps/desktop/
 │   └── styles/global.css      # light + dark via prefers-color-scheme
 └── src-tauri/
     ├── Cargo.toml             # its own workspace; excluded from the root one
-    ├── tauri.conf.json        # identifier, CSP, dev/build commands
+    ├── tauri.conf.json        # identifier, CSP, dev/build commands, macOS bundle
+    ├── entitlements.plist     # minimal hardened-runtime entitlements (signed builds)
     ├── capabilities/default.json
-    ├── icons/icon.png         # development placeholder icon
+    ├── icons/                 # generated from ../../icon-source.png (placeholder branding)
     └── src/
         ├── main.rs, lib.rs    # event loop, window, navigation filter, command registration
         ├── commands.rs        # the Tauri commands (read + mutation)
@@ -436,16 +437,30 @@ re-executed as a daemon. Before the first connection the adapter resolves the
 real `service-orchestrator` binary in this order:
 
 1. `SERVICE_ORCHESTRATOR_DAEMON_BIN` (an explicit override);
-2. `PATH`;
-3. a sibling of the running program;
-4. `target/debug` or `target/release` walking up from the running program,
+2. a sibling of the running program — the packaged layout, where Tauri bundles
+   the orchestration binary next to the GUI in `Contents/MacOS`;
+3. `<bundle>/Contents/Resources/service-orchestrator` — a bundle that stores the
+   binary as a resource;
+4. `PATH`;
+5. `target/debug` or `target/release` walking up from the running program,
    which covers the `npm run tauri dev` layout.
+
+A bundled candidate deliberately wins over `PATH`: a packaged application must
+be self-contained, so a `service-orchestrator` the user happens to have installed
+elsewhere never silently replaces the version shipped inside the bundle
+(`tasks/031.md` §12, §15).
 
 The resolved path is exported through `SERVICE_ORCHESTRATOR_DAEMON_BIN` for the
 shared autostart logic in `crates/client/src/socket.rs`. If no binary can be
 found, the adapter reports one actionable error naming every remedy instead of
 spawning something wrong. When a daemon is already running and no binary was
 found, the adapter attaches to it without ever enabling autostart.
+
+Because a GUI launched from Finder has a bare system `PATH`, the shared autostart
+additionally augments the daemon's `PATH` with the developer tool directories
+that exist on the machine (Homebrew, SDKMAN, nvm, fnm, Volta, `JAVA_HOME/bin`)
+without ever running a login shell (`crates/client/src/path_env.rs`;
+`macos-distribution.md` §9).
 
 The adapter also keeps exactly one client for its lifetime, with a single
 connect lock, so a burst of commands cannot start several daemons.
@@ -1018,18 +1033,25 @@ opened it when it closes, so a keyboard user cannot tab behind a modal
 This keeps the GUI responsive at the documented scale of 40–100+ repositories
 and services.
 
-## 24. Development
+## 24. Development and packaging
 
 ```bash
 cd apps/desktop
 npm install
-npm run tauri dev      # preflight: cargo build --bin service-orchestrator, then vite + tauri
+npm run tauri dev      # preflight: builds + stages the sidecar, then vite + tauri
+npm run tauri:build    # release sidecar, then `tauri build`
 ```
 
 `npm run tauri dev` runs `scripts/preflight.mjs` first, which builds the root
-`service-orchestrator` binary — the daemon autostart prerequisite. Tauri then
-starts the Vite dev server (`http://localhost:5173`, strict port) and the native
-window.
+`service-orchestrator` binary (the daemon autostart prerequisite) **and stages
+it as the Tauri external binary** (`src-tauri/binaries/service-orchestrator-<host
+triple>`), because `tauri-build` refuses to compile the crate until that file
+exists. Tauri then starts the Vite dev server (`http://localhost:5173`, strict
+port) and the native window.
+
+The supported way to produce the `.app` and `.dmg` is
+`./scripts/build-macos.sh`, which stages a per-architecture release sidecar and
+invokes `tauri build` directly; see [`macos-distribution.md`](macos-distribution.md).
 
 Useful environment variables:
 
@@ -1190,14 +1212,16 @@ npm run build && npm run typecheck && npm run test
   configuration; the GUI selects and previews them but never creates or edits
   them (§27).
 - **Out of scope by design.** No new migration providers, engines, or log
-  storage; no new build providers, no Docker or Kubernetes, no DMG, signing,
-  notarization, or CI/CD (`tasks/021.md` §47, `tasks/022.md` §46). Service,
+  storage; no new build providers, no Docker or Kubernetes, and no automatic
+  updates (`tasks/021.md` §47, `tasks/022.md` §46). Service,
   workspace, library, profile, and group creation/editing were later added by the
-  Configuration screen (§28, `tasks/023.md`).
+  Configuration screen (§28, `tasks/023.md`); macOS packaging, signing,
+  notarization, and the DMG were added by `tasks/031.md` and are documented in
+  [`macos-distribution.md`](macos-distribution.md).
 - The active workspace selection lives in memory only; it is not persisted
   across restarts.
-- The development icon (`src-tauri/icons/icon.png`) is an obvious placeholder;
-  real artwork is a packaging concern for a later task.
+- The application icon (generated from `apps/desktop/icon-source.png`) is an
+  obvious placeholder; real artwork remains provisional.
 
 ## 27. Workflow management and profiles (`tasks/022.md`)
 

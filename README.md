@@ -131,6 +131,38 @@ See [`docs/getting-started.md`](docs/getting-started.md) for a guided first run.
 
 All three are clients of the same daemon and observe identical state.
 
+## Install on macOS
+
+A ready-to-install macOS application — `Service Orchestrator.app` and a
+`Service Orchestrator_<version>_<arch>.dmg` — can be produced locally:
+
+```bash
+./scripts/build-macos.sh              # native Apple Silicon
+./scripts/build-macos.sh --arch x86_64     # Intel (needs the Rust target)
+./scripts/build-macos.sh --arch universal  # both (needs both Rust targets)
+./scripts/verify-macos-bundle.sh      # bundle structure, architecture, signature, DMG
+```
+
+Install by opening the DMG and dragging **Service Orchestrator** onto the
+**Applications** shortcut. The window then auto-starts the bundled orchestrator
+as the shared daemon; no terminal, no PATH setup, and no Rust/Node toolchain are
+required to run it.
+
+- **Architectures:** Apple Silicon is the verified primary target. Intel and
+  universal builds are supported by the script when the matching Rust target is
+  installed; see [`docs/macos-distribution.md`](docs/macos-distribution.md).
+- **Signing/notarization:** optional. With no Apple credentials the script
+  ad-hoc signs and seals the bundle, so Gatekeeper shows the normal
+  "unidentified developer" prompt on first launch. Set
+  `APPLE_SIGNING_IDENTITY` (and the Apple notarization variables) to sign and
+  notarize.
+- Bundling the app never requires signing credentials, and never installs a
+  Rust, Cargo, or Node toolchain on the user's machine.
+
+See [`docs/macos-distribution.md`](docs/macos-distribution.md) for the full
+guide and [`docs/packaging-report.md`](docs/packaging-report.md) for the
+reference build's measured results.
+
 ## Configuration
 
 The default configuration file is `~/.service-orchestrator/config.toml`. The

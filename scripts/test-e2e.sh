@@ -25,6 +25,10 @@ cd "$root"
 
 if [[ "${RUN_DESKTOP_TESTS:-0}" == "1" ]]; then
   echo "==> Desktop adapter tests (Tauri unit + IPC end-to-end)"
+  # The desktop crate declares the orchestration binary as a Tauri external
+  # binary (bundle.externalBin), so tauri-build requires the triple-named
+  # sidecar to exist before the crate compiles (tasks/031.md §12).
+  node apps/desktop/scripts/preflight.mjs --profile debug --stage-only
   (cd apps/desktop/src-tauri && cargo test)
 fi
 

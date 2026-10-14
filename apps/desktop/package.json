@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "tauri": "node scripts/preflight.mjs && tauri"
+    "tauri": "node scripts/preflight.mjs && tauri",
+    "tauri:build": "node scripts/preflight.mjs --profile release && tauri build"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.12.3",

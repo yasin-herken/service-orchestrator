@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Entitlements for signed, hardened-runtime distribution builds (Task 031 §32).
+
+  Only the two entitlements the embedded WKWebView's JavaScript engine needs are
+  granted. The hardened runtime blocks both just-in-time compilation and the
+  dynamic allocation of writable-then-executable memory by default; without
+  these two keys the webview crashes at launch on a hardened system.
+
+  Nothing else is granted: no App Sandbox exception, no library-validation
+  bypass, no network or filesystem entitlement, and no arbitrary-execution
+  entitlement. The GUI never executes a shell and never talks to the network
+  (docs/desktop-gui.md §7); the orchestration binary that it spawns is a normal
+  signed child process and needs no entitlement of its own.
+
+  Entitlements apply only when the bundle is code signed. Unsigned local
+  development builds ignore this file entirely.
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.allow-jit</key>
+    <true/>
+    <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+    <true/>
+</dict>
+</plist>

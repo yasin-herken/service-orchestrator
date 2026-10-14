@@ -144,6 +144,29 @@ pub fn daemon_executable() -> io::Result<PathBuf> {
     std::env::current_exe()
 }
 
+/// Builds the detached daemon command for `config_path`.
+///
+/// The child runs in its own process group so a terminal hang-up on the parent
+/// does not signal it. Its `PATH` is augmented with the discovered developer
+/// tool directories, because a GUI launched from Finder has a bare system
+/// `PATH` and the daemon (plus the managed services it later spawns) must still
+/// find `git`, `java`, `mvn`, and `node` (`tasks/031.md` §19). The inherited
+/// entries keep precedence.
+fn daemon_command(exe: &Path, config_path: &Path, socket_path: &Path) -> Command {
+    let mut command = Command::new(exe);
+    command
+        .arg("daemon")
+        .arg("--config")
+        .arg(config_path)
+        .env(SOCKET_ENV, socket_path)
+        .env("PATH", crate::path_env::effective_search_path());
+    // Put the daemon in its own process group so it survives the terminal that
+    // launched the client (`tasks/015.md` §16).
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+    command
+}
+
 /// Starts a detached daemon for `config_path` and waits until it is reachable.
 ///
 /// The child runs in its own process group so a terminal hang-up on the parent
@@ -160,19 +183,11 @@ pub fn start_daemon(config_path: &Path, socket_path: &Path) -> io::Result<UnixSt
     let log = open_daemon_log(&log_path(socket_path))?;
     let log_err = log.try_clone()?;
 
-    let mut command = Command::new(exe);
+    let mut command = daemon_command(&exe, config_path, socket_path);
     command
-        .arg("daemon")
-        .arg("--config")
-        .arg(config_path)
-        .env(SOCKET_ENV, socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
-    // Put the daemon in its own process group so it survives the terminal that
-    // launched the client (`tasks/015.md` §16).
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
     let mut child = command.spawn()?;
     wait_for_socket(socket_path, &mut child)
 }
@@ -266,7 +281,7 @@ pub fn connect_existing(socket_path: &Path) -> io::Result<UnixStream> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -417,6 +432,40 @@ mod tests {
             "a pre-existing directory keeps its permissions"
         );
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn the_spawned_daemon_receives_the_socket_and_an_augmented_path() {
+        // A GUI launched from Finder starts the daemon through this command, so
+        // it must carry the discovered developer tool directories on PATH
+        // (tasks/031.md §19).
+        let command = daemon_command(
+            Path::new("/bin/true"),
+            Path::new("/tmp/example/config.toml"),
+            Path::new("/tmp/example/run/daemon.sock"),
+        );
+        let envs: Vec<(OsString, Option<OsString>)> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
+            .collect();
+
+        let socket = envs
+            .iter()
+            .find(|(key, _)| key == SOCKET_ENV)
+            .expect("the socket override is exported");
+        assert_eq!(
+            socket.1.as_deref(),
+            Some(OsStr::new("/tmp/example/run/daemon.sock"))
+        );
+
+        let path = envs
+            .iter()
+            .find(|(key, _)| key == OsStr::new("PATH"))
+            .expect("the PATH is exported");
+        assert_eq!(
+            path.1.as_deref(),
+            Some(crate::path_env::effective_search_path().as_os_str())
+        );
     }
 
     #[test]

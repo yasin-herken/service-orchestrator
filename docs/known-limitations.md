@@ -91,10 +91,20 @@ has its own guide, that guide has more detail.
 
 ## Packaging and platform
 
-- **DMG packaging is not available.** `tauri.conf.json` sets
-  `bundle.active = false`, so `npm run tauri build` produces the app binary but no
-  installer.
-- **No code signing, notarization, or CI/CD** are configured.
+- **macOS builds are ad-hoc signed and unnotarized by default.** The build script
+  seals the bundle ad-hoc so it is internally consistent, and supports Developer
+  ID signing and Apple notarization when the standard Apple environment
+  variables are provided. The reference build was produced without credentials,
+  so Gatekeeper warns on first launch
+  ([`macos-distribution.md`](macos-distribution.md) §10–§12).
+- **The verified architecture is Apple Silicon.** Intel (`x86_64-apple-darwin`)
+  and universal builds are supported by `scripts/build-macos.sh` when the
+  matching Rust target is installed; they were not produced or verified in the
+  reference environment ([`packaging-report.md`](packaging-report.md)).
+- **The application icon is an original placeholder**, not final branding.
+- **No automatic updates.** A new version is installed manually from a new DMG;
+  user configuration and workspace data are preserved.
+- **No CI/CD.** Distribution is entirely local.
 - **Kubernetes and Docker targets are not implemented.**
 
 ## Security
