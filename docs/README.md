@@ -74,6 +74,9 @@ rest are focused references.
 | [`test-coverage-report.md`](test-coverage-report.md) | What is covered and what is not. |
 | [`performance-report.md`](performance-report.md) | Scale/measurement harnesses and results. |
 | [`reliability-report.md`](reliability-report.md) | Reliability findings locked down by regression tests. |
+| [`acceptance-test-matrix.md`](acceptance-test-matrix.md) | The Task 030 end-to-end acceptance scenarios, expected/actual results, and evidence. |
+| [`final-acceptance-report.md`](final-acceptance-report.md) | The Task 030 acceptance summary, defects, findings, and packaging-readiness decision. |
+| [`release-blockers.md`](release-blockers.md) | Unresolved release-blocking issues (none at Task 030 close). |
 
 ## Security
 
