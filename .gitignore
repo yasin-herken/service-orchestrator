@@ -32,6 +32,9 @@ node_modules/
 apps/desktop/dist/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/gen/
+# Staged Tauri external binaries (the orchestration binary copied in by
+# scripts/build-macos.sh); rebuilt from source, never committed.
+apps/desktop/src-tauri/binaries/
 
 ### Intellij ###
 # IntelliJ IDEA editor files and settings

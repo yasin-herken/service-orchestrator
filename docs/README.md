@@ -37,6 +37,7 @@ go wrong.
 | [`tui.md`](tui.md) | The Ratatui terminal interface: screens, keys, and operations. |
 | [`mcp.md`](mcp.md) | The MCP server: tools, resources, prompts, client setup, and security. |
 | [`local-daemon.md`](local-daemon.md) | The shared local daemon every interface talks to, and the IPC protocol. |
+| [`macos-distribution.md`](macos-distribution.md) | Building, verifying, installing, and distributing the macOS app and DMG. |
 | [`error-reference.md`](error-reference.md) | Stable error codes with meaning, cause, and recommended action. |
 | [`troubleshooting.md`](troubleshooting.md) | Diagnosis steps for the most common failures. |
 | [`known-limitations.md`](known-limitations.md) | Verified limitations of the current implementation. |
@@ -74,6 +75,7 @@ rest are focused references.
 | [`test-coverage-report.md`](test-coverage-report.md) | What is covered and what is not. |
 | [`performance-report.md`](performance-report.md) | Scale/measurement harnesses and results. |
 | [`reliability-report.md`](reliability-report.md) | Reliability findings locked down by regression tests. |
+| [`packaging-report.md`](packaging-report.md) | The macOS packaging reference build: artifacts, architecture, signing status, and limits. |
 | [`acceptance-test-matrix.md`](acceptance-test-matrix.md) | The Task 030 end-to-end acceptance scenarios, expected/actual results, and evidence. |
 | [`final-acceptance-report.md`](final-acceptance-report.md) | The Task 030 acceptance summary, defects, findings, and packaging-readiness decision. |
 | [`release-blockers.md`](release-blockers.md) | Unresolved release-blocking issues (none at Task 030 close). |
