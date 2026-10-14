@@ -979,7 +979,13 @@ export interface ConfigurationPreviewView {
 export interface ConfigurationValidationView {
   revision: string;
   valid: boolean;
-  issues: ValidationIssueView[];
+  /**
+   * The structured problems; the daemon omits the field entirely when the file
+   * is valid (`skip_serializing_if = "Vec::is_empty"`), exactly like the other
+   * optional collections in this file. Consumers must treat a missing list as
+   * empty.
+   */
+  issues?: ValidationIssueView[];
 }
 
 /** A compact count of the declared entities (`ConfigurationCounts`). */

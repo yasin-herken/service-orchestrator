@@ -229,10 +229,22 @@ first (the workflow does this automatically)
 **Fixes:**
 
 - `service-orchestrator daemon status`; start it if needed.
-- The GUI's Rust adapter locates the daemon binary via
-  `SERVICE_ORCHESTRATOR_DAEMON_BIN`, then `PATH`, then a sibling of the GUI
-  binary, then `target/{debug,release}`. If you moved binaries, set
-  `SERVICE_ORCHESTRATOR_DAEMON_BIN`.
+- The GUI's Rust adapter locates the daemon binary in this order: the
+  `SERVICE_ORCHESTRATOR_DAEMON_BIN` override, then a sibling of the GUI binary,
+  then `<bundle>/Contents/Resources/` (packaged macOS), then `PATH`, then a
+  `target/{debug,release}` directory found by walking up from the GUI binary
+  (the `npm run tauri dev` layout). The bundled candidate deliberately wins over
+  `PATH` so a packaged GUI never picks up an unrelated installed binary. If you
+  moved binaries, set `SERVICE_ORCHESTRATOR_DAEMON_BIN`.
+- If `daemon status` says a daemon **is** running but the GUI still shows the
+  disconnect banner, the running daemon may be an **older build** than the GUI.
+  The IPC request envelope carries the client's interface kind, and a daemon
+  that predates the GUI's kind cannot parse the request: it drops the connection
+  without answering, which the GUI reports as "the daemon closed the connection
+  without answering". Stop it and reconnect so a current daemon takes over —
+  `service-orchestrator daemon stop`, then click **Retry** (or run `tui`/`mcp`,
+  which start a fresh daemon). The GUI deliberately never replaces a running
+  daemon on its own (`tasks/031.md` §15).
 - The GUI reconnects automatically (it probes every 5 seconds; 5 failed probes
   show "Disconnected"). Click **Retry** or wait for reconnection.
 

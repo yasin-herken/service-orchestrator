@@ -15,11 +15,12 @@ import { CONFIG_KIND_LABELS } from './ConfigurationDiff';
 export function ConfigurationValidationPanel({
   revision,
   valid,
-  issues,
+  issues = [],
 }: {
   revision: string;
   valid: boolean;
-  issues: ValidationIssueView[];
+  /** The daemon omits the list when there is nothing to report. */
+  issues?: ValidationIssueView[];
 }) {
   if (valid && issues.length === 0) {
     return (

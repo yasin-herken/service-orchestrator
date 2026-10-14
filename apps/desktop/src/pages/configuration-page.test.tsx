@@ -173,6 +173,20 @@ describe('configuration validation and conflicts', () => {
     await waitFor(() => expect(mockDesktopApi.validateConfiguration).toHaveBeenCalled());
     expect(await screen.findByText('Valid')).toBeInTheDocument();
   });
+
+  it('renders a valid result when the daemon omits the empty issues list', async () => {
+    // The daemon omits `issues` when the file is valid
+    // (`skip_serializing_if = "Vec::is_empty"`); the panel must treat a missing
+    // list as empty instead of crashing the whole page.
+    mockDesktopApi.validateConfiguration.mockResolvedValue({
+      revision: 'rev-1',
+      valid: true,
+    });
+    const user = await openConfiguration();
+    await user.click(screen.getByRole('button', { name: 'Validate' }));
+
+    expect(await screen.findByText('Valid')).toBeInTheDocument();
+  });
 });
 
 describe('repository inspection', () => {

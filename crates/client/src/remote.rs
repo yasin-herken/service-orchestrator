@@ -126,6 +126,13 @@ struct Connection {
     next_id: AtomicU64,
     /// Whether the reader thread has observed the connection close.
     alive: AtomicBool,
+    /// Whether this connection ever delivered a response to a request.
+    ///
+    /// A connection that dies without answering anything is the fingerprint of
+    /// a daemon that could not understand the client at all — most often an
+    /// older build whose [`ClientKind`](crate::ClientKind) set predates this
+    /// client (see `crate::protocol::ClientKind::Unknown`, `tasks/031.md` §15).
+    answered: AtomicBool,
 }
 
 impl Connection {
@@ -159,6 +166,7 @@ impl Connection {
             .expect("pending map is not poisoned")
             .remove(&response.request_id);
         if let Some(sender) = sender {
+            self.answered.store(true, Ordering::SeqCst);
             let _ = sender.send(response.result);
         }
     }
@@ -166,12 +174,20 @@ impl Connection {
     /// Marks the connection dead and fails every in-flight request.
     fn mark_dead(&self) {
         self.alive.store(false, Ordering::SeqCst);
+        // A daemon that closes the connection without ever answering cannot be
+        // distinguished from one that could not parse the client's request, so
+        // the guidance names the most likely cause instead of a bare "closed".
+        let message = if self.answered.load(Ordering::SeqCst) {
+            "the daemon connection was closed".to_owned()
+        } else {
+            "the daemon closed the connection without answering. It may be an older or \
+             incompatible build, or it may have crashed — stop and restart it \
+             (`service-orchestrator daemon stop`) and retry."
+                .to_owned()
+        };
         let mut pending = self.pending.lock().expect("pending map is not poisoned");
         for (_, sender) in pending.drain() {
-            let _ = sender.send(Err(unavailable(
-                codes::DAEMON_UNAVAILABLE,
-                "the daemon connection was closed",
-            )));
+            let _ = sender.send(Err(unavailable(codes::DAEMON_UNAVAILABLE, message.clone())));
         }
     }
 }
@@ -391,6 +407,7 @@ impl Inner {
             pending: Mutex::new(HashMap::new()),
             next_id: AtomicU64::new(1),
             alive: AtomicBool::new(true),
+            answered: AtomicBool::new(false),
         });
         spawn_reader(Arc::downgrade(self), Arc::clone(&connection), reader_half);
         // Re-establish any realtime subscriptions the caller had before the

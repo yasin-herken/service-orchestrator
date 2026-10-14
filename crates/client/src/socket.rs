@@ -9,13 +9,14 @@
 //! permissions and the socket itself is restricted to the owner, so another
 //! local user cannot connect (`tasks/015.md` §24).
 
-use std::io;
+use std::io::{self, Read, Seek, SeekFrom};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::time::{Duration, Instant};
 
 use service_orchestrator_config::default_config_dir;
+use service_orchestrator_domain::redact;
 
 /// The environment variable that overrides the socket path.
 pub const SOCKET_ENV: &str = "SERVICE_ORCHESTRATOR_SOCKET";
@@ -43,6 +44,21 @@ const STARTUP_TIMEOUT: Duration = Duration::from_secs(15);
 
 /// The interval between readiness probes.
 const STARTUP_POLL: Duration = Duration::from_millis(50);
+
+/// How long a start attempt keeps probing after its own child exited.
+///
+/// Two interfaces may race to start the daemon at the same time. Only one wins
+/// the runtime directory's single-instance lock; the loser exits. Before
+/// reporting that exit as a failure, the client gives the *winner* a short grace
+/// period to bind, so a concurrent start adopts the surviving daemon instead of
+/// surfacing a spurious failure (`tasks/031.md` §14).
+const DAEMON_EXIT_GRACE: Duration = Duration::from_secs(2);
+
+/// How many bytes of the daemon's own output a failure reports.
+const LOG_EXCERPT_BYTES: u64 = 8 * 1024;
+
+/// How many trailing log lines a failure reports.
+const LOG_EXCERPT_LINES: usize = 20;
 
 /// Returns the per-user runtime directory for the given configuration file.
 #[must_use]
@@ -144,6 +160,29 @@ pub fn daemon_executable() -> io::Result<PathBuf> {
     std::env::current_exe()
 }
 
+/// Builds the detached daemon command for `config_path`.
+///
+/// The child runs in its own process group so a terminal hang-up on the parent
+/// does not signal it. Its `PATH` is augmented with the discovered developer
+/// tool directories, because a GUI launched from Finder has a bare system
+/// `PATH` and the daemon (plus the managed services it later spawns) must still
+/// find `git`, `java`, `mvn`, and `node` (`tasks/031.md` §19). The inherited
+/// entries keep precedence.
+fn daemon_command(exe: &Path, config_path: &Path, socket_path: &Path) -> Command {
+    let mut command = Command::new(exe);
+    command
+        .arg("daemon")
+        .arg("--config")
+        .arg(config_path)
+        .env(SOCKET_ENV, socket_path)
+        .env("PATH", crate::path_env::effective_search_path());
+    // Put the daemon in its own process group so it survives the terminal that
+    // launched the client (`tasks/015.md` §16).
+    use std::os::unix::process::CommandExt;
+    command.process_group(0);
+    command
+}
+
 /// Starts a detached daemon for `config_path` and waits until it is reachable.
 ///
 /// The child runs in its own process group so a terminal hang-up on the parent
@@ -152,29 +191,162 @@ pub fn daemon_executable() -> io::Result<PathBuf> {
 ///
 /// # Errors
 ///
-/// Returns an [`io::Error`] when the daemon cannot be spawned or does not become
-/// reachable before the timeout.
+/// Returns an [`io::Error`] when the daemon cannot be spawned, exits before
+/// becoming reachable, or does not become reachable before the timeout. The
+/// message names the executable, its arguments, the IPC endpoint, the exit
+/// status (when it exited), and a bounded, redacted excerpt of the daemon's own
+/// output, so a failed auto-start is actionable without scraping the log by hand
+/// (`tasks/031.md` §40).
 pub fn start_daemon(config_path: &Path, socket_path: &Path) -> io::Result<UnixStream> {
     ensure_run_dir(socket_path)?;
     let exe = daemon_executable()?;
-    let log = open_daemon_log(&log_path(socket_path))?;
+    let log_path = log_path(socket_path);
+    let log = open_daemon_log(&log_path)?;
     let log_err = log.try_clone()?;
 
-    let mut command = Command::new(exe);
+    let mut command = daemon_command(&exe, config_path, socket_path);
     command
-        .arg("daemon")
-        .arg("--config")
-        .arg(config_path)
-        .env(SOCKET_ENV, socket_path)
         .stdin(Stdio::null())
         .stdout(Stdio::from(log))
         .stderr(Stdio::from(log_err));
-    // Put the daemon in its own process group so it survives the terminal that
-    // launched the client (`tasks/015.md` §16).
-    use std::os::unix::process::CommandExt;
-    command.process_group(0);
-    let mut child = command.spawn()?;
-    wait_for_socket(socket_path, &mut child)
+    // The diagnostic arguments are the command's own, so they can never drift
+    // from what is actually spawned.
+    let arguments = command
+        .get_args()
+        .map(|arg| arg.to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join(" ");
+    let startup = DaemonStartup {
+        executable: exe,
+        arguments,
+        socket_path: socket_path.to_path_buf(),
+        log_path,
+        timeout: STARTUP_TIMEOUT,
+        exit_grace: DAEMON_EXIT_GRACE,
+    };
+    let mut child = command.spawn().map_err(|error| {
+        io::Error::new(
+            error.kind(),
+            format!(
+                "could not start the daemon `{}` at {}: {error}",
+                startup.command(),
+                startup.socket_path.display()
+            ),
+        )
+    })?;
+    wait_for_socket(&startup, &mut child)
+}
+
+/// What a start attempt needs to explain a failure.
+struct DaemonStartup {
+    /// The daemon executable that was spawned.
+    executable: PathBuf,
+    /// The arguments the daemon was spawned with.
+    arguments: String,
+    /// The IPC endpoint the daemon was expected to bind.
+    socket_path: PathBuf,
+    /// The daemon's own output log.
+    log_path: PathBuf,
+    /// How long to wait for readiness before giving up.
+    timeout: Duration,
+    /// How long to keep probing after the child exited, for a concurrent winner.
+    exit_grace: Duration,
+}
+
+impl DaemonStartup {
+    /// The full command line, for diagnostics.
+    fn command(&self) -> String {
+        format!("{} {}", self.executable.display(), self.arguments)
+    }
+
+    /// A bounded, redacted excerpt of the daemon's own output.
+    fn excerpt(&self) -> String {
+        match read_log_tail(&self.log_path) {
+            Some(lines) if !lines.trim().is_empty() => {
+                format!("\n--- daemon output (last lines) ---\n{lines}")
+            }
+            _ => String::new(),
+        }
+    }
+
+    /// The error for a daemon that exited before becoming reachable.
+    fn failure_message(&self, status: ExitStatus) -> String {
+        format!(
+            "the daemon `{}` exited during startup with {status} before becoming reachable at {}\n\
+             daemon log: {}{}",
+            self.command(),
+            self.socket_path.display(),
+            self.log_path.display(),
+            self.excerpt()
+        )
+    }
+
+    /// The error for a daemon that did not become reachable in time.
+    fn timeout_message(&self) -> String {
+        format!(
+            "the daemon `{}` did not become reachable at {} within {:?}\n\
+             daemon log: {}{}",
+            self.command(),
+            self.socket_path.display(),
+            self.timeout,
+            self.log_path.display(),
+            self.excerpt()
+        )
+    }
+}
+
+/// Reads the last few lines of the daemon log, redacted, for a failure message.
+fn read_log_tail(path: &Path) -> Option<String> {
+    let mut file = std::fs::File::open(path).ok()?;
+    let length = file.metadata().ok()?.len();
+    if length > LOG_EXCERPT_BYTES {
+        file.seek(SeekFrom::End(-(LOG_EXCERPT_BYTES as i64))).ok()?;
+    }
+    let mut bytes = Vec::new();
+    file.take(LOG_EXCERPT_BYTES).read_to_end(&mut bytes).ok()?;
+    let text = String::from_utf8_lossy(&bytes);
+    let lines: Vec<&str> = text.lines().collect();
+    let start = lines.len().saturating_sub(LOG_EXCERPT_LINES);
+    Some(redact(&lines[start..].join("\n")))
+}
+
+/// Polls `socket_path` until a connection succeeds, the child exits, or the
+/// startup timeout elapses.
+///
+/// The socket is probed *first* on every iteration, so a daemon started
+/// concurrently by another interface is adopted as soon as it binds, even if
+/// this attempt's own child lost the single-instance race and exited.
+fn wait_for_socket(startup: &DaemonStartup, child: &mut Child) -> io::Result<UnixStream> {
+    let deadline = Instant::now() + startup.timeout;
+    let mut exit_status: Option<ExitStatus> = None;
+    let mut exit_deadline: Option<Instant> = None;
+    loop {
+        match UnixStream::connect(&startup.socket_path) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => {
+                if exit_status.is_none() {
+                    if let Some(status) = child.try_wait()? {
+                        exit_status = Some(status);
+                        // Give a concurrent winner a short grace to bind before
+                        // declaring this attempt failed, bounded by the timeout.
+                        exit_deadline = Some((Instant::now() + startup.exit_grace).min(deadline));
+                    }
+                }
+                match (exit_status, exit_deadline) {
+                    (Some(status), Some(exit_deadline)) => {
+                        if Instant::now() >= exit_deadline {
+                            return Err(io::Error::other(startup.failure_message(status)));
+                        }
+                    }
+                    _ if Instant::now() >= deadline => {
+                        return Err(io::Error::new(error.kind(), startup.timeout_message()));
+                    }
+                    _ => {}
+                }
+                std::thread::sleep(STARTUP_POLL);
+            }
+        }
+    }
 }
 
 /// Opens (creating if needed) the daemon's log file, owner-only.
@@ -200,34 +372,6 @@ fn open_daemon_log(path: &Path) -> io::Result<std::fs::File> {
         let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
     }
     Ok(file)
-}
-
-/// Polls `socket_path` until a connection succeeds or `child` exits.
-fn wait_for_socket(socket_path: &Path, child: &mut Child) -> io::Result<UnixStream> {
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
-    loop {
-        match UnixStream::connect(socket_path) {
-            Ok(stream) => return Ok(stream),
-            Err(error) => {
-                if let Some(status) = child.try_wait()? {
-                    return Err(io::Error::other(format!(
-                        "daemon exited during startup with {status}"
-                    )));
-                }
-                if Instant::now() >= deadline {
-                    return Err(io::Error::new(
-                        error.kind(),
-                        format!(
-                            "daemon did not become reachable at {} within {:?}",
-                            socket_path.display(),
-                            STARTUP_TIMEOUT
-                        ),
-                    ));
-                }
-                std::thread::sleep(STARTUP_POLL);
-            }
-        }
-    }
 }
 
 /// Connects to `socket_path`, starting a daemon if none is running.
@@ -266,7 +410,7 @@ pub fn connect_existing(socket_path: &Path) -> io::Result<UnixStream> {
 
 #[cfg(test)]
 mod tests {
-    use std::ffi::OsString;
+    use std::ffi::{OsStr, OsString};
     use std::os::unix::fs::PermissionsExt;
     use std::sync::Mutex;
 
@@ -420,11 +564,186 @@ mod tests {
     }
 
     #[test]
+    fn the_spawned_daemon_receives_the_socket_and_an_augmented_path() {
+        // A GUI launched from Finder starts the daemon through this command, so
+        // it must carry the discovered developer tool directories on PATH
+        // (tasks/031.md §19).
+        let command = daemon_command(
+            Path::new("/bin/true"),
+            Path::new("/tmp/example/config.toml"),
+            Path::new("/tmp/example/run/daemon.sock"),
+        );
+        let envs: Vec<(OsString, Option<OsString>)> = command
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(OsStr::to_owned)))
+            .collect();
+
+        let socket = envs
+            .iter()
+            .find(|(key, _)| key == SOCKET_ENV)
+            .expect("the socket override is exported");
+        assert_eq!(
+            socket.1.as_deref(),
+            Some(OsStr::new("/tmp/example/run/daemon.sock"))
+        );
+
+        let path = envs
+            .iter()
+            .find(|(key, _)| key == OsStr::new("PATH"))
+            .expect("the PATH is exported");
+        assert_eq!(
+            path.1.as_deref(),
+            Some(crate::path_env::effective_search_path().as_os_str())
+        );
+    }
+
+    #[test]
     fn a_missing_endpoint_is_not_reachable() {
         let missing = std::env::temp_dir().join("so-client-does-not-exist.sock");
         let _ = std::fs::remove_file(&missing);
         assert!(!is_reachable(&missing));
         assert!(connect_existing(&missing).is_err());
+    }
+
+    /// A scratch directory removed when the test finishes.
+    struct TempRoot(PathBuf);
+
+    impl Drop for TempRoot {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Builds a start-attempt context with short, deterministic bounds.
+    fn startup(name: &str, timeout: Duration, exit_grace: Duration) -> (DaemonStartup, TempRoot) {
+        let dir =
+            std::env::temp_dir().join(format!("so-client-startup-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).expect("the scratch directory is created");
+        let root = TempRoot(dir);
+        let socket = root.0.join("run/daemon.sock");
+        let log_path = root.0.join("run/daemon.log");
+        std::fs::create_dir_all(socket.parent().expect("run dir")).expect("run dir is created");
+        let context = DaemonStartup {
+            executable: PathBuf::from("/opt/service-orchestrator"),
+            arguments: "daemon --config /tmp/example/config.toml".to_owned(),
+            socket_path: socket,
+            log_path,
+            timeout,
+            exit_grace,
+        };
+        (context, root)
+    }
+
+    #[test]
+    fn a_daemon_that_never_binds_times_out_with_actionable_diagnostics() {
+        let (context, _root) = startup(
+            "timeout",
+            Duration::from_millis(150),
+            Duration::from_millis(150),
+        );
+        std::fs::write(
+            &context.log_path,
+            b"booting the daemon\nDB_PASSWORD=hunter2\n",
+        )
+        .expect("the daemon log exists");
+        let mut child = Command::new("sleep")
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a stand-in daemon is spawned");
+
+        let error = wait_for_socket(&context, &mut child).expect_err("readiness times out");
+        let message = error.to_string();
+        assert!(message.contains("did not become reachable"), "{message}");
+        assert!(message.contains("/opt/service-orchestrator"), "{message}");
+        assert!(
+            message.contains("daemon --config /tmp/example/config.toml"),
+            "names the arguments: {message}"
+        );
+        assert!(
+            message.contains("daemon.sock"),
+            "names the endpoint: {message}"
+        );
+        assert!(
+            !message.contains("hunter2"),
+            "the excerpt is redacted: {message}"
+        );
+
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+
+    #[test]
+    fn a_daemon_that_exits_is_reported_with_its_exit_status() {
+        let (context, _root) = startup("exits", Duration::from_secs(2), Duration::from_millis(150));
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 7")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a failing stand-in daemon is spawned");
+
+        let error = wait_for_socket(&context, &mut child).expect_err("the daemon exits");
+        let message = error.to_string();
+        assert!(message.contains("exited during startup"), "{message}");
+        assert!(
+            message.contains("exit status: 7"),
+            "reports the status: {message}"
+        );
+        assert!(message.contains("/opt/service-orchestrator"), "{message}");
+        assert!(message.contains("daemon.sock"), "{message}");
+    }
+
+    #[test]
+    fn a_losing_start_adopts_the_concurrent_winner() {
+        // Our own child exits, but another interface's daemon binds the socket
+        // within the grace period, so the attempt must succeed rather than
+        // report a spurious failure.
+        let (context, _root) = startup("race", Duration::from_secs(3), Duration::from_secs(3));
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg("exit 1")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("a losing stand-in daemon is spawned");
+
+        let socket = context.socket_path.clone();
+        let winner = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(75));
+            let listener = std::os::unix::net::UnixListener::bind(&socket)
+                .expect("the concurrent winner binds the socket");
+            // Keep serving until the attempt has connected.
+            std::thread::sleep(Duration::from_millis(500));
+            drop(listener);
+        });
+
+        let stream = wait_for_socket(&context, &mut child).expect("adopts the winner");
+        drop(stream);
+        winner.join().expect("the winner thread finishes");
+    }
+
+    #[test]
+    fn the_log_excerpt_is_bounded_to_the_tail() {
+        let (context, _root) = startup("tail", Duration::from_secs(1), Duration::from_secs(1));
+        let mut body = String::new();
+        for index in 0..(LOG_EXCERPT_LINES * 2) {
+            body.push_str(&format!("line {index}\n"));
+        }
+        std::fs::write(&context.log_path, body).expect("the log is written");
+
+        let excerpt = context.excerpt();
+        assert!(excerpt.contains(&format!("line {}", LOG_EXCERPT_LINES * 2 - 1)));
+        assert!(
+            !excerpt.contains("line 0\n"),
+            "only the tail is included: {excerpt}"
+        );
     }
 
     #[test]

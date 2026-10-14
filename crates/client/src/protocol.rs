@@ -54,6 +54,20 @@ pub enum ClientKind {
     Cli,
     /// The Tauri desktop GUI adapter.
     Desktop,
+    /// An interface kind this build does not recognize.
+    ///
+    /// Deserialized through `#[serde(other)]` so a peer never fails to *parse*
+    /// a request envelope merely because the sender declares an interface kind
+    /// this build predates. The variant is deliberately non-interactive, so an
+    /// unrecognized kind can never carry a destructive confirmation
+    /// (`tasks/015.md` §23, §25, `tasks/031.md` §15).
+    ///
+    /// Without this, adding an interface kind (as `Desktop` was) is a breaking
+    /// wire change: an older daemon rejects the whole envelope and drops the
+    /// connection, which a newer client can only observe as a bare
+    /// "the daemon connection was closed".
+    #[serde(other)]
+    Unknown,
 }
 
 impl ClientKind {
@@ -65,6 +79,7 @@ impl ClientKind {
             Self::Mcp => "mcp",
             Self::Cli => "cli",
             Self::Desktop => "desktop",
+            Self::Unknown => "unknown",
         }
     }
 
@@ -351,10 +366,34 @@ mod tests {
         assert_eq!(ClientKind::Mcp.label(), "mcp");
         assert_eq!(ClientKind::Cli.label(), "cli");
         assert_eq!(ClientKind::Desktop.label(), "desktop");
+        assert_eq!(ClientKind::Unknown.label(), "unknown");
         assert!(ClientKind::Tui.is_interactive());
         assert!(ClientKind::Desktop.is_interactive());
         assert!(!ClientKind::Mcp.is_interactive());
         assert!(!ClientKind::Cli.is_interactive());
+        assert!(
+            !ClientKind::Unknown.is_interactive(),
+            "an unrecognized kind can never self-confirm a destructive operation"
+        );
+    }
+
+    #[test]
+    fn an_unknown_client_kind_still_parses_the_envelope() {
+        // A newer peer may declare an interface kind this build predates. The
+        // envelope must still parse (as `Unknown`, non-interactive) rather than
+        // fail and drop the connection (`tasks/031.md` §15).
+        let value = serde_json::json!({
+            "protocol": PROTOCOL_VERSION,
+            "request_id": "req-unknown",
+            "client": "holo-deck",
+            "allow_destructive": true,
+            "method": "daemon_status",
+            "params": [],
+        });
+        let decoded: RequestEnvelope =
+            serde_json::from_value(value).expect("an unknown kind still parses");
+        assert_eq!(decoded.client, ClientKind::Unknown);
+        assert!(!decoded.client.is_interactive());
     }
 
     #[test]
