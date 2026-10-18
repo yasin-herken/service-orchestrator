@@ -15,10 +15,10 @@ use serde::{Deserialize, Serialize};
 use service_orchestrator_config::ValidationError;
 use service_orchestrator_domain::{
     AbsolutePath, ArtifactCoordinate, Branch, BuildOperation, BuildSystem, DependencyKind,
-    GitState, GroupId, LibraryId, LiquibaseExecutionMode, MigrationProviderType,
-    MigrationTargetEnvironment, Port, ProcessState, ProfileId, ServiceCapability, ServiceId,
-    ServiceType, Task, TaskId, TaskKind, TaskStatus, Timestamp, Version, WorkflowId, WorkflowKind,
-    WorkflowState, WorkspaceId,
+    GitState, GroupId, LibraryId, LiquibaseExecutionMode, MigrationPresetId, MigrationProviderType,
+    MigrationTargetEnvironment, OperationPresetId, Port, ProcessState, ProfileId,
+    ServiceCapability, ServiceId, ServiceType, Task, TaskId, TaskKind, TaskStatus, Timestamp,
+    Version, WorkflowId, WorkflowKind, WorkflowState, WorkspaceId,
 };
 
 use crate::ports::{HealthCheckOutcome, HealthState};
@@ -132,12 +132,36 @@ pub struct PrepareEnvironmentRequest {
     /// Whether to run Liquibase migrations for migration-enabled services.
     /// Defaults to `false`; enabling it is an explicit database mutation.
     pub run_liquibase: bool,
+    /// The named migration preset applied to every migration-enabled selected
+    /// service, overriding each service's configured preset
+    /// (`tasks/032.md` §21, §26). Requires [`run_liquibase`](Self::run_liquibase):
+    /// a preset never enables or implies migration by itself.
+    #[serde(default)]
+    pub migration_preset: Option<MigrationPresetId>,
+    /// The build operation used for library and service builds, overriding each
+    /// entity's configured default. When unset, every entity uses its own
+    /// [`build_operation`](service_orchestrator_domain::Service::build_operation)
+    /// and falls back to `build`.
+    #[serde(default)]
+    pub build_operation: Option<BuildOperation>,
     /// Whether to build the selected services. Defaults to `false`.
     pub build: bool,
-    /// Whether to start the selected services. Defaults to `false`.
+    /// Whether to start the selected services that are not already running.
+    /// Defaults to `false`. Mutually exclusive with
+    /// [`restart`](Self::restart) and [`stop`](Self::stop).
     pub start: bool,
+    /// Whether to restart the selected services: stop them (in reverse
+    /// dependency order), then build/start them again as requested. Mutually
+    /// exclusive with [`start`](Self::start) and [`stop`](Self::stop).
+    #[serde(default)]
+    pub restart: bool,
+    /// Whether to stop the selected services. Mutually exclusive with
+    /// [`start`](Self::start) and [`restart`](Self::restart).
+    #[serde(default)]
+    pub stop: bool,
     /// Whether to run configured health checks after starting services. Defaults
-    /// to `true`; it has an effect only when [`start`](Self::start) is set.
+    /// to `true`; it has an effect only when [`start`](Self::start) or
+    /// [`restart`](Self::restart) is set.
     #[serde(default = "default_true")]
     pub wait_for_health: bool,
 }
@@ -164,8 +188,12 @@ impl PrepareEnvironmentRequest {
             include_dependencies: true,
             build_libraries: false,
             run_liquibase: false,
+            migration_preset: None,
+            build_operation: None,
             build: false,
             start: false,
+            restart: false,
+            stop: false,
             wait_for_health: true,
         }
     }
@@ -222,6 +250,26 @@ impl PrepareEnvironmentRequest {
         self
     }
 
+    /// Enables Liquibase migrations with a named preset.
+    ///
+    /// The preset only selects *how* migration runs; each service keeps its own
+    /// validated database target and credentials, and a destructive preset still
+    /// requires explicit authorization at execution time
+    /// (`tasks/032.md` §19, §21).
+    #[must_use]
+    pub fn with_migration_preset(mut self, preset: MigrationPresetId) -> Self {
+        self.run_liquibase = true;
+        self.migration_preset = Some(preset);
+        self
+    }
+
+    /// Sets the build operation used for library and service builds.
+    #[must_use]
+    pub const fn with_build_operation(mut self, operation: BuildOperation) -> Self {
+        self.build_operation = Some(operation);
+        self
+    }
+
     /// Enables building libraries and services.
     ///
     /// This is the convenience switch used by callers that want both; use
@@ -245,6 +293,20 @@ impl PrepareEnvironmentRequest {
     #[must_use]
     pub const fn start(mut self) -> Self {
         self.start = true;
+        self
+    }
+
+    /// Enables restarting the selected services (stop, then start).
+    #[must_use]
+    pub const fn restart(mut self) -> Self {
+        self.restart = true;
+        self
+    }
+
+    /// Enables stopping the selected services.
+    #[must_use]
+    pub const fn stop(mut self) -> Self {
+        self.stop = true;
         self
     }
 
@@ -274,6 +336,8 @@ pub enum EnvironmentPhaseKind {
     Migration,
     /// Service builds.
     ServiceBuild,
+    /// Service shutdown before a restart or a stop-only operation.
+    ServiceStop,
     /// Service startup.
     ServiceStart,
     /// Health and readiness checks.
@@ -290,6 +354,7 @@ impl EnvironmentPhaseKind {
             Self::LibraryPrepare => "library-prepare",
             Self::Migration => "migration",
             Self::ServiceBuild => "service-build",
+            Self::ServiceStop => "service-stop",
             Self::ServiceStart => "service-start",
             Self::HealthCheck => "health-check",
         }
@@ -317,9 +382,8 @@ impl EnvironmentPhaseKind {
             TaskKind::BuildService | TaskKind::MavenBuild | TaskKind::NpmBuild => {
                 Some(Self::ServiceBuild)
             }
-            TaskKind::StartService | TaskKind::RestartService | TaskKind::StopService => {
-                Some(Self::ServiceStart)
-            }
+            TaskKind::StartService | TaskKind::RestartService => Some(Self::ServiceStart),
+            TaskKind::StopService => Some(Self::ServiceStop),
             TaskKind::HealthCheck
             | TaskKind::ProcessHealthCheck
             | TaskKind::TcpHealthCheck
@@ -944,6 +1008,71 @@ pub struct MigrationStatus {
     /// Always `None` from this query, for the same reason as
     /// [`pending`](Self::pending).
     pub locked: Option<bool>,
+}
+
+/// A named migration preset, as listed to an interface
+/// (`tasks/032.md` §16, §21, §26).
+///
+/// The summary is read-only display data: the id, the canonical labels, the
+/// contexts the preset selects, and whether it is destructive — enough for a
+/// migration or bulk-operations screen to render the choice and its warnings
+/// without reading the configuration file itself. It never carries credentials
+/// and never authorizes anything: a destructive preset still requires explicit
+/// authorization per target at execution time (`tasks/032.md` §19, §37).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MigrationPresetSummary {
+    /// The stable identifier.
+    pub id: MigrationPresetId,
+    /// The human-readable name.
+    pub name: String,
+    /// An optional description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The contexts the preset runs with; empty means the service's declared
+    /// contexts apply.
+    #[serde(default)]
+    pub contexts: Vec<String>,
+    /// Whether the preset only inspects the database.
+    pub read_only: bool,
+    /// Whether the preset destroys database objects.
+    pub destructive: bool,
+    /// The environments a destructive preset may target; empty for a
+    /// non-destructive preset.
+    #[serde(default)]
+    pub allowed_environments: Vec<MigrationTargetEnvironment>,
+    /// The migration timeout, in seconds, when the preset declares one.
+    #[serde(default)]
+    pub timeout_seconds: Option<u64>,
+    /// Whether this preset is one of the built-ins.
+    pub builtin: bool,
+}
+
+// -- bulk operations ----------------------------------------------------------
+
+/// A saved bulk-operation preset, as listed to an interface
+/// (`tasks/032.md` §36–§38).
+///
+/// The summary carries the preset's identity, whether it is the workspace
+/// default, and the fully expanded [`PrepareEnvironmentRequest`] it composes.
+/// Loading a preset is exactly "use this request": an interface never
+/// re-derives the preset's meaning from its parts, and the request is
+/// re-validated and re-planned like any freshly composed one
+/// (`tasks/032.md` §37).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OperationPresetSummary {
+    /// The stable identifier.
+    pub id: OperationPresetId,
+    /// The human-readable name.
+    pub name: String,
+    /// An optional description.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The workspace the preset belongs to.
+    pub workspace_id: WorkspaceId,
+    /// Whether this is the workspace's default preset.
+    pub default: bool,
+    /// The request the preset composes when loaded.
+    pub request: PrepareEnvironmentRequest,
 }
 
 // -- health and diagnostics ---------------------------------------------------

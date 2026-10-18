@@ -235,39 +235,82 @@ fn classify(
 }
 
 /// A concise, credential-free summary of a failed build.
+///
+/// Maven writes its real failure to *stdout* (`[ERROR] …`) while the JVM writes
+/// harmless warnings to *stderr*. Prefer a line that names a failure over the
+/// first warning a runtime emitted, so an interface can show something
+/// actionable instead of `WARNING: A restricted method …`.
 fn failure_message(output: &CommandOutput) -> String {
     if output.truncated {
         return "build output exceeded the capture buffer and could not be read completely"
             .to_owned();
     }
-    let first = output
-        .stderr
+    let summary = output
+        .stdout
         .lines()
-        .chain(output.stdout.lines())
-        .find(|line| !line.trim().is_empty())
-        .unwrap_or("");
-    if first.trim().is_empty() {
-        match output.code {
+        .chain(output.stderr.lines())
+        .find(|line| is_failure_summary(line))
+        .or_else(|| {
+            output
+                .stdout
+                .lines()
+                .chain(output.stderr.lines())
+                .find(|line| !line.trim().is_empty())
+        });
+    match summary {
+        Some(line) => bound(&redact(line.trim())),
+        None => match output.code {
             Some(code) => format!("build exited with status {code}"),
             None => "build failed before reporting an exit status".to_owned(),
-        }
-    } else {
-        bound(&redact(first.trim()))
+        },
     }
 }
 
 /// Additional bounded detail for a failed build.
+///
+/// Only failure lines are kept when the output contains any. This deliberately
+/// drops compiler/runtime warnings so the detail stays inside the small bound
+/// and remains useful when a failed Maven build emits pages of output.
 fn detail(output: &CommandOutput) -> Option<String> {
-    let combined = if output.stderr.trim().is_empty() {
-        output.stdout.trim()
-    } else {
+    let errors: Vec<&str> = output
+        .stdout
+        .lines()
+        .chain(output.stderr.lines())
+        .filter(|line| is_failure_detail(line))
+        .collect();
+    if !errors.is_empty() {
+        return Some(bound(&redact(&errors.join("\n"))));
+    }
+
+    let source = if output.stdout.trim().is_empty() {
         output.stderr.trim()
+    } else {
+        output.stdout.trim()
     };
-    if combined.is_empty() {
+    if source.is_empty() {
         None
     } else {
-        Some(bound(&redact(combined)))
+        Some(bound(&redact(source)))
     }
+}
+
+/// Returns `true` when a line is the best one-line summary of a failure.
+fn is_failure_summary(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("[ERROR]") || line.contains("BUILD FAILURE")
+}
+
+/// Returns `true` when a line belongs in the bounded failure detail.
+fn is_failure_detail(line: &str) -> bool {
+    let line = line.trim_start();
+    line.starts_with("[ERROR]")
+        || line.starts_with("[FATAL]")
+        || line.contains("BUILD FAILURE")
+        || line.starts_with("error:")
+        || line.starts_with("Error:")
+        || line.starts_with("ERROR:")
+        || line.contains("cannot find symbol")
+        || line.starts_with("Caused by:")
 }
 
 /// Bounds `text` to [`MAX_DETAIL_BYTES`] on a character boundary.
@@ -374,5 +417,55 @@ mod tests {
         };
         let error = manager.plan(&target).unwrap_err();
         assert_eq!(error.code(), "BUILD_UNSUPPORTED_OPERATION");
+    }
+
+    fn failed_output(stdout: &str, stderr: &str) -> CommandOutput {
+        CommandOutput {
+            code: Some(1),
+            reason: service_orchestrator_process::ExitReason::Exited,
+            stdout: stdout.to_owned(),
+            stderr: stderr.to_owned(),
+            truncated: false,
+        }
+    }
+
+    #[test]
+    fn a_failure_summary_prefers_a_maven_error_over_a_stderr_warning() {
+        let output = failed_output(
+            "[INFO] Building auth-service\n\
+             [ERROR] /src/Foo.java:[3,1] cannot find symbol\n\
+             [INFO] BUILD FAILURE",
+            "WARNING: A restricted method in java.lang.System has been called",
+        );
+
+        assert_eq!(
+            failure_message(&output),
+            "[ERROR] /src/Foo.java:[3,1] cannot find symbol"
+        );
+    }
+
+    #[test]
+    fn failure_detail_keeps_errors_and_drops_stderr_warnings() {
+        let output = failed_output(
+            "[INFO] Building auth-service\n\
+             [ERROR] /src/Foo.java:[3,1] cannot find symbol\n\
+             [ERROR] -> [Help 1]",
+            "WARNING: A restricted method in java.lang.System has been called",
+        );
+
+        let detail = detail(&output).unwrap();
+        assert!(detail.contains("cannot find symbol"));
+        assert!(detail.contains("[Help 1]"));
+        assert!(!detail.contains("WARNING"));
+    }
+
+    #[test]
+    fn failure_detail_falls_back_to_stdout_when_no_error_line_exists() {
+        let output = failed_output("something went wrong\nlast line", "a warning");
+
+        assert_eq!(
+            detail(&output).as_deref(),
+            Some("something went wrong\nlast line")
+        );
     }
 }

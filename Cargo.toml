@@ -69,6 +69,7 @@ service-orchestrator-liquibase = { path = "crates/liquibase", version = "0.1.0" 
 service-orchestrator-health = { path = "crates/health", version = "0.1.0" }
 service-orchestrator-logging = { path = "crates/logging", version = "0.1.0" }
 service-orchestrator-policy = { path = "crates/policy", version = "0.1.0" }
+service-orchestrator-repository = { path = "crates/repository", version = "0.1.0" }
 service-orchestrator-mcp = { path = "crates/mcp", version = "0.1.0" }
 service-orchestrator-tui = { path = "crates/tui", version = "0.1.0" }
 service-orchestrator-client = { path = "crates/client", version = "0.1.0" }
@@ -102,6 +103,7 @@ service-orchestrator-logging.workspace = true
 service-orchestrator-mcp.workspace = true
 service-orchestrator-policy.workspace = true
 service-orchestrator-process.workspace = true
+service-orchestrator-repository.workspace = true
 service-orchestrator-runtime.workspace = true
 service-orchestrator-tui.workspace = true
 # Used by the read-only repository inspector to parse `package.json`.

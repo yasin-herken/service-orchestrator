@@ -102,7 +102,7 @@ export interface OperationOutcome {
   kind: string;
 }
 
-/** A runtime requirement in display form (`java 21`, `node 20.19.4`). */
+/** A runtime requirement in display form (`java 21`, `node 20.x`). */
 export interface RuntimeView {
   /** `java`, `node`, `maven`, `npm`, or a project-specific label. */
   kind: string;
@@ -746,6 +746,8 @@ export interface RawLiquibaseView {
   command?: RawCommandView;
   provider?: string;
   execution_mode?: string;
+  /** The named migration preset applied to this service. */
+  preset?: string;
   commands?: RawMigrationCommandsView;
   timeout_seconds?: number;
   environment?: Record<string, RawEnvValueView>;
@@ -808,6 +810,8 @@ export interface RawServiceView {
   runtimes?: RawRuntimeView[];
   commands?: RawCommandsView;
   build_system?: string;
+  /** The default build operation (`build`, `test`, …). */
+  build_operation?: string;
   liquibase?: RawLiquibaseView;
   health_checks?: RawHealthCheckView[];
   ports?: RawPortView[];
@@ -831,6 +835,8 @@ export interface RawLibraryView {
   runtimes?: RawRuntimeView[];
   commands?: RawCommandsView;
   build_system?: string;
+  /** The default build operation (`build`, `test`, …). */
+  build_operation?: string;
   dependencies?: RawDependenciesView;
   environment?: Record<string, RawEnvValueView>;
 }
@@ -860,6 +866,129 @@ export interface RawExecutionView {
   default_timeout_seconds?: number;
 }
 
+/** Global repository-discovery settings (`raw::RawDiscovery`). */
+export interface RawDiscoveryView {
+  /** The maximum directory depth below the workspace root. */
+  max_depth?: number;
+  /** Extra directory names never entered. */
+  exclude?: string[];
+  /** Whether symlinked directories may be followed inside the root. */
+  follow_symlinks?: boolean;
+  /** The maximum number of repositories reported. */
+  max_repositories?: number;
+}
+
+/** The migration defaults a template may carry (`raw::RawTemplateMigration`). */
+export interface RawTemplateMigrationView {
+  enabled?: boolean;
+  provider?: string;
+  execution_mode?: string;
+  preset?: string;
+}
+
+/**
+ * A raw reusable service template (`raw::RawTemplate`).
+ *
+ * A template is a set of defaults for the existing validated service model; it
+ * is never a second source of truth. String values may use the documented
+ * `${...}` variables, and the daemon resolves them when composing a concrete
+ * service (`tasks/032.md` §3, §4).
+ */
+export interface RawTemplateView {
+  id: string;
+  name?: string;
+  description?: string;
+  /** `spring_boot_backend`, `react_frontend`, `shared_maven_library`, or custom. */
+  category?: string;
+  /** The suggested service type (`backend`, `frontend`, `other:<name>`). */
+  type?: string;
+  default_branch?: string;
+  build_system?: string;
+  build_operation?: string;
+  runtime?: RawRuntimeView;
+  runtimes?: RawRuntimeView[];
+  commands?: RawCommandsView;
+  liquibase?: RawTemplateMigrationView;
+  health_checks?: RawHealthCheckView[];
+  timeout_seconds?: number;
+  environment?: Record<string, RawEnvValueView>;
+  capabilities?: string[];
+}
+
+/** A raw named migration preset (`raw::RawMigrationPreset`). */
+export interface RawMigrationPresetView {
+  id: string;
+  name?: string;
+  description?: string;
+  provider?: string;
+  execution_mode?: string;
+  /** The Liquibase goal tokens, for example `liquibase:update`. */
+  goals?: string[];
+  contexts?: string[];
+  destructive?: boolean;
+  read_only?: boolean;
+  allowed_environments?: string[];
+  timeout_seconds?: number;
+}
+
+/** The Git options of a saved operation preset (`raw::RawOperationGit`). */
+export interface RawOperationGitView {
+  enabled?: boolean;
+  branch?: string;
+}
+
+/** The library options of a saved operation preset (`raw::RawOperationLibraries`). */
+export interface RawOperationLibrariesView {
+  enabled?: boolean;
+}
+
+/** The migration options of a saved operation preset (`raw::RawOperationMigration`). */
+export interface RawOperationMigrationView {
+  enabled?: boolean;
+  preset?: string;
+}
+
+/** The build options of a saved operation preset (`raw::RawOperationBuild`). */
+export interface RawOperationBuildView {
+  enabled?: boolean;
+  operation?: string;
+}
+
+/** The runtime options of a saved operation preset (`raw::RawOperationRuntime`). */
+export interface RawOperationRuntimeView {
+  /** `none`, `start`, `restart`, or `stop`. */
+  action?: string;
+}
+
+/** The health options of a saved operation preset (`raw::RawOperationHealth`). */
+export interface RawOperationHealthView {
+  enabled?: boolean;
+}
+
+/**
+ * A raw saved bulk-operation preset (`raw::RawOperationPreset`).
+ *
+ * A preset stores only the selection and the operation flags. It never stores
+ * credentials and never carries authorization; loading one only pre-fills the
+ * Bulk Operations screen (`tasks/032.md` §36, §37).
+ */
+export interface RawOperationPresetView {
+  id: string;
+  name?: string;
+  description?: string;
+  workspace?: string;
+  default?: boolean;
+  services?: string[];
+  profiles?: string[];
+  groups?: string[];
+  git?: RawOperationGitView;
+  libraries?: RawOperationLibrariesView;
+  migration?: RawOperationMigrationView;
+  build?: RawOperationBuildView;
+  runtime?: RawOperationRuntimeView;
+  health?: RawOperationHealthView;
+}
+
 /** A read-only, editable snapshot of the raw configuration. */
 export interface ConfigurationSnapshotView {
   /** The revision the snapshot was read at. */
@@ -870,11 +999,23 @@ export interface ConfigurationSnapshotView {
   libraries: RawLibraryView[];
   profiles: RawProfileView[];
   groups: RawGroupView[];
+  templates: RawTemplateView[];
+  migration_presets: RawMigrationPresetView[];
+  operation_presets: RawOperationPresetView[];
   execution: RawExecutionView;
+  discovery: RawDiscoveryView;
 }
 
 /** The kind of configuration entity a change targets (`EntityKind`). */
-export type EntityKindView = 'workspace' | 'service' | 'library' | 'profile' | 'group';
+export type EntityKindView =
+  | 'workspace'
+  | 'service'
+  | 'library'
+  | 'profile'
+  | 'group'
+  | 'template'
+  | 'migration_preset'
+  | 'operation_preset';
 
 /** A short identity for an entity in a diff (`EntitySummary`). */
 export interface EntitySummaryView {
@@ -962,7 +1103,10 @@ export type ConfigChangeView =
   | { kind: 'service'; change: EntityChangeView<RawServiceView> }
   | { kind: 'library'; change: EntityChangeView<RawLibraryView> }
   | { kind: 'profile'; change: EntityChangeView<RawProfileView> }
-  | { kind: 'group'; change: EntityChangeView<RawGroupView> };
+  | { kind: 'group'; change: EntityChangeView<RawGroupView> }
+  | { kind: 'template'; change: EntityChangeView<RawTemplateView> }
+  | { kind: 'migration_preset'; change: EntityChangeView<RawMigrationPresetView> }
+  | { kind: 'operation_preset'; change: EntityChangeView<RawOperationPresetView> };
 
 /** The result of previewing a change without committing it. */
 export interface ConfigurationPreviewView {
@@ -1330,10 +1474,306 @@ export interface PrepareEnvironmentInput {
   build_libraries?: boolean;
   /** Run Liquibase migrations. Defaults to `false`. */
   run_liquibase?: boolean;
+  /** The named migration preset applied to every migration-enabled service. */
+  migration_preset?: string;
+  /** The build operation used for library and service builds. */
+  build_operation?: string;
   /** Build the selected services. Defaults to `false`. */
   build?: boolean;
   /** Start the selected services. Defaults to `false`. */
   start?: boolean;
+  /** Restart the selected services (stop, then build/start). Defaults to `false`. */
+  restart?: boolean;
+  /** Stop the selected services. Defaults to `false`. */
+  stop?: boolean;
   /** Wait for health after starting. Defaults to `true`. */
   wait_for_health?: boolean;
+}
+
+// -- repository discovery and bulk import -------------------------------------
+
+/** How strongly the evidence supports a detected technology (`DetectionConfidence`). */
+export type DetectionConfidenceView = 'uncertain' | 'low' | 'medium' | 'high';
+
+/** One detected technology with its evidence and confidence (`TechnologyDetection`). */
+export interface TechnologyDetectionView {
+  /** The stable machine-readable kind, for example `maven` or `spring_boot`. */
+  technology: string;
+  label: string;
+  confidence: DetectionConfidenceView;
+  evidence: string[];
+  /** An optional caveat, for example "execution provider not installed". */
+  note?: string;
+}
+
+/** An existing configured entity at a discovered path (`ConfiguredEntityMatch`). */
+export interface ConfiguredEntityMatchView {
+  kind: EntityKindView;
+  id: string;
+}
+
+/** A repository found below a workspace root (`DiscoveredRepository`). */
+export interface DiscoveredRepositoryDetailsView {
+  name: string;
+  /** The path relative to the workspace root, using `/` separators. */
+  relative_path: string;
+  inspection: RepositoryProbeView;
+  detections: TechnologyDetectionView[];
+}
+
+/**
+ * A discovered repository annotated with matching and registration state
+ * (`DiscoveredRepositoryView`).
+ *
+ * The suggested template is a *suggestion*: an ambiguous or weak match leaves
+ * it unset and reports why, so the wizard never silently classifies a
+ * repository (`tasks/032.md` §8, §9).
+ */
+export interface DiscoveredRepositoryView {
+  repository: DiscoveredRepositoryDetailsView;
+  /** The category the detections suggest, when unambiguous. */
+  suggested_category?: string;
+  /** Equally strong categories that tied; the user must choose. */
+  ambiguous_categories?: string[];
+  /** The template proposed for import, when the match is unique. */
+  suggested_template?: string;
+  /** Every template that shares the suggested category. */
+  candidate_templates?: string[];
+  /** Existing configured entities at the same workspace path. */
+  existing?: ConfiguredEntityMatchView[];
+}
+
+/** The bounded result of a discovery scan (`RepositoryDiscoveryReport`). */
+export interface RepositoryDiscoveryReportView {
+  workspace_id: string;
+  root: string;
+  repositories: DiscoveredRepositoryView[];
+  /** Whether the repository cap stopped the scan early. */
+  truncated: boolean;
+  warnings?: string[];
+}
+
+/** A bounded discovery-scan request (`DiscoveryScanRequest`). */
+export interface DiscoveryScanInputView {
+  workspace_id: string;
+  max_depth?: number;
+  exclude?: string[];
+  follow_symlinks?: boolean;
+  max_repositories?: number;
+}
+
+/** How an existing configured entity at a selected path is handled. */
+export type ExistingEntityPolicyView = 'skip' | 'update';
+
+/** A library artifact coordinate supplied as an override (`BulkImportArtifact`). */
+export interface BulkImportArtifactView {
+  group_id: string;
+  artifact_id: string;
+  version: string;
+  packaging?: string;
+}
+
+/** A service type in its wire form (`ServiceType`). */
+export type ServiceTypeView = 'backend' | 'frontend' | 'library' | { other: string };
+
+/** A runtime kind in its wire form (`RuntimeKind`). */
+export type RuntimeKindView = 'java' | 'node' | 'maven' | 'npm' | { other: string };
+
+/** A build system label (`BuildSystem`, `maven` or `npm`). */
+export type BuildSystemView = 'maven' | 'npm';
+
+/** A build-system-neutral operation label (`BuildOperation`). */
+export type BuildOperationNameView =
+  | 'clean'
+  | 'build'
+  | 'test'
+  | 'install_dependencies'
+  | 'publish_local_artifact';
+
+/**
+ * Bulk or per-service overrides for one imported repository
+ * (`BulkImportOverrides`).
+ *
+ * The same shape is used for the shared overrides (wizard step 6) and the
+ * per-repository exceptions (step 7); the daemon resolves the deterministic
+ * precedence (`tasks/032.md` §6).
+ */
+export interface BulkImportOverridesView {
+  /** The entity id; defaults to the sanitized directory name. */
+  name?: string;
+  service_type?: ServiceTypeView;
+  default_branch?: string;
+  repository_url?: string;
+  build_system?: BuildSystemView;
+  build_operation?: BuildOperationNameView;
+  /** Runtime requirements; non-empty replaces the template's. */
+  runtimes?: RuntimeView[];
+  /** Exposed ports; non-empty replaces the assigned ones. */
+  ports?: number[];
+  build_command?: string;
+  start_command?: string;
+  migration_enabled?: boolean;
+  migration_preset?: string;
+  /** The declared database environment; required for a destructive preset. */
+  database_environment?: MigrationTargetEnvironmentView;
+  database_type?: string;
+  database_name?: string;
+  health_url?: string;
+  artifact?: BulkImportArtifactView;
+  capabilities?: string[];
+}
+
+/** One repository selected for import (`BulkImportSelection`). */
+export interface BulkImportSelectionInputView {
+  relative_path: string;
+  /** The explicitly assigned template; unset means automatic matching. */
+  template?: string;
+  existing: ExistingEntityPolicyView;
+  overrides: BulkImportOverridesView;
+}
+
+/** A bulk import request: the selection plus the shared overrides. */
+export interface BulkImportInputView {
+  workspace_id: string;
+  repositories: BulkImportSelectionInputView[];
+  bulk: BulkImportOverridesView;
+  /** The first port assigned to rows that need one. */
+  port_base?: number;
+}
+
+/** Where a row's template came from (`TemplateSource`). */
+export type TemplateSourceView = 'explicit' | 'matched' | 'none';
+
+/** What the planner will do with one row (`BulkImportRowAction`). */
+export type BulkImportRowActionView =
+  | { action: 'create' }
+  | { action: 'update'; existing: string; kind: EntityKindView }
+  | { action: 'skip'; existing: string; kind: EntityKindView }
+  | { action: 'reject' };
+
+/** A structured, actionable problem with one repository (`BulkImportIssue`). */
+export interface BulkImportIssueView {
+  /** A stable, machine-readable code such as `TEMPLATE_AMBIGUOUS`. */
+  code: string;
+  message: string;
+}
+
+/** The proposed configuration for one row, rendered for review. */
+export type BulkImportProposalView =
+  | { entity: 'service'; service: RawServiceView }
+  | { entity: 'library'; library: RawLibraryView };
+
+/** The plan for one selected repository (`BulkImportRow`). */
+export interface BulkImportRowView {
+  relative_path: string;
+  absolute_path: string;
+  template?: string;
+  template_source: TemplateSourceView;
+  entity_kind?: EntityKindView;
+  entity_id?: string;
+  action: BulkImportRowActionView;
+  detections?: TechnologyDetectionView[];
+  ports?: number[];
+  proposal?: BulkImportProposalView;
+  warnings?: string[];
+  errors?: BulkImportIssueView[];
+}
+
+/** The read-only plan for a bulk import (`BulkImportPlan`). */
+export interface BulkImportPlanView {
+  workspace_id: string;
+  /** The configuration revision the plan was computed against. */
+  revision: string;
+  rows: BulkImportRowView[];
+  /** Whether every row is importable and the whole document validates. */
+  valid: boolean;
+  creates: number;
+  updates: number;
+  skips: number;
+  rejects: number;
+  /** The whole-document preview, exactly as the Configuration screen shows it. */
+  preview?: ConfigurationPreviewView;
+  warnings?: string[];
+}
+
+/** A reference to an entity an import touched (`BulkImportEntityRef`). */
+export interface BulkImportEntityRefView {
+  kind: EntityKindView;
+  id: string;
+}
+
+/** The result of committing a bulk import (`BulkImportCommit`). */
+export interface BulkImportCommitView {
+  workspace_id: string;
+  revision: string;
+  created_services: string[];
+  created_libraries: string[];
+  updated: BulkImportEntityRefView[];
+  skipped: BulkImportEntityRefView[];
+  counts: ConfigurationCountsView;
+}
+
+// -- migration and operation presets ------------------------------------------
+
+/** The declared environment of a migration target (`MigrationTargetEnvironment`). */
+export type MigrationTargetEnvironmentView =
+  | 'local'
+  | 'shared_development'
+  | 'staging'
+  | 'production'
+  | 'unknown'
+  | { other: string };
+
+/**
+ * A named migration preset, as listed to an interface
+ * (`MigrationPresetSummary`).
+ *
+ * The summary is display data only. It never carries credentials and never
+ * authorizes anything: a destructive preset still requires explicit
+ * authorization per target at execution time (`tasks/032.md` §19, §37).
+ */
+export interface MigrationPresetSummaryView {
+  id: string;
+  name: string;
+  description?: string;
+  /** The contexts the preset runs with; empty means the service's apply. */
+  contexts: string[];
+  read_only: boolean;
+  destructive: boolean;
+  allowed_environments: MigrationTargetEnvironmentView[];
+  timeout_seconds?: number;
+  /** Whether this preset is one of the built-ins. */
+  builtin: boolean;
+}
+
+/** A saved bulk-operation preset, as listed to an interface (`OperationPresetSummary`). */
+export interface OperationPresetSummaryView {
+  id: string;
+  name: string;
+  description?: string;
+  workspace_id: string;
+  default: boolean;
+  /** The request the preset composes when loaded; loading executes nothing. */
+  request: PrepareEnvironmentInput;
+}
+
+/** A human-readable label for a migration target environment. */
+export function migrationEnvironmentLabel(
+  environment: MigrationTargetEnvironmentView,
+): string {
+  if (typeof environment === 'object') {
+    return environment.other;
+  }
+  switch (environment) {
+    case 'local':
+      return 'Local';
+    case 'shared_development':
+      return 'Shared development';
+    case 'staging':
+      return 'Staging';
+    case 'production':
+      return 'Production';
+    default:
+      return 'Unknown';
+  }
 }

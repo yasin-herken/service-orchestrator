@@ -37,7 +37,7 @@ use service_orchestrator_domain::{
     CommandSpec, LiquibaseExecutionMode, MigrationOperation, MigrationProviderType,
 };
 
-use crate::context::MigrationContext;
+use crate::context::{MigrationContext, MigrationPresetInvocation};
 use crate::plan::{MigrationCapabilities, MigrationPlan};
 use crate::provider::{
     command_working_dir, merge_environment, validate_inside_workspace, BuildHost, MigrationProvider,
@@ -150,6 +150,46 @@ impl LiquibaseProvider {
             }),
         }
     }
+
+    /// Builds a plan from a named preset's structured goals.
+    ///
+    /// The goals are validated tokens composed into one Maven argument vector —
+    /// never a shell line — with `-B` for non-interactive execution and the
+    /// effective contexts (`tasks/032.md` §16–§18). Declaring a preset is not
+    /// authorization: the manager has already revalidated the target and the
+    /// caller's explicit confirmation (`tasks/032.md` §19).
+    fn preset_plan(
+        &self,
+        context: &MigrationContext,
+        preset: &MigrationPresetInvocation,
+        host: &dyn BuildHost,
+    ) -> Result<MigrationPlan, MigrationError> {
+        if context.execution_mode != LiquibaseExecutionMode::Maven {
+            return Err(MigrationError::InvalidConfiguration {
+                service: context.service_id.clone(),
+                message: format!(
+                    "migration preset '{}' requires the Maven execution mode",
+                    preset.id
+                ),
+            });
+        }
+        let program = Self::resolve_program(context, host);
+        let mut args: Vec<String> = Vec::with_capacity(preset.goals.len() + 2);
+        args.push("-B".to_owned());
+        args.extend(preset.goals.iter().cloned());
+        let contexts = preset.effective_contexts(&context.database.contexts);
+        if !contexts.is_empty() {
+            args.push(format!("-Dliquibase.contexts={}", contexts.join(",")));
+        }
+        Ok(MigrationPlan::new(
+            self.provider(),
+            context.operation,
+            program,
+            context.working_dir.clone(),
+        )
+        .with_args(args)
+        .with_environment(context.environment.clone()))
+    }
 }
 
 impl MigrationProvider for LiquibaseProvider {
@@ -173,6 +213,21 @@ impl MigrationProvider for LiquibaseProvider {
                 operation: context.operation,
             });
         }
+        if let Some(preset) = &context.preset {
+            // A preset composes Maven goals and cannot express a CLI
+            // invocation, so the execution mode must be Maven
+            // (`tasks/032.md` §16, §18).
+            if context.execution_mode != LiquibaseExecutionMode::Maven {
+                return Err(MigrationError::InvalidConfiguration {
+                    service: context.service_id.clone(),
+                    message: format!(
+                        "migration preset '{}' requires the Maven execution mode",
+                        preset.id
+                    ),
+                });
+            }
+            return Ok(());
+        }
         match self.command_for(context) {
             Some(command) => command
                 .validate()
@@ -195,9 +250,12 @@ impl MigrationProvider for LiquibaseProvider {
         host: &dyn BuildHost,
     ) -> Result<MigrationPlan, MigrationError> {
         self.validate(context, host)?;
-        let plan = match self.command_for(context) {
-            Some(command) => self.plan_from_command(context, command)?,
-            None => self.default_plan(context, host)?,
+        let plan = match &context.preset {
+            Some(preset) => self.preset_plan(context, preset, host)?,
+            None => match self.command_for(context) {
+                Some(command) => self.plan_from_command(context, command)?,
+                None => self.default_plan(context, host)?,
+            },
         };
         Ok(plan
             .with_target(context.database_identity(), context.target_key())
@@ -247,6 +305,7 @@ mod tests {
             working_dir: AbsolutePath::new("/w/acme/backend/auth-service").unwrap(),
             workspace_root: AbsolutePath::new("/w/acme").unwrap(),
             commands: MigrationCommandSet::default(),
+            preset: None,
             service_command: None,
             database: MigrationDatabaseConfig {
                 environment: MigrationTargetEnvironment::Local,
@@ -254,6 +313,21 @@ mod tests {
             },
             environment: Environment::new(),
             non_local_authorized: false,
+        }
+    }
+
+    fn reset_local() -> MigrationPresetInvocation {
+        MigrationPresetInvocation {
+            id: service_orchestrator_domain::MigrationPresetId::new("reset_local").unwrap(),
+            goals: vec![
+                "liquibase:dropAll".to_owned(),
+                "liquibase:update".to_owned(),
+            ],
+            contexts: vec!["sql".to_owned(), "data".to_owned(), "onlyDev".to_owned()],
+            destructive: true,
+            read_only: false,
+            allowed_environments: vec![MigrationTargetEnvironment::Local],
+            timeout_seconds: None,
         }
     }
 
@@ -337,6 +411,118 @@ mod tests {
             .unwrap();
         assert_eq!(plan.program, "./mvnw");
         assert_eq!(plan.args, vec!["liquibase:update", "-Dverbose"]);
+    }
+
+    #[test]
+    fn a_preset_composes_goals_and_contexts_structurally() {
+        let provider = LiquibaseProvider::new();
+        let context = MigrationContext {
+            preset: Some(reset_local()),
+            ..context(MigrationOperation::Apply)
+        };
+        let plan = provider
+            .plan(&context, &FakeHost::without_wrapper())
+            .unwrap();
+        assert_eq!(plan.program, "mvn");
+        assert_eq!(
+            plan.args,
+            vec![
+                "-B",
+                "liquibase:dropAll",
+                "liquibase:update",
+                "-Dliquibase.contexts=sql,data,onlyDev",
+            ]
+        );
+        assert_eq!(plan.safety, crate::plan::MigrationSafety::Destructive);
+        assert!(plan.safety.is_destructive());
+    }
+
+    #[test]
+    fn a_preset_without_contexts_uses_the_service_contexts() {
+        let provider = LiquibaseProvider::new();
+        let context = MigrationContext {
+            preset: Some(MigrationPresetInvocation {
+                contexts: Vec::new(),
+                destructive: false,
+                ..reset_local()
+            }),
+            database: MigrationDatabaseConfig {
+                contexts: vec!["sql".to_owned(), "data".to_owned()],
+                ..context(MigrationOperation::Apply).database
+            },
+            ..context(MigrationOperation::Apply)
+        };
+        let plan = provider
+            .plan(&context, &FakeHost::without_wrapper())
+            .unwrap();
+        assert_eq!(
+            plan.args,
+            vec![
+                "-B",
+                "liquibase:dropAll",
+                "liquibase:update",
+                "-Dliquibase.contexts=sql,data",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_preset_never_uses_the_per_operation_command() {
+        let provider = LiquibaseProvider::new();
+        let context = MigrationContext {
+            preset: Some(MigrationPresetInvocation {
+                goals: vec!["liquibase:update".to_owned()],
+                contexts: Vec::new(),
+                destructive: false,
+                read_only: false,
+                ..reset_local()
+            }),
+            commands: MigrationCommandSet {
+                update: Some(CommandSpec::new("./mvnw", ["something-else"]).unwrap()),
+                ..MigrationCommandSet::default()
+            },
+            ..context(MigrationOperation::Apply)
+        };
+        let plan = provider
+            .plan(&context, &FakeHost::without_wrapper())
+            .unwrap();
+        assert_eq!(plan.args, vec!["-B", "liquibase:update"]);
+    }
+
+    #[test]
+    fn a_preset_with_a_cli_execution_mode_is_rejected() {
+        let provider = LiquibaseProvider::new();
+        let context = MigrationContext {
+            preset: Some(reset_local()),
+            execution_mode: LiquibaseExecutionMode::Cli,
+            ..context(MigrationOperation::Apply)
+        };
+        let error = provider
+            .plan(&context, &FakeHost::without_wrapper())
+            .unwrap_err();
+        assert_eq!(error.code(), "MIGRATION_INVALID_CONFIGURATION");
+    }
+
+    #[test]
+    fn a_status_preset_composes_a_read_only_plan() {
+        let provider = LiquibaseProvider::new();
+        let context = MigrationContext {
+            preset: Some(MigrationPresetInvocation {
+                id: service_orchestrator_domain::MigrationPresetId::new("status").unwrap(),
+                goals: vec!["liquibase:status".to_owned()],
+                contexts: Vec::new(),
+                destructive: false,
+                read_only: true,
+                allowed_environments: Vec::new(),
+                timeout_seconds: None,
+            }),
+            ..context(MigrationOperation::Status)
+        };
+        let plan = provider
+            .plan(&context, &FakeHost::without_wrapper())
+            .unwrap();
+        assert_eq!(plan.args, vec!["-B", "liquibase:status"]);
+        assert_eq!(plan.safety, crate::plan::MigrationSafety::ReadOnly);
     }
 
     #[test]

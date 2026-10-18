@@ -22,7 +22,7 @@ use service_orchestrator_application::{
     ApplicationError, OperationResult, PrepareEnvironmentRequest,
 };
 use service_orchestrator_client::OrchestratorClient;
-use service_orchestrator_domain::{Task, Workflow, WorkflowId, WorkspaceId};
+use service_orchestrator_domain::{BuildOperation, Task, Workflow, WorkflowId, WorkspaceId};
 
 use crate::dto::{
     EnvironmentPlanView, GroupView, OperationOutcome, ProfileView, WorkflowStatusView,
@@ -30,8 +30,8 @@ use crate::dto::{
 };
 use crate::error::CommandError;
 use crate::validation::{
-    parse_branch, parse_group_id, parse_profile_id, parse_service_id, parse_workflow_id,
-    parse_workspace_id,
+    parse_branch, parse_group_id, parse_migration_preset_id, parse_profile_id, parse_service_id,
+    parse_workflow_id, parse_workspace_id,
 };
 
 /// How many workflows one history request may return by default.
@@ -84,11 +84,26 @@ pub struct PrepareEnvironmentInput {
     /// Whether to run Liquibase migrations. Defaults to `false`: enabling it
     /// is an explicit, visible database mutation.
     pub run_liquibase: bool,
+    /// An optional named migration preset applied to every migration-enabled
+    /// selected service (`tasks/032.md` §21, §26). It never enables migration on
+    /// its own; `run_liquibase` must be set as well.
+    pub migration_preset: Option<String>,
+    /// An optional build operation (`build`, `install`, `test`, …) overriding
+    /// each entity's configured default (`tasks/032.md` §27).
+    pub build_operation: Option<String>,
     /// Whether to build the selected services. Defaults to `false`.
     pub build: bool,
-    /// Whether to start the selected services. Defaults to `false`: the GUI
-    /// never auto-starts the workspace.
+    /// Whether to start the selected services that are not already running.
+    /// Defaults to `false`: the GUI never auto-starts the workspace. Mutually
+    /// exclusive with `restart` and `stop`.
     pub start: bool,
+    /// Whether to restart the selected services (stop in reverse dependency
+    /// order, then build/start as requested). Mutually exclusive with `start`
+    /// and `stop` (`tasks/032.md` §28).
+    pub restart: bool,
+    /// Whether to stop the selected services. Mutually exclusive with `start`
+    /// and `restart`.
+    pub stop: bool,
     /// Whether to wait for health after starting. Defaults to `true`.
     pub wait_for_health: bool,
 }
@@ -105,8 +120,12 @@ impl Default for PrepareEnvironmentInput {
             include_dependencies: true,
             build_libraries: false,
             run_liquibase: false,
+            migration_preset: None,
+            build_operation: None,
             build: false,
             start: false,
+            restart: false,
+            stop: false,
             wait_for_health: true,
         }
     }
@@ -165,6 +184,27 @@ pub fn build_request(
         .map(parse_branch)
         .transpose()?;
 
+    let actions = u8::from(input.start) + u8::from(input.restart) + u8::from(input.stop);
+    if actions > 1 {
+        return Err(CommandError::invalid_input(
+            "choose at most one runtime action: start, restart, or stop",
+        ));
+    }
+
+    let migration_preset = optional_id(input.migration_preset.as_deref())
+        .map(parse_migration_preset_id)
+        .transpose()?;
+    let build_operation = optional_id(input.build_operation.as_deref())
+        .map(|raw| {
+            serde_json::from_value::<BuildOperation>(serde_json::Value::String(raw.to_owned()))
+                .map_err(|_| {
+                    CommandError::invalid_input(format!(
+                        "unknown build operation '{raw}': expected build, install, test, or package"
+                    ))
+                })
+        })
+        .transpose()?;
+
     Ok(PrepareEnvironmentRequest {
         workspace_id,
         services,
@@ -175,8 +215,12 @@ pub fn build_request(
         include_dependencies: input.include_dependencies,
         build_libraries: input.build_libraries,
         run_liquibase: input.run_liquibase,
+        migration_preset,
+        build_operation,
         build: input.build,
         start: input.start,
+        restart: input.restart,
+        stop: input.stop,
         wait_for_health: input.wait_for_health,
     })
 }

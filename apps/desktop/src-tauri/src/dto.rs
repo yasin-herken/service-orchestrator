@@ -178,7 +178,7 @@ impl From<OperationResult> for OperationOutcome {
     }
 }
 
-/// A runtime requirement in display form (`java 21`, `node 20.19.4`).
+/// A runtime requirement in display form (`java 21`, `node 20.x`).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct RuntimeView {
     /// The runtime label (`java`, `node`, `maven`, `npm`, or a custom label).

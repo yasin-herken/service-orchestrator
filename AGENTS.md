@@ -152,7 +152,7 @@ The services managed by this application currently use:
 ## Frontend
 
 - React 16
-- Node.js 20.19.4
+- Node.js 20.x
 
 ## Database Migration
 

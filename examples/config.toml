@@ -75,6 +75,7 @@ enabled = true
 provider = "liquibase"
 execution_mode = "maven"
 timeout_seconds = 300
+preset = "status"
 
 [services.liquibase.commands]
 status = "./mvnw liquibase:status"
@@ -117,7 +118,7 @@ url = "git@github.com:acme/web-ui.git"
 
 [services.runtime]
 type = "node"
-version = "20.19.4"
+version = "20.x"
 
 [services.commands]
 install = "npm install"
@@ -156,6 +157,169 @@ id = "full-stack"
 name = "Full Stack"
 services = ["auth-service"]
 groups = ["customer"]
+
+# ---------------------------------------------------------------------------
+# Repository discovery
+# ---------------------------------------------------------------------------
+#
+# Bounds the recursive scan behind the bulk-import wizard. The built-in
+# excludes (.git, node_modules, target, build, dist, out) always apply; the
+# list below adds project-specific directories. `max_depth` defaults to 6
+# (hard cap 64) and `max_repositories` defaults to 200.
+
+[discovery]
+max_depth = 6
+exclude = ["external", "generated"]
+follow_symlinks = true
+max_repositories = 200
+
+# ---------------------------------------------------------------------------
+# Service templates
+# ---------------------------------------------------------------------------
+#
+# Templates supply reusable defaults for services created by the bulk-import
+# wizard. A template never carries credentials, ports, or repository URLs, and
+# its values may use ${serviceName}, ${repositoryName}, ${repositoryPath},
+# ${workspaceRoot}, ${relativePath}, and ${port}. They are suggestions: the
+# wizard always shows the resolved result before anything is written.
+# See docs/service-templates.md.
+
+[[templates]]
+id = "spring-boot-backend"
+name = "Spring Boot Backend"
+description = "Spring Boot 3 service on Java 21, built with the Maven wrapper."
+category = "spring_boot_backend"
+type = "backend"
+default_branch = "main"
+build_system = "maven"
+build_operation = "build"
+
+[templates.runtime]
+type = "java"
+version = "21"
+
+[templates.commands]
+install = "./mvnw dependency:resolve"
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+test = "./mvnw test"
+
+[templates.liquibase]
+enabled = true
+execution_mode = "maven"
+preset = "status"
+
+[[templates.health_checks]]
+type = "http"
+url = "http://localhost:${port}/actuator/health"
+timeout_seconds = 10
+
+[templates.environment]
+SPRING_PROFILES_ACTIVE = "local"
+
+[[templates]]
+id = "react-frontend"
+name = "React Frontend"
+description = "Node 20 single-page application built with npm."
+category = "react_frontend"
+type = "frontend"
+default_branch = "main"
+build_system = "npm"
+
+[templates.runtime]
+type = "node"
+version = "20.x"
+
+[templates.commands]
+install = "npm install"
+build = "npm run build"
+start = "npm start"
+test = "npm test"
+
+[[templates]]
+id = "maven-library"
+name = "Shared Maven Library"
+description = "Shared library installed into the local Maven repository."
+category = "shared_maven_library"
+type = "library"
+default_branch = "main"
+build_system = "maven"
+
+[templates.commands]
+build = "./mvnw clean install"
+test = "./mvnw test"
+
+# ---------------------------------------------------------------------------
+# Named migration presets
+# ---------------------------------------------------------------------------
+#
+# A preset names a structured set of Liquibase goals and its safety class; it
+# is never a raw command. `status`, `update`, and `reset_local` are built in,
+# and a user preset with the same id replaces its built-in. A destructive
+# preset must declare the environments it may target — and that declaration is
+# a precondition, not authorization: every execution still requires explicit
+# confirmation. See docs/migration-presets.md.
+
+[[migration_presets]]
+id = "validate"
+name = "Validate"
+description = "Validate changelogs without touching the database."
+goals = ["liquibase:validate"]
+read_only = true
+
+[[migration_presets]]
+id = "sql-preview"
+name = "SQL Preview"
+description = "Render the SQL that `update` would run, without applying it."
+goals = ["liquibase:updateSQL"]
+contexts = ["local"]
+read_only = true
+
+[[migration_presets]]
+id = "reset-local"
+name = "Reset Local Database"
+description = "Drop every object and re-apply all change sets. Destructive."
+goals = ["liquibase:dropAll", "liquibase:update"]
+contexts = ["local"]
+destructive = true
+allowed_environments = ["local"]
+
+# ---------------------------------------------------------------------------
+# Saved bulk-operation presets
+# ---------------------------------------------------------------------------
+#
+# A preset stores the selection of operations a developer commonly runs; it
+# never stores credentials or authorization and never executes on load.
+# Loading one pre-fills the Bulk Operations screen, and execution re-runs the
+# full validation and policy. See docs/bulk-operations.md.
+
+[[operation_presets]]
+id = "full-stack-local"
+name = "Full Stack (Local)"
+description = "Sync, build libraries, migrate, restart, and verify the full stack."
+workspace = "acme"
+profiles = ["full-stack"]
+default = true
+
+[operation_presets.git]
+enabled = true
+
+[operation_presets.libraries]
+enabled = true
+
+[operation_presets.migration]
+enabled = true
+preset = "update"
+
+[operation_presets.build]
+enabled = true
+operation = "build"
+
+[operation_presets.runtime]
+action = "restart"
+
+[operation_presets.health]
+enabled = true
 
 # ---------------------------------------------------------------------------
 # Execution settings

@@ -172,7 +172,8 @@ pub(crate) fn error_body(error: &ApplicationError) -> ErrorBody {
         ApplicationError::ArtifactInspection { code, message }
         | ApplicationError::ServiceRuntime { code, message }
         | ApplicationError::Migration { code, message }
-        | ApplicationError::Health { code, message } => {
+        | ApplicationError::Health { code, message }
+        | ApplicationError::Discovery { code, message } => {
             ErrorBody::new(code.clone(), message.clone())
         }
         ApplicationError::DiagnosticsUnavailable { service, message } => {

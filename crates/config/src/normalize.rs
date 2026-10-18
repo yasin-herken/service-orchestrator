@@ -13,23 +13,34 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use service_orchestrator_domain::{
-    AbsolutePath, BuildSystem, DependencyKind, DependencyTarget, Environment, GroupId, Library,
-    LibraryId, LiquibaseExecutionMode, MigrationOperation, MigrationProviderType,
-    MigrationTargetEnvironment, Profile, ProfileId, RelativePath, Service, ServiceGroup, ServiceId,
-    ServiceType, Workspace, WorkspaceId,
+    AbsolutePath, Branch, BuildSystem, DependencyKind, DependencyTarget, Environment, GroupId,
+    Library, LibraryId, LiquibaseExecutionMode, MigrationOperation, MigrationPresetId,
+    MigrationProviderType, MigrationTargetEnvironment, OperationPresetId, Profile, ProfileId,
+    RelativePath, Service, ServiceGroup, ServiceId, ServiceType, TemplateId, Workspace,
+    WorkspaceId,
 };
 
 use crate::error::{ConfigError, ValidationError, ValidationErrors};
 use crate::model::{
-    Config, ConfiguredWorkspace, ExecutionSettings, LiquibaseConfig, MigrationCommandSet,
-    MigrationDatabaseConfig, DEFAULT_MAX_PARALLEL_TASKS, DEFAULT_TIMEOUT_SECONDS,
+    effective_excludes, Config, ConfiguredWorkspace, DiscoverySettings, ExecutionSettings,
+    LiquibaseConfig, MigrationCommandSet, MigrationDatabaseConfig, MigrationPreset,
+    OperationBuildOptions, OperationGitOptions, OperationHealthOptions, OperationLibraryOptions,
+    OperationMigrationOptions, OperationPreset, OperationRuntimeOptions, RuntimeAction,
+    ServiceTemplate, TemplateCategory, TemplateMigration, BUILTIN_MIGRATION_PRESETS,
+    DEFAULT_MAX_PARALLEL_TASKS, DEFAULT_TIMEOUT_SECONDS, MAX_DISCOVERY_DEPTH,
+    MAX_DISCOVERY_REPOSITORIES,
 };
-use crate::raw::{RawConfig, RawLibrary, RawLiquibase, RawService, RawWorkspace};
+use crate::raw::{
+    RawConfig, RawLibrary, RawLiquibase, RawMigrationPreset, RawOperationPreset, RawService,
+    RawTemplate, RawWorkspace,
+};
 use crate::validation::{
-    infer_build_system, infer_library_build_system, parse_artifact, parse_build_system,
-    parse_capability, parse_commands, parse_dependency, parse_environment, parse_execution_mode,
-    parse_health_check, parse_id, parse_migration_provider, parse_port, parse_repository,
-    parse_runtime, parse_service_type, validate_library_consistency, validate_service_consistency,
+    infer_build_system, infer_library_build_system, parse_artifact, parse_build_operation,
+    parse_build_system, parse_capability, parse_commands, parse_dependency, parse_environment,
+    parse_execution_mode, parse_health_check, parse_id, parse_migration_provider, parse_port,
+    parse_repository, parse_runtime, parse_service_type, parse_template_commands,
+    parse_template_health_check, validate_context_token, validate_goal_token,
+    validate_library_consistency, validate_service_consistency, validate_template_value,
 };
 
 /// A `(workspace id, entity id)` pair used for within-workspace lookups.
@@ -76,7 +87,7 @@ pub(crate) fn normalize(raw: RawConfig, origin: &str) -> Result<Config, ConfigEr
         &mut builds,
         &mut errors,
     );
-    build_profiles(
+    let profile_workspaces = build_profiles(
         &raw,
         &workspace_index,
         &service_set,
@@ -88,6 +99,24 @@ pub(crate) fn normalize(raw: RawConfig, origin: &str) -> Result<Config, ConfigEr
 
     validate_dependency_references(&builds, &service_set, &library_set, &mut errors);
     let execution = build_execution(&raw, &mut errors);
+    let discovery = build_discovery(&raw, &mut errors);
+
+    // Migration presets, templates, and operation presets may reference each
+    // other, so they are built in dependency order and cross-checked once every
+    // entity exists.
+    let migration_presets = build_migration_presets(&raw, &mut errors);
+    let all_presets = crate::model::merge_migration_presets(&migration_presets);
+    let templates = build_templates(&raw, &all_presets, &mut errors);
+    let operation_presets = build_operation_presets(
+        &raw,
+        &workspace_index,
+        &service_workspaces,
+        &group_workspaces,
+        &profile_workspaces,
+        &all_presets,
+        &mut errors,
+    );
+    validate_service_migration_presets(&builds, &all_presets, &mut errors);
 
     if !errors.is_empty() {
         return Err(validation_error(errors, origin));
@@ -107,6 +136,10 @@ pub(crate) fn normalize(raw: RawConfig, origin: &str) -> Result<Config, ConfigEr
     Ok(Config {
         version: raw.config_version,
         execution,
+        discovery,
+        templates,
+        migration_presets,
+        operation_presets,
         workspaces,
     })
 }
@@ -473,6 +506,13 @@ fn build_service(
     if let Some(build_system) = build_system {
         service = service.with_build_system(build_system);
     }
+    if let Some(operation) = raw.build_operation.as_deref() {
+        if let Some(operation) =
+            parse_build_operation(&format!("{location}.build_operation"), operation, errors)
+        {
+            service = service.with_build_operation(operation);
+        }
+    }
 
     validate_service_consistency(location, &service, errors);
     Some(service)
@@ -602,6 +642,13 @@ fn build_library(
     if let Some(build_system) = build_system {
         library = library.with_build_system(build_system);
     }
+    if let Some(operation) = raw.build_operation.as_deref() {
+        if let Some(operation) =
+            parse_build_operation(&format!("{location}.build_operation"), operation, errors)
+        {
+            library = library.with_build_operation(operation);
+        }
+    }
 
     validate_library_consistency(location, &library_type, &library, errors);
     Some(library)
@@ -633,6 +680,10 @@ fn build_liquibase(
     );
     errors.append(&mut env_errors);
     let database = build_migration_database(raw_liquibase);
+    let preset = match &raw_liquibase.preset {
+        Some(value) => parse_id::<MigrationPresetId>(&format!("{location}.preset"), value, errors),
+        None => None,
+    };
 
     Some(LiquibaseConfig {
         enabled: raw_liquibase.enabled.unwrap_or(true),
@@ -640,6 +691,7 @@ fn build_liquibase(
         execution_mode,
         commands,
         timeout_seconds: raw_liquibase.timeout_seconds,
+        preset,
         environment,
         database,
     })
@@ -877,8 +929,9 @@ fn build_profiles(
     service_workspaces: &WorkspaceSets,
     builds: &mut [Build],
     errors: &mut Vec<ValidationError>,
-) {
+) -> WorkspaceSets {
     let mut seen: BTreeSet<EntityKey> = BTreeSet::new();
+    let mut profile_workspaces: WorkspaceSets = BTreeMap::new();
 
     for (i, profile) in raw.profiles.iter().enumerate() {
         let location = format!("profiles[{i}]");
@@ -991,7 +1044,13 @@ fn build_profiles(
 
         let index = workspace_index.get(&workspace).expect("workspace exists");
         builds[*index].profiles.push((location, developer_profile));
+        profile_workspaces
+            .entry(profile.id.trim().to_owned())
+            .or_default()
+            .insert(workspace);
     }
+
+    profile_workspaces
 }
 
 /// Collects the workspaces that declared services belong to.
@@ -1176,6 +1235,915 @@ fn build_execution(raw: &RawConfig, errors: &mut Vec<ValidationError>) -> Execut
     ExecutionSettings {
         max_parallel_tasks,
         default_timeout_seconds,
+    }
+}
+
+/// Builds the bounded repository-discovery settings (`tasks/032.md` §7).
+///
+/// Defaults come from [`DiscoverySettings::default`]; the bounds are enforced
+/// here so a scan can never be configured into an effectively unbounded tree
+/// walk.
+fn build_discovery(raw: &RawConfig, errors: &mut Vec<ValidationError>) -> DiscoverySettings {
+    let defaults = DiscoverySettings::default();
+    let max_depth = raw.discovery.max_depth.unwrap_or(defaults.max_depth);
+    if max_depth > MAX_DISCOVERY_DEPTH {
+        errors.push(
+            ValidationError::new(
+                "discovery.max_depth",
+                format!("max_depth must be at most {MAX_DISCOVERY_DEPTH}"),
+            )
+            .expected("a small depth such as 6")
+            .suggested_fix(format!("Set `max_depth = {MAX_DISCOVERY_DEPTH}` or less.")),
+        );
+    }
+    let max_repositories = raw
+        .discovery
+        .max_repositories
+        .unwrap_or(defaults.max_repositories);
+    if max_repositories == 0 || max_repositories > MAX_DISCOVERY_REPOSITORIES {
+        errors.push(
+            ValidationError::new(
+                "discovery.max_repositories",
+                format!("max_repositories must be between 1 and {MAX_DISCOVERY_REPOSITORIES}"),
+            )
+            .suggested_fix("Set a bounded repository cap, for example `max_repositories = 200`."),
+        );
+    }
+    DiscoverySettings {
+        max_depth,
+        exclude: effective_excludes(&raw.discovery.exclude),
+        follow_symlinks: raw.discovery.follow_symlinks.unwrap_or(true),
+        max_repositories,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Migration presets, templates, and operation presets
+// ---------------------------------------------------------------------------
+
+/// Builds the user-configured named migration presets (`tasks/032.md` §16–§19).
+///
+/// A preset composes validated Liquibase goals into a structured Maven argument
+/// vector; it is never an unrestricted command. Safety invariants enforced
+/// here:
+///
+/// - only the `liquibase` provider with `maven` execution is accepted;
+/// - goals are validated tokens, and `dropAll` requires `destructive = true`;
+/// - `read_only` and `destructive` are mutually exclusive;
+/// - a destructive preset must declare a non-empty `allowed_environments` list
+///   of concrete environments (`unknown` is never allowed), and that list is a
+///   *precondition*, never authorization.
+fn build_migration_presets(
+    raw: &RawConfig,
+    errors: &mut Vec<ValidationError>,
+) -> Vec<MigrationPreset> {
+    let mut presets = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    for (i, preset) in raw.migration_presets.iter().enumerate() {
+        let location = format!("migration_presets[{i}]");
+        let Some(id) = parse_id::<MigrationPresetId>(&format!("{location}.id"), &preset.id, errors)
+        else {
+            continue;
+        };
+        if !seen.insert(id.to_string()) {
+            errors.push(
+                ValidationError::new(
+                    format!("{location}.id"),
+                    format!("duplicate migration preset id '{id}'"),
+                )
+                .suggested_fix("Migration preset ids must be unique.".to_owned()),
+            );
+            continue;
+        }
+        let Some(name) = resolve_name(&location, &preset.name, &preset.id, errors) else {
+            continue;
+        };
+
+        validate_migration_preset_provider(&location, preset, errors);
+        let goals = build_preset_goals(&location, preset, errors);
+        let contexts = build_preset_contexts(&location, preset, errors);
+        let destructive = preset.destructive.unwrap_or(false);
+        let read_only = preset.read_only.unwrap_or(false);
+        let allowed_environments =
+            build_preset_allowed_environments(&location, preset, destructive, errors);
+
+        if let Some(0) = preset.timeout_seconds {
+            errors.push(
+                ValidationError::new(
+                    format!("{location}.timeout_seconds"),
+                    "timeout_seconds must be at least 1",
+                )
+                .suggested_fix("Remove the field or set a positive number of seconds.".to_owned()),
+            );
+        }
+
+        presets.push(MigrationPreset {
+            id,
+            name,
+            description: preset.description.clone(),
+            provider: MigrationProviderType::Liquibase,
+            execution_mode: LiquibaseExecutionMode::Maven,
+            goals,
+            contexts,
+            destructive,
+            read_only,
+            allowed_environments,
+            timeout_seconds: preset.timeout_seconds,
+            builtin: false,
+        });
+    }
+
+    presets
+}
+
+/// Validates the provider and execution mode of a user migration preset.
+fn validate_migration_preset_provider(
+    location: &str,
+    preset: &RawMigrationPreset,
+    errors: &mut Vec<ValidationError>,
+) {
+    if let Some(provider) = preset.provider.as_deref() {
+        match parse_migration_provider(&format!("{location}.provider"), provider, errors) {
+            Some(MigrationProviderType::Liquibase) => {}
+            Some(other) => errors.push(
+                ValidationError::new(
+                    format!("{location}.provider"),
+                    format!("migration preset provider '{other}' is not supported"),
+                )
+                .expected("liquibase")
+                .suggested_fix(
+                    "A migration preset composes Liquibase goals; remove the provider or set \
+                     `provider = \"liquibase\"`."
+                        .to_owned(),
+                ),
+            ),
+            None => {}
+        }
+    }
+    if let Some(mode) = preset.execution_mode.as_deref() {
+        match parse_execution_mode(&format!("{location}.execution_mode"), mode, errors) {
+            Some(LiquibaseExecutionMode::Maven) => {}
+            Some(LiquibaseExecutionMode::Cli) => errors.push(
+                ValidationError::new(
+                    format!("{location}.execution_mode"),
+                    "a migration preset composes Maven goals; only `maven` execution is supported",
+                )
+                .expected("maven")
+                .suggested_fix("Set `execution_mode = \"maven\"` or remove the field.".to_owned()),
+            ),
+            None => {}
+        }
+    }
+}
+
+/// Validates the goal list of a migration preset.
+fn build_preset_goals(
+    location: &str,
+    preset: &RawMigrationPreset,
+    errors: &mut Vec<ValidationError>,
+) -> Vec<String> {
+    if preset.goals.is_empty() {
+        errors.push(
+            ValidationError::new(
+                format!("{location}.goals"),
+                "a migration preset must declare at least one goal",
+            )
+            .expected("a goal such as \"liquibase:update\"")
+            .suggested_fix("Add `goals = [\"liquibase:update\"]`.".to_owned()),
+        );
+        return Vec::new();
+    }
+    let mut goals = Vec::new();
+    for (j, goal) in preset.goals.iter().enumerate() {
+        if let Some(goal) = validate_goal_token(&format!("{location}.goals[{j}]"), goal, errors) {
+            goals.push(goal);
+        }
+    }
+    let destructive = preset.destructive.unwrap_or(false);
+    if !destructive && goals.iter().any(|goal| goal_name(goal) == "dropAll") {
+        errors.push(
+            ValidationError::new(
+                format!("{location}.goals"),
+                "goals contain `liquibase:dropAll`, which destroys database objects",
+            )
+            .expected("`destructive = true` for any preset that drops objects")
+            .suggested_fix(
+                "Set `destructive = true` and declare the environments it may target in \
+                 `allowed_environments`."
+                    .to_owned(),
+            ),
+        );
+    }
+    if destructive && preset.read_only.unwrap_or(false) {
+        errors.push(
+            ValidationError::new(
+                format!("{location}.read_only"),
+                "`read_only` and `destructive` cannot both be true",
+            )
+            .suggested_fix(
+                "A preset either only inspects the database or destroys objects, never both."
+                    .to_owned(),
+            ),
+        );
+    }
+    goals
+}
+
+/// The final segment of a Maven goal, for example `dropAll`.
+fn goal_name(goal: &str) -> &str {
+    goal.rsplit(':').next().unwrap_or(goal)
+}
+
+/// Validates the context list of a migration preset.
+fn build_preset_contexts(
+    location: &str,
+    preset: &RawMigrationPreset,
+    errors: &mut Vec<ValidationError>,
+) -> Vec<String> {
+    let mut contexts = Vec::new();
+    for (j, context) in preset.contexts.iter().enumerate() {
+        if let Some(context) =
+            validate_context_token(&format!("{location}.contexts[{j}]"), context, errors)
+        {
+            if !contexts.contains(&context) {
+                contexts.push(context);
+            }
+        }
+    }
+    contexts
+}
+
+/// Validates the declared environments of a migration preset.
+fn build_preset_allowed_environments(
+    location: &str,
+    preset: &RawMigrationPreset,
+    destructive: bool,
+    errors: &mut Vec<ValidationError>,
+) -> Vec<MigrationTargetEnvironment> {
+    let mut allowed = Vec::new();
+    for (j, value) in preset.allowed_environments.iter().enumerate() {
+        let parsed = MigrationTargetEnvironment::parse(value);
+        if matches!(parsed, MigrationTargetEnvironment::Unknown) {
+            errors.push(
+                ValidationError::new(
+                    format!("{location}.allowed_environments[{j}]"),
+                    "'unknown' is not a concrete environment and can never be allowed",
+                )
+                .expected("a declared environment such as 'local'")
+                .suggested_fix(
+                    "Name the environments explicitly, for example `allowed_environments = \
+                     [\"local\"]`."
+                        .to_owned(),
+                ),
+            );
+            continue;
+        }
+        if !allowed.contains(&parsed) {
+            allowed.push(parsed);
+        }
+    }
+    if destructive && allowed.is_empty() {
+        errors.push(
+            ValidationError::new(
+                format!("{location}.allowed_environments"),
+                "a destructive preset must declare the environments it may target",
+            )
+            .expected("a non-empty list such as [\"local\"]")
+            .suggested_fix(
+                "Add `allowed_environments = [\"local\"]`. This is a precondition, not \
+                 authorization: every execution still requires explicit confirmation."
+                    .to_owned(),
+            ),
+        );
+    }
+    if !destructive && !allowed.is_empty() {
+        errors.push(
+            ValidationError::new(
+                format!("{location}.allowed_environments"),
+                "`allowed_environments` only applies to a destructive preset",
+            )
+            .suggested_fix(
+                "Remove the list, or set `destructive = true` if the preset destroys objects."
+                    .to_owned(),
+            ),
+        );
+    }
+    allowed
+}
+
+/// Builds the reusable service templates (`tasks/032.md` §3–§6).
+fn build_templates(
+    raw: &RawConfig,
+    presets: &[MigrationPreset],
+    errors: &mut Vec<ValidationError>,
+) -> Vec<ServiceTemplate> {
+    let mut templates = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    for (i, template) in raw.templates.iter().enumerate() {
+        let location = format!("templates[{i}]");
+        let Some(id) = parse_id::<TemplateId>(&format!("{location}.id"), &template.id, errors)
+        else {
+            continue;
+        };
+        if !seen.insert(id.to_string()) {
+            errors.push(
+                ValidationError::new(
+                    format!("{location}.id"),
+                    format!("duplicate service template id '{id}'"),
+                )
+                .suggested_fix("Template ids must be unique.".to_owned()),
+            );
+            continue;
+        }
+        let Some(name) = resolve_name(&location, &template.name, &template.id, errors) else {
+            continue;
+        };
+
+        let category = template
+            .category
+            .as_deref()
+            .and_then(TemplateCategory::parse);
+        let service_type = match template.service_type.as_deref() {
+            Some(value) => parse_service_type(&format!("{location}.type"), value, errors),
+            None => None,
+        };
+        let default_branch = match &template.default_branch {
+            Some(value) => build_template_branch(&location, value, errors),
+            None => None,
+        };
+        let build_system = match template.build_system.as_deref() {
+            Some(value) => parse_build_system(&format!("{location}.build_system"), value, errors),
+            None => None,
+        };
+        let build_operation = match template.build_operation.as_deref() {
+            Some(value) => {
+                parse_build_operation(&format!("{location}.build_operation"), value, errors)
+            }
+            None => None,
+        };
+
+        let mut runtimes = Vec::new();
+        if let Some(runtime) = &template.runtime {
+            if let Some(runtime) = parse_runtime(&format!("{location}.runtime"), runtime, errors) {
+                runtimes.push(runtime);
+            }
+        }
+        for (j, runtime) in template.runtimes.iter().enumerate() {
+            if let Some(runtime) =
+                parse_runtime(&format!("{location}.runtimes[{j}]"), runtime, errors)
+            {
+                runtimes.push(runtime);
+            }
+        }
+
+        let commands =
+            parse_template_commands(&format!("{location}.commands"), &template.commands, errors);
+
+        let migration = build_template_migration(&location, template, presets, errors);
+
+        let mut health_checks = Vec::new();
+        for (j, health_check) in template.health_checks.iter().enumerate() {
+            if let Some(health_check) = parse_template_health_check(
+                &format!("{location}.health_checks[{j}]"),
+                health_check,
+                errors,
+            ) {
+                health_checks.push(health_check);
+            }
+        }
+
+        let (environment, mut env_errors) =
+            parse_environment(&format!("{location}.environment"), &template.environment);
+        errors.append(&mut env_errors);
+        for variable in environment.iter() {
+            validate_template_value(
+                &format!("{location}.environment.{}", variable.key),
+                &variable.value,
+                errors,
+            );
+        }
+
+        let mut capabilities = Vec::new();
+        for (j, capability) in template.capabilities.iter().enumerate() {
+            if let Some(capability) =
+                parse_capability(&format!("{location}.capabilities[{j}]"), capability, errors)
+            {
+                capabilities.push(capability);
+            }
+        }
+
+        if let Some(0) = template.timeout_seconds {
+            errors.push(
+                ValidationError::new(
+                    format!("{location}.timeout_seconds"),
+                    "timeout_seconds must be at least 1",
+                )
+                .suggested_fix("Remove the field or set a positive number of seconds.".to_owned()),
+            );
+        }
+
+        templates.push(ServiceTemplate {
+            id,
+            name,
+            description: template.description.clone(),
+            category,
+            service_type,
+            default_branch,
+            build_system,
+            build_operation,
+            runtimes,
+            commands,
+            migration,
+            health_checks,
+            timeout_seconds: template.timeout_seconds,
+            environment,
+            capabilities,
+        });
+    }
+
+    templates
+}
+
+/// Parses a template's default branch.
+///
+/// A branch name is a concrete value, not a template value: it is never
+/// variable-expanded.
+fn build_template_branch(
+    location: &str,
+    value: &str,
+    errors: &mut Vec<ValidationError>,
+) -> Option<Branch> {
+    if value.contains("${") {
+        errors.push(
+            ValidationError::new(
+                format!("{location}.default_branch"),
+                "a default branch cannot use ${...} variables",
+            )
+            .suggested_fix(
+                "Set the branch literally, or let the repository's detected default branch apply."
+                    .to_owned(),
+            ),
+        );
+        return None;
+    }
+    match Branch::new(value) {
+        Ok(branch) => Some(branch),
+        Err(error) => {
+            errors.push(
+                ValidationError::new(format!("{location}.default_branch"), error.to_string())
+                    .expected("a branch name without whitespace, such as 'main' or 'release/1.2'"),
+            );
+            None
+        }
+    }
+}
+
+/// Builds a template's migration defaults (`tasks/032.md` §21).
+fn build_template_migration(
+    location: &str,
+    template: &RawTemplate,
+    presets: &[MigrationPreset],
+    errors: &mut Vec<ValidationError>,
+) -> Option<TemplateMigration> {
+    let raw_migration = template.liquibase.as_ref()?;
+    let location = format!("{location}.liquibase");
+    let defaults = TemplateMigration::default();
+
+    let provider = match raw_migration.provider.as_deref() {
+        Some(value) => parse_migration_provider(&format!("{location}.provider"), value, errors)
+            .unwrap_or(MigrationProviderType::Liquibase),
+        None => MigrationProviderType::Liquibase,
+    };
+    if provider != MigrationProviderType::Liquibase {
+        errors.push(
+            ValidationError::new(
+                format!("{location}.provider"),
+                format!("migration provider '{provider}' is not supported"),
+            )
+            .expected("liquibase")
+            .suggested_fix(
+                "Only the liquibase provider can run today; remove the provider or set \
+                 `provider = \"liquibase\"`."
+                    .to_owned(),
+            ),
+        );
+    }
+    let execution_mode = match raw_migration.execution_mode.as_deref() {
+        Some(value) => parse_execution_mode(&format!("{location}.execution_mode"), value, errors)
+            .unwrap_or_default(),
+        None => LiquibaseExecutionMode::default(),
+    };
+    let preset = match &raw_migration.preset {
+        Some(value) => {
+            let parsed =
+                parse_id::<MigrationPresetId>(&format!("{location}.preset"), value, errors);
+            if let Some(id) = &parsed {
+                if !presets.iter().any(|preset| &preset.id == id) {
+                    errors.push(unknown_migration_preset(
+                        &format!("{location}.preset"),
+                        id.as_str(),
+                    ));
+                }
+            }
+            parsed
+        }
+        None => None,
+    };
+
+    Some(TemplateMigration {
+        enabled: raw_migration.enabled.unwrap_or(defaults.enabled),
+        provider: MigrationProviderType::Liquibase,
+        execution_mode,
+        preset,
+    })
+}
+
+/// The actionable error for a reference to an undeclared migration preset.
+fn unknown_migration_preset(location: &str, id: &str) -> ValidationError {
+    ValidationError::new(location, format!("unknown migration preset '{id}'")).suggested_fix(
+        format!(
+            "Declare [[migration_presets]] with id = \"{id}\" or use a built-in preset ({}).",
+            BUILTIN_MIGRATION_PRESETS.join(", ")
+        ),
+    )
+}
+
+/// Builds the saved bulk-operation presets (`tasks/032.md` §36–§38).
+fn build_operation_presets(
+    raw: &RawConfig,
+    workspace_index: &BTreeMap<String, usize>,
+    service_workspaces: &WorkspaceSets,
+    group_workspaces: &WorkspaceSets,
+    profile_workspaces: &WorkspaceSets,
+    presets: &[MigrationPreset],
+    errors: &mut Vec<ValidationError>,
+) -> Vec<OperationPreset> {
+    let mut operation_presets: Vec<OperationPreset> = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+
+    for (i, preset) in raw.operation_presets.iter().enumerate() {
+        let location = format!("operation_presets[{i}]");
+        let Some(id) = parse_id::<OperationPresetId>(&format!("{location}.id"), &preset.id, errors)
+        else {
+            continue;
+        };
+        if !seen.insert(id.to_string()) {
+            errors.push(
+                ValidationError::new(
+                    format!("{location}.id"),
+                    format!("duplicate operation preset id '{id}'"),
+                )
+                .suggested_fix("Operation preset ids must be unique.".to_owned()),
+            );
+            continue;
+        }
+        let Some(name) = resolve_name(&location, &preset.name, &preset.id, errors) else {
+            continue;
+        };
+
+        if preset.services.is_empty() && preset.profiles.is_empty() && preset.groups.is_empty() {
+            errors.push(
+                ValidationError::new(
+                    format!("{location}.services"),
+                    format!(
+                        "operation preset '{}' selects no services, profiles, or groups",
+                        preset.id
+                    ),
+                )
+                .suggested_fix(
+                    "Select at least one service, profile, or group to make the preset useful."
+                        .to_owned(),
+                ),
+            );
+            continue;
+        }
+
+        let mut candidates = service_candidates(preset.services.iter(), service_workspaces);
+        for profile_id in &preset.profiles {
+            if let Some(workspaces) = profile_workspaces.get(profile_id.trim()) {
+                candidates.extend(workspaces.iter().cloned());
+            }
+        }
+        for group_id in &preset.groups {
+            if let Some(workspaces) = group_workspaces.get(group_id.trim()) {
+                candidates.extend(workspaces.iter().cloned());
+            }
+        }
+        let Some(workspace) = choose_workspace(
+            &location,
+            preset.workspace.as_deref(),
+            candidates,
+            workspace_index,
+            errors,
+        ) else {
+            continue;
+        };
+
+        let mut services = Vec::new();
+        for (j, service_id) in preset.services.iter().enumerate() {
+            let Some(service_id) =
+                parse_id::<ServiceId>(&format!("{location}.services[{j}]"), service_id, errors)
+            else {
+                continue;
+            };
+            if !service_workspaces
+                .get(service_id.as_str())
+                .is_some_and(|workspaces| workspaces.contains(&workspace))
+            {
+                errors.push(unknown_member(
+                    &format!("{location}.services[{j}]"),
+                    "service",
+                    service_id.as_str(),
+                    &preset.id,
+                    &workspace,
+                ));
+                continue;
+            }
+            if !services.contains(&service_id) {
+                services.push(service_id);
+            }
+        }
+
+        let mut profiles = Vec::new();
+        for (j, profile_id) in preset.profiles.iter().enumerate() {
+            let Some(profile_id) =
+                parse_id::<ProfileId>(&format!("{location}.profiles[{j}]"), profile_id, errors)
+            else {
+                continue;
+            };
+            if !profile_workspaces
+                .get(profile_id.as_str())
+                .is_some_and(|workspaces| workspaces.contains(&workspace))
+            {
+                errors.push(unknown_member(
+                    &format!("{location}.profiles[{j}]"),
+                    "profile",
+                    profile_id.as_str(),
+                    &preset.id,
+                    &workspace,
+                ));
+                continue;
+            }
+            if !profiles.contains(&profile_id) {
+                profiles.push(profile_id);
+            }
+        }
+
+        let mut groups = Vec::new();
+        for (j, group_id) in preset.groups.iter().enumerate() {
+            let Some(group_id) =
+                parse_id::<GroupId>(&format!("{location}.groups[{j}]"), group_id, errors)
+            else {
+                continue;
+            };
+            if !group_workspaces
+                .get(group_id.as_str())
+                .is_some_and(|workspaces| workspaces.contains(&workspace))
+            {
+                errors.push(unknown_member(
+                    &format!("{location}.groups[{j}]"),
+                    "group",
+                    group_id.as_str(),
+                    &preset.id,
+                    &workspace,
+                ));
+                continue;
+            }
+            if !groups.contains(&group_id) {
+                groups.push(group_id);
+            }
+        }
+
+        let git = build_operation_git(&location, preset, errors);
+        let migration_preset = match preset.migration.as_ref().and_then(|m| m.preset.as_deref()) {
+            Some(value) => {
+                let parsed = parse_id::<MigrationPresetId>(
+                    &format!("{location}.migration.preset"),
+                    value,
+                    errors,
+                );
+                if let Some(id) = &parsed {
+                    if !presets.iter().any(|preset| &preset.id == id) {
+                        errors.push(unknown_migration_preset(
+                            &format!("{location}.migration.preset"),
+                            id.as_str(),
+                        ));
+                    }
+                }
+                parsed
+            }
+            None => None,
+        };
+        let migration_enabled = preset
+            .migration
+            .as_ref()
+            .and_then(|m| m.enabled)
+            .unwrap_or(migration_preset.is_some());
+        let build = build_operation_build(&location, preset, errors);
+        let runtime = match preset
+            .runtime
+            .as_ref()
+            .and_then(|runtime| runtime.action.as_deref())
+        {
+            Some(value) => RuntimeAction::parse(value).unwrap_or_else(|| {
+                errors.push(
+                    ValidationError::new(
+                        format!("{location}.runtime.action"),
+                        format!("'{value}' is not a known runtime action"),
+                    )
+                    .expected("one of: none, start, restart, stop"),
+                );
+                RuntimeAction::None
+            }),
+            None => RuntimeAction::None,
+        };
+
+        let is_default = preset.default_preset.unwrap_or(false);
+        if is_default
+            && operation_presets.iter().any(|existing| {
+                existing.default && existing.workspace.as_ref() == Some(&workspace_id(&workspace))
+            })
+        {
+            errors.push(
+                ValidationError::new(
+                    format!("{location}.default"),
+                    format!("workspace '{workspace}' already has a default operation preset"),
+                )
+                .suggested_fix(
+                    "Only one operation preset per workspace may set `default = true`.".to_owned(),
+                ),
+            );
+        }
+
+        operation_presets.push(OperationPreset {
+            id,
+            name,
+            description: preset.description.clone(),
+            workspace: Some(workspace_id(&workspace)),
+            default: is_default,
+            services,
+            profiles,
+            groups,
+            git,
+            libraries: OperationLibraryOptions {
+                enabled: preset
+                    .libraries
+                    .as_ref()
+                    .and_then(|libraries| libraries.enabled)
+                    .unwrap_or(false),
+            },
+            migration: OperationMigrationOptions {
+                enabled: migration_enabled,
+                preset: migration_preset,
+            },
+            build,
+            runtime: OperationRuntimeOptions { action: runtime },
+            health: OperationHealthOptions {
+                enabled: preset
+                    .health
+                    .as_ref()
+                    .and_then(|health| health.enabled)
+                    .unwrap_or(false),
+            },
+        });
+    }
+
+    operation_presets
+}
+
+/// Parses a workspace id that has already been resolved from the index.
+fn workspace_id(workspace: &str) -> WorkspaceId {
+    WorkspaceId::new(workspace).expect("workspace ids were validated when the workspace was built")
+}
+
+/// Builds the Git options of an operation preset.
+fn build_operation_git(
+    location: &str,
+    preset: &RawOperationPreset,
+    errors: &mut Vec<ValidationError>,
+) -> OperationGitOptions {
+    let raw_git = preset.git.as_ref();
+    let branch = match raw_git.and_then(|git| git.branch.as_deref()) {
+        Some(value) => match Branch::new(value) {
+            Ok(branch) => Some(branch),
+            Err(error) => {
+                errors.push(
+                    ValidationError::new(format!("{location}.git.branch"), error.to_string())
+                        .expected("a branch name without whitespace, such as 'main'"),
+                );
+                None
+            }
+        },
+        None => None,
+    };
+    OperationGitOptions {
+        enabled: raw_git.and_then(|git| git.enabled).unwrap_or(false),
+        branch,
+    }
+}
+
+/// Builds the build options of an operation preset.
+fn build_operation_build(
+    location: &str,
+    preset: &RawOperationPreset,
+    errors: &mut Vec<ValidationError>,
+) -> OperationBuildOptions {
+    let raw_build = preset.build.as_ref();
+    let operation = match raw_build.and_then(|build| build.operation.as_deref()) {
+        Some(value) => parse_build_operation(&format!("{location}.build.operation"), value, errors),
+        None => None,
+    };
+    OperationBuildOptions {
+        enabled: raw_build.and_then(|build| build.enabled).unwrap_or(false),
+        operation,
+    }
+}
+
+/// The actionable error for a reference from a preset to an entity that does
+/// not exist in the resolved workspace.
+fn unknown_member(
+    location: &str,
+    kind: &str,
+    id: &str,
+    preset: &str,
+    workspace: &str,
+) -> ValidationError {
+    ValidationError::new(
+        location,
+        format!("operation preset '{preset}' references unknown {kind} '{id}' in workspace '{workspace}'"),
+    )
+    .suggested_fix("Reference a declared entity in the same workspace.".to_owned())
+}
+
+/// Validates that every configured `liquibase.preset` resolves, and that a
+/// destructive preset never targets an undeclared or disallowed environment
+/// (`tasks/032.md` §19, §21).
+fn validate_service_migration_presets(
+    builds: &[Build],
+    presets: &[MigrationPreset],
+    errors: &mut Vec<ValidationError>,
+) {
+    for build in builds {
+        for (location, service) in &build.services {
+            let Some(config) = build.liquibase.get(&service.id) else {
+                continue;
+            };
+            let Some(preset_id) = &config.preset else {
+                continue;
+            };
+            let location = format!("{location}.liquibase.preset");
+            let Some(preset) = presets.iter().find(|preset| &preset.id == preset_id) else {
+                errors.push(unknown_migration_preset(&location, preset_id.as_str()));
+                continue;
+            };
+            if !preset.destructive {
+                continue;
+            }
+            let environment = &config.database.environment;
+            if matches!(environment, MigrationTargetEnvironment::Unknown) {
+                errors.push(
+                    ValidationError::new(
+                        &location,
+                        format!(
+                            "preset '{preset_id}' is destructive but service '{}' declares no \
+                             database environment",
+                            service.id
+                        ),
+                    )
+                    .expected("a declared database environment such as 'local'")
+                    .suggested_fix(
+                        "Set [services.liquibase.database] `environment = \"local\"` (or the \
+                         environment the preset allows)."
+                            .to_owned(),
+                    ),
+                );
+            } else if !preset.allows_environment(environment) {
+                let allowed: Vec<&str> = preset
+                    .allowed_environments
+                    .iter()
+                    .map(MigrationTargetEnvironment::label)
+                    .collect();
+                errors.push(
+                    ValidationError::new(
+                        &location,
+                        format!(
+                            "preset '{preset_id}' is destructive and may only target [{}]; \
+                             service '{}' declares '{}'",
+                            allowed.join(", "),
+                            service.id,
+                            environment.label()
+                        ),
+                    )
+                    .suggested_fix(
+                        "Point the service at an allowed environment, or authorize a different \
+                         preset for this service."
+                            .to_owned(),
+                    ),
+                );
+            }
+        }
     }
 }
 

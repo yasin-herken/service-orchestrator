@@ -781,6 +781,7 @@ fn new_service(id: &str) -> service_orchestrator_config::raw::RawService {
             ..RawCommands::default()
         },
         build_system: Some("maven".to_owned()),
+        build_operation: None,
         liquibase: None,
         health_checks: Vec::new(),
         ports: Vec::new(),
@@ -926,9 +927,12 @@ fn a_confirmed_removal_persists_and_preserves_unrelated_secrets() {
         .configuration_snapshot()
         .expect("a snapshot")
         .revision;
-    // `core` is referenced by no other entity, so its removal is a clean drop.
-    let change = ConfigChange::group(EntityChange::Remove {
-        id: "core".to_owned(),
+    // `full-stack` is a leaf entity no other declaration references, so its
+    // removal is a clean drop. `core` is not used here because the saved
+    // operation preset references the group, and that is a validation failure
+    // rather than a persistence test.
+    let change = ConfigChange::profile(EntityChange::Remove {
+        id: "full-stack".to_owned(),
     });
     client
         .commit_configuration(&change, &revision)
@@ -937,7 +941,7 @@ fn a_confirmed_removal_persists_and_preserves_unrelated_secrets() {
     let snapshot = client
         .configuration_snapshot()
         .expect("the snapshot is re-read");
-    assert!(!snapshot.groups.iter().any(|g| g.id == "core"));
+    assert!(!snapshot.profiles.iter().any(|p| p.id == "full-stack"));
 
     // A secret elsewhere in the file survives the rewrite verbatim.
     let text = std::fs::read_to_string(&harness.config_path).expect("the file is readable");

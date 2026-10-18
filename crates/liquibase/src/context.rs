@@ -24,10 +24,65 @@ use std::fmt;
 use service_orchestrator_config::{MigrationCommandSet, MigrationDatabaseConfig};
 use service_orchestrator_domain::{
     AbsolutePath, CommandSpec, Environment, LiquibaseExecutionMode, MigrationOperation,
-    MigrationProviderType, ServiceId,
+    MigrationPresetId, MigrationProviderType, ServiceId,
 };
 
 use crate::plan::MigrationSafety;
+
+/// A named migration preset resolved from validated configuration at execution
+/// time (`tasks/032.md` §16–§21).
+///
+/// The context carries the *resolved* preset, never an authorization: the
+/// safety rules are revalidated for every execution, and the `destructive`
+/// flag only classifies the plan — it never grants permission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MigrationPresetInvocation {
+    /// The preset identifier.
+    pub id: MigrationPresetId,
+    /// The Liquibase goals to run, in order.
+    pub goals: Vec<String>,
+    /// The Liquibase contexts declared by the preset. When empty, the
+    /// service's declared contexts apply.
+    pub contexts: Vec<String>,
+    /// Whether the preset destroys database objects.
+    pub destructive: bool,
+    /// Whether the preset only inspects the database.
+    pub read_only: bool,
+    /// The environments a destructive preset may target. Never a substitute for
+    /// the execution-time authorization.
+    pub allowed_environments: Vec<service_orchestrator_domain::MigrationTargetEnvironment>,
+    /// The preset's timeout, in seconds.
+    pub timeout_seconds: Option<u64>,
+}
+
+impl MigrationPresetInvocation {
+    /// Returns `true` when the preset may be executed against `environment`.
+    ///
+    /// A non-destructive preset has no environment restriction. A destructive
+    /// preset only runs against a declared, environment-classified target on
+    /// its list; the list is a precondition, never authorization
+    /// (`tasks/032.md` §19).
+    #[must_use]
+    pub fn allows_environment(
+        &self,
+        environment: &service_orchestrator_domain::MigrationTargetEnvironment,
+    ) -> bool {
+        !self.destructive || self.allowed_environments.contains(environment)
+    }
+
+    /// Returns the contexts that apply to the service.
+    ///
+    /// A preset with declared contexts overrides the service's list; otherwise
+    /// the service's declared contexts apply (`tasks/032.md` §17).
+    #[must_use]
+    pub fn effective_contexts<'a>(&'a self, service_contexts: &'a [String]) -> &'a [String] {
+        if self.contexts.is_empty() {
+            service_contexts
+        } else {
+            &self.contexts
+        }
+    }
+}
 
 /// The resolved, execution-time description of a migration.
 #[derive(Clone, PartialEq, Eq)]
@@ -46,6 +101,10 @@ pub struct MigrationContext {
     pub workspace_root: AbsolutePath,
     /// The per-operation configured commands (authoritative when set).
     pub commands: MigrationCommandSet,
+    /// The named preset selected for this migration, when the caller chose one.
+    /// A preset composes the goals and replaces the per-operation commands
+    /// (`tasks/032.md` §16, §21).
+    pub preset: Option<MigrationPresetInvocation>,
     /// The legacy `[services.commands] liquibase` command, used for the apply
     /// operation when no per-operation apply command is configured.
     pub service_command: Option<CommandSpec>,
@@ -88,6 +147,13 @@ impl MigrationContext {
         if !self.operation.is_mutating() {
             return MigrationSafety::ReadOnly;
         }
+        if self
+            .preset
+            .as_ref()
+            .is_some_and(|preset| preset.destructive)
+        {
+            return MigrationSafety::Destructive;
+        }
         if self.database.environment.is_local() {
             MigrationSafety::LocalWrite
         } else {
@@ -106,6 +172,7 @@ impl fmt::Debug for MigrationContext {
             .field("working_dir", &self.working_dir)
             .field("database", &self.database_identity())
             .field("environment_variables", &self.environment.len())
+            .field("preset", &self.preset.as_ref().map(|preset| &preset.id))
             .field("non_local_authorized", &self.non_local_authorized)
             .finish()
     }
@@ -132,6 +199,7 @@ mod tests {
             working_dir: AbsolutePath::new("/w/acme/backend/auth-service").unwrap(),
             workspace_root: AbsolutePath::new("/w/acme").unwrap(),
             commands: MigrationCommandSet::default(),
+            preset: None,
             service_command: None,
             database,
             environment: Environment::default(),
@@ -170,6 +238,57 @@ mod tests {
             )
             .safety(),
             MigrationSafety::AuthorizedWrite
+        );
+    }
+
+    #[test]
+    fn a_destructive_preset_is_always_destructive() {
+        let preset = MigrationPresetInvocation {
+            id: MigrationPresetId::new("reset_local").unwrap(),
+            goals: vec![
+                "liquibase:dropAll".to_owned(),
+                "liquibase:update".to_owned(),
+            ],
+            contexts: Vec::new(),
+            destructive: true,
+            read_only: false,
+            allowed_environments: vec![MigrationTargetEnvironment::Local],
+            timeout_seconds: None,
+        };
+        let mut context = context(MigrationOperation::Apply, MigrationTargetEnvironment::Local);
+        context.preset = Some(preset.clone());
+        assert_eq!(context.safety(), MigrationSafety::Destructive);
+        assert!(context.safety().is_destructive());
+        // A read-only operation never becomes destructive, even with a
+        // destructive preset selected: the application rejects that pairing.
+        context.operation = MigrationOperation::Status;
+        assert_eq!(context.safety(), MigrationSafety::ReadOnly);
+    }
+
+    #[test]
+    fn a_preset_without_contexts_inherits_the_service_contexts() {
+        let service_contexts = vec!["sql".to_owned(), "data".to_owned()];
+        let inheriting = MigrationPresetInvocation {
+            id: MigrationPresetId::new("update").unwrap(),
+            goals: vec!["liquibase:update".to_owned()],
+            contexts: Vec::new(),
+            destructive: false,
+            read_only: false,
+            allowed_environments: Vec::new(),
+            timeout_seconds: None,
+        };
+        assert_eq!(
+            inheriting.effective_contexts(&service_contexts),
+            &service_contexts
+        );
+
+        let overriding = MigrationPresetInvocation {
+            contexts: vec!["onlyDev".to_owned()],
+            ..inheriting
+        };
+        assert_eq!(
+            overriding.effective_contexts(&service_contexts),
+            ["onlyDev"]
         );
     }
 

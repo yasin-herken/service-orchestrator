@@ -277,7 +277,7 @@ url = "{orders_remote}"
 
 [services.runtime]
 type = "node"
-version = "20.19.4"
+version = "20.x"
 
 [services.commands]
 build = {{ program = "node", args = ["--version"] }}
@@ -312,7 +312,7 @@ url = "{billing_remote}"
 
 [services.runtime]
 type = "node"
-version = "20.19.4"
+version = "20.x"
 
 [services.commands]
 build = {{ program = "node", args = ["--version"] }}
@@ -335,7 +335,7 @@ url = "{slow_remote}"
 
 [services.runtime]
 type = "node"
-version = "20.19.4"
+version = "20.x"
 
 [services.commands]
 build = {{ program = "sleep", args = ["30"] }}
@@ -355,7 +355,7 @@ url = "{slow2_remote}"
 
 [services.runtime]
 type = "node"
-version = "20.19.4"
+version = "20.x"
 
 [services.commands]
 build = {{ program = "sleep", args = ["30"] }}
@@ -375,7 +375,7 @@ url = "https://example.invalid/docs-site.git"
 
 [services.runtime]
 type = "node"
-version = "20.19.4"
+version = "20.x"
 
 [services.commands]
 build = {{ program = "node", args = ["--version"] }}
@@ -867,13 +867,21 @@ fn service_start_health_duplicate_start_and_stop() {
     assert!(running.managed, "the daemon owns the process");
     assert!(running.pid.is_some(), "an OS pid is recorded");
 
-    // A real HTTP health probe against the Node fixture reports healthy.
-    let check = client
-        .check_service_health(&id, HealthCheckScope::All)
-        .expect("the health check is scheduled");
-    let check_task = wait_for_terminal(&client, check.task_id().unwrap());
-    assert_eq!(check_task.status, TaskStatus::Succeeded);
-    let health = client.get_service_health(&id).expect("health is read");
+    // A real HTTP health probe against the Node fixture reports healthy. The
+    // process can report `running` slightly before its listener accepts, so the
+    // probe is retried within the same bounded deadline instead of asserting on
+    // the first attempt.
+    let health = wait_for("the HTTP fixture to report healthy", || {
+        let check = client
+            .check_service_health(&id, HealthCheckScope::All)
+            .ok()?;
+        let task = wait_for_terminal(&client, check.task_id()?);
+        if task.status != TaskStatus::Succeeded {
+            return None;
+        }
+        let health = client.get_service_health(&id).ok()?;
+        (health.state == service_orchestrator_application::HealthState::Healthy).then_some(health)
+    });
     assert_eq!(
         health.state,
         service_orchestrator_application::HealthState::Healthy,

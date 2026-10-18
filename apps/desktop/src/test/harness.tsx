@@ -4,6 +4,8 @@ import App from '../App';
 import {
   makeAlignment,
   makeBranches,
+  makeBulkImportCommit,
+  makeBulkImportPlan,
   makeBulkSummary,
   makeBuildTargets,
   makeConfigurationCommit,
@@ -13,6 +15,7 @@ import {
   makeConfigurationValidation,
   makeConnected,
   makeDaemonStatus,
+  makeDiscoveryReport,
   makeEnvironmentPlan,
   makeGitStatus,
   makeGitSyncPreview,
@@ -22,9 +25,12 @@ import {
   makeInspection,
   makeLibraries,
   makeLogPage,
+  makeMigrationPresetSummaries,
   makeMigrationRows,
   makeMigrationStatus,
   makeOperationOutcome,
+  makeOperationPresetRequest,
+  makeOperationPresetSummary,
   makeProfile,
   makeProjectSuggestion,
   makeRepositories,
@@ -233,4 +239,10 @@ export function happyPathDefaults(): void {
   mockDesktopApi.reloadConfiguration.mockResolvedValue(makeConfigurationReload());
   mockDesktopApi.inspectRepository.mockResolvedValue(makeRepositoryProbe());
   mockDesktopApi.detectProjectConfiguration.mockResolvedValue(makeProjectSuggestion());
+  mockDesktopApi.discoverRepositories.mockResolvedValue(makeDiscoveryReport());
+  mockDesktopApi.planBulkImport.mockResolvedValue(makeBulkImportPlan());
+  mockDesktopApi.commitBulkImport.mockResolvedValue(makeBulkImportCommit());
+  mockDesktopApi.listMigrationPresets.mockResolvedValue(makeMigrationPresetSummaries());
+  mockDesktopApi.listOperationPresets.mockResolvedValue([makeOperationPresetSummary()]);
+  mockDesktopApi.getOperationPresetRequest.mockResolvedValue(makeOperationPresetRequest());
 }

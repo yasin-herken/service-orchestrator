@@ -68,7 +68,7 @@ plumbing (`AGENTS.md` §11, §15). The runtime adapter never builds
 ### Why Java and Node are the initial runtimes
 
 They are the stacks actually in use (Spring Boot 3 + Maven; React 16 +
-Node 20.19.4). Implementing exactly two keeps the abstraction honest: every
+Node 20.x). Implementing exactly two keeps the abstraction honest: every
 runtime-independent rule (idempotency, ownership, port checks, cancellation,
 events) is proven against both, and no rule is designed around a hypothetical
 third. `RuntimeType` is a closed enum, so an unsupported service fails with

@@ -148,7 +148,7 @@ Expected:
 a non-empty semantic/version-like string
 
 Suggested fix:
-Add `version = "20.19.4"` (or the required version) to the runtime.
+Add `version = "20.x"` (or the required version) to the runtime.
 ```
 
 The separation also keeps the domain pure (ADR 002): the domain never learns

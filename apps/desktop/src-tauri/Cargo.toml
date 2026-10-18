@@ -40,6 +40,10 @@ service-orchestrator-daemon = { path = "../../../crates/daemon" }
 # as they do in production (`tasks/021.md` §42).
 service-orchestrator-health = { path = "../../../crates/health" }
 service-orchestrator-logging = { path = "../../../crates/logging" }
+# Repository discovery is exercised over IPC against the real bounded walker
+# and the real read-only inspector, over fixture repositories in a temporary
+# directory (`tasks/032.md` §7, §8, §45).
+service-orchestrator-repository = { path = "../../../crates/repository" }
 # A test-only executor implementation needs the same object-safe async-trait
 # shim the production executors use.
 async-trait = "0.1"

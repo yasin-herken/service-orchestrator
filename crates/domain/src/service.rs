@@ -19,7 +19,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::build::BuildSystem;
+use crate::build::{BuildOperation, BuildSystem};
 use crate::command::{CommandKind, CommandSet};
 use crate::dependency::{Dependency, DependencyTarget};
 use crate::environment::Environment;
@@ -150,6 +150,14 @@ pub struct Service {
     /// adapter.
     #[serde(default)]
     pub build_system: Option<BuildSystem>,
+    /// The build operation used by default when no request overrides it
+    /// (`tasks/032.md` §3, §12).
+    ///
+    /// A workflow that does not request a specific operation uses this value;
+    /// when it is unset the conventional `build` operation applies. The domain
+    /// only names the operation: how it runs belongs to the build adapter.
+    #[serde(default)]
+    pub build_operation: Option<BuildOperation>,
     /// The declared dependencies of the service.
     pub dependencies: Vec<Dependency>,
     /// The configured health checks for the service.
@@ -190,6 +198,7 @@ impl Service {
             runtimes: Vec::new(),
             commands: CommandSet::new(),
             build_system: None,
+            build_operation: None,
             dependencies: Vec::new(),
             health_checks: Vec::new(),
             ports: Vec::new(),
@@ -230,6 +239,13 @@ impl Service {
     #[must_use]
     pub fn with_build_system(mut self, build_system: BuildSystem) -> Self {
         self.build_system = Some(build_system);
+        self
+    }
+
+    /// Sets the default build operation.
+    #[must_use]
+    pub const fn with_build_operation(mut self, operation: BuildOperation) -> Self {
+        self.build_operation = Some(operation);
         self
     }
 

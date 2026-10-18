@@ -84,7 +84,7 @@ operation**: a service installs through its build, a library through
   can check the installed version and reports `RUNTIME_VERSION_MISMATCH` when it
   differs.
 - The project's stated Node.js version for managed frontend services is
-  **20.19.4**.
+  **20.x**.
 - `validate_workspace` reports a missing `mvn`/`mvnw`/`npm` as
   `missing_build_tool`.
 

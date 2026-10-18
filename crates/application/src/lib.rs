@@ -48,6 +48,7 @@
 //! See `docs/application-core.md` and `docs/adr/004-application-core.md`.
 
 mod app;
+mod bulk_import;
 mod commands;
 mod error;
 mod models;
@@ -56,16 +57,24 @@ mod queries;
 mod validation;
 
 pub use app::Application;
+pub use bulk_import::{
+    suggested_category, templates_for_category, BulkImportArtifact, BulkImportCommit,
+    BulkImportEntityRef, BulkImportIssue, BulkImportOverrides, BulkImportPlan, BulkImportProposal,
+    BulkImportRequest, BulkImportRow, BulkImportRowAction, BulkImportSelection, CategoryMatch,
+    ConfiguredEntityMatch, DiscoveredRepositoryView, DiscoveryScanRequest, ExistingEntityPolicy,
+    RepositoryDiscoveryReport, TemplateSource,
+};
 pub use error::ApplicationError;
 pub use models::{
     AlignmentStatus, BuildCapabilities, BulkOperationSummary, ConfigurationCommit,
     ConfigurationCounts, ConfigurationReload, ConfigurationValidation, ConsumerAlignment,
     DiagnosticFailure, EnvironmentPhaseKind, EnvironmentPlan, EnvironmentPlanPhase,
     EnvironmentPlanStep, HealthCheckScope, LibraryArtifactVerification, LibraryDependent,
-    LibraryPrepareOptions, LibraryStatus, MigrationStatus, OperationResult,
-    PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest, ServiceDiagnostics,
-    ServiceRuntimeStatus, ServiceStatus, VersionAlignmentPlan, WorkflowCancellation,
-    WorkflowPhaseProgress, WorkflowStatus, WorkflowTaskFailure, WorkspaceStatus,
+    LibraryPrepareOptions, LibraryStatus, MigrationPresetSummary, MigrationStatus,
+    OperationPresetSummary, OperationResult, PrepareEnvironmentRequest,
+    PrepareSelectedLibrariesRequest, ServiceDiagnostics, ServiceRuntimeStatus, ServiceStatus,
+    VersionAlignmentPlan, WorkflowCancellation, WorkflowPhaseProgress, WorkflowStatus,
+    WorkflowTaskFailure, WorkspaceStatus,
 };
 pub use validation::{
     ConfiguredPortConflict, OccupiedPort, RepositoryCheckStatus, RepositoryOwner,
@@ -79,16 +88,18 @@ pub use ports::{
     artifact_parameter, build_parameter, migration_parameter, parameter, service_runtime_parameter,
     ArtifactInspectionError, ArtifactInspector, ArtifactPresence, BuildCapabilityIndex, BuildError,
     DependencyVersionInspection, DetectedBuildSystem, DetectedIntegration, DetectedRuntime,
-    DiffOptions, GitError, GitManager, GitOptions, HealthCheckOutcome, HealthIndex, HealthState,
-    InMemoryRuntimeStateStore, LogEntry, LogLevel, LogPage, LogRequest, LogService,
+    DetectionConfidence, DiffOptions, DiscoveredRepository, DiscoveryError, DiscoveryReport,
+    DiscoveryRequest, GitError, GitManager, GitOptions, HealthCheckOutcome, HealthIndex,
+    HealthState, InMemoryRuntimeStateStore, LogEntry, LogLevel, LogPage, LogRequest, LogService,
     LogServiceError, LogSource, LogStream, LogStreamError, LogSubscription, MavenMetadata,
     MigrationError, NodeMetadata, NullArtifactInspector, NullBuildCapabilityIndex, NullGitManager,
-    NullHealthIndex, NullLogService, NullRepositoryInspector, NullServiceRuntimeIndex,
-    ProjectConfigurationSuggestion, ProviderAvailability, RepositoryInspection,
-    RepositoryInspectionError, RepositoryInspector, ResolvedArtifact, ResolvedBuildCommand,
-    ResolvedBuildTarget, ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository,
-    ResolvedServiceTarget, RuntimeStateStore, ServiceHealth, ServiceProcessInfo,
-    ServiceRuntimeError, ServiceRuntimeIndex, ServiceRuntimeState, SuggestedCommand,
-    WorkspaceProbe, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP, MAX_DIFF_BYTES,
+    NullHealthIndex, NullLogService, NullRepositoryDiscovery, NullRepositoryInspector,
+    NullServiceRuntimeIndex, ProjectConfigurationSuggestion, ProviderAvailability,
+    RepositoryDiscovery, RepositoryInspection, RepositoryInspectionError, RepositoryInspector,
+    ResolvedArtifact, ResolvedBuildCommand, ResolvedBuildTarget, ResolvedDependency,
+    ResolvedMigrationTarget, ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore,
+    ServiceHealth, ServiceProcessInfo, ServiceRuntimeError, ServiceRuntimeIndex,
+    ServiceRuntimeState, SuggestedCommand, TechnologyDetection, WorkspaceProbe, CHECK_HTTP,
+    CHECK_PROCESS, CHECK_TCP, MAX_DIFF_BYTES,
 };
 pub use service_orchestrator_policy::{Authorization, PolicyDecision, PolicyEngine};

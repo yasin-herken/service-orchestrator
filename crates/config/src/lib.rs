@@ -66,7 +66,12 @@ pub use management::{
     UpdatedEntity,
 };
 pub use model::{
-    Config, ConfiguredWorkspace, ExecutionSettings, LiquibaseConfig, MigrationCommandSet,
-    MigrationDatabaseConfig, DEFAULT_CONFIG_VERSION, DEFAULT_MAX_PARALLEL_TASKS,
-    DEFAULT_TIMEOUT_SECONDS, SUPPORTED_CONFIG_VERSION,
+    effective_excludes, merge_migration_presets, Config, ConfiguredWorkspace, DiscoverySettings,
+    ExecutionSettings, LiquibaseConfig, MigrationCommandSet, MigrationDatabaseConfig,
+    MigrationPreset, OperationBuildOptions, OperationGitOptions, OperationHealthOptions,
+    OperationLibraryOptions, OperationMigrationOptions, OperationPreset, OperationRuntimeOptions,
+    RuntimeAction, ServiceTemplate, TemplateCategory, TemplateMigration, BUILTIN_MIGRATION_PRESETS,
+    DEFAULT_CONFIG_VERSION, DEFAULT_DISCOVERY_EXCLUDE, DEFAULT_DISCOVERY_MAX_DEPTH,
+    DEFAULT_DISCOVERY_MAX_REPOSITORIES, DEFAULT_MAX_PARALLEL_TASKS, DEFAULT_TIMEOUT_SECONDS,
+    MAX_DISCOVERY_DEPTH, MAX_DISCOVERY_REPOSITORIES, SUPPORTED_CONFIG_VERSION,
 };

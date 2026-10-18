@@ -2858,6 +2858,7 @@ dependencies = [
  "service-orchestrator-execution",
  "service-orchestrator-health",
  "service-orchestrator-logging",
+ "service-orchestrator-repository",
  "tauri",
  "tauri-build",
  "tokio",
@@ -2927,6 +2928,15 @@ dependencies = [
  "service-orchestrator-domain",
  "thiserror 2.0.21",
  "tokio",
+]
+
+[[package]]
+name = "service-orchestrator-repository"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "service-orchestrator-application",
+ "service-orchestrator-config",
 ]
 
 [[package]]

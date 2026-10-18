@@ -154,8 +154,12 @@ fn build_environment_request(
         include_dependencies: false,
         build_libraries: false,
         run_liquibase: false,
+        migration_preset: None,
+        build_operation: None,
         build: true,
         start: false,
+        restart: false,
+        stop: false,
         wait_for_health: true,
     }
 }

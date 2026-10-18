@@ -21,10 +21,10 @@ use std::str::FromStr;
 use std::time::Duration;
 
 use service_orchestrator_domain::{
-    ArtifactCoordinate, BuildSystem, CommandKind, CommandSet, CommandSpec, DependencyKind,
-    Environment, EnvironmentVariable, HealthCheck, HealthCheckKind, HttpHealthCheck, Library,
-    LiquibaseExecutionMode, MigrationProviderType, Port, RelativePath, RepositoryProvider, Runtime,
-    RuntimeKind, Service, ServiceCapability, ServiceType, Version,
+    ArtifactCoordinate, BuildOperation, BuildSystem, CommandKind, CommandSet, CommandSpec,
+    DependencyKind, Environment, EnvironmentVariable, HealthCheck, HealthCheckKind,
+    HttpHealthCheck, Library, LiquibaseExecutionMode, MigrationProviderType, Port, RelativePath,
+    RepositoryProvider, Runtime, RuntimeKind, Service, ServiceCapability, ServiceType, Version,
 };
 
 use crate::error::ValidationError;
@@ -80,7 +80,7 @@ pub(crate) fn parse_version(
         Err(error) => {
             errors.push(
                 ValidationError::new(location, error.to_string())
-                    .expected("a non-empty version such as '21', '20.19.4', or '1.8.0-SNAPSHOT'"),
+                    .expected("a non-empty version such as '21', '20.x', or '1.8.0-SNAPSHOT'"),
             );
             None
         }
@@ -687,6 +687,277 @@ pub(crate) fn parse_environment(
     (environment, errors)
 }
 
+/// Parses a build operation (`tasks/032.md` §27, §36).
+pub(crate) fn parse_build_operation(
+    location: &str,
+    value: &str,
+    errors: &mut Vec<ValidationError>,
+) -> Option<BuildOperation> {
+    match BuildOperation::parse(value) {
+        Some(operation) => Some(operation),
+        None => {
+            errors.push(
+                ValidationError::new(
+                    location,
+                    format!("'{value}' is not a known build operation"),
+                )
+                .expected(
+                    "one of: clean, build, test, install_dependencies, publish_local_artifact",
+                ),
+            );
+            None
+        }
+    }
+}
+
+/// Validates a migration-preset goal token.
+///
+/// A preset goal is a single Maven goal such as `liquibase:update`. It is
+/// composed into a structured argument vector by the provider, so a token may
+/// never be empty, contain whitespace or shell metacharacters, or look like an
+/// option (`-D…`): options are the provider's job, not the configuration's
+/// (`tasks/032.md` §18).
+pub(crate) fn validate_goal_token(
+    location: &str,
+    value: &str,
+    errors: &mut Vec<ValidationError>,
+) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        errors.push(
+            ValidationError::new(location, "a goal must not be empty")
+                .expected("a Maven goal such as 'liquibase:update'"),
+        );
+        return None;
+    }
+    if trimmed.starts_with('-') {
+        errors.push(
+            ValidationError::new(location, format!("'{trimmed}' is an option, not a goal"))
+                .expected("a Maven goal such as 'liquibase:update'")
+                .suggested_fix(
+                    "Options such as -Dliquibase.contexts are composed by the provider; a preset \
+                 only names goals."
+                        .to_owned(),
+                ),
+        );
+        return None;
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-' | ':' | '+'))
+    {
+        errors.push(
+            ValidationError::new(
+                location,
+                format!("'{trimmed}' contains characters that are not allowed in a goal"),
+            )
+            .expected("letters, digits, '.', '_', '-', ':', and '+' only"),
+        );
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+/// Validates a Liquibase context token.
+///
+/// Contexts are names such as `sql` or `onlyDev`; the provider joins them with
+/// commas, so a context may not itself contain a comma, whitespace, or shell
+/// metacharacters.
+pub(crate) fn validate_context_token(
+    location: &str,
+    value: &str,
+    errors: &mut Vec<ValidationError>,
+) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        errors.push(
+            ValidationError::new(location, "a context must not be empty")
+                .expected("a context name such as 'sql' or 'onlyDev'"),
+        );
+        return None;
+    }
+    if !trimmed
+        .chars()
+        .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+    {
+        errors.push(
+            ValidationError::new(location, format!("'{trimmed}' is not a valid context name"))
+                .expected("letters, digits, '.', '_', and '-' only")
+                .suggested_fix(
+                    "Contexts are joined with commas by the provider; list them separately.",
+                )
+                .to_owned(),
+        );
+        return None;
+    }
+    Some(trimmed.to_owned())
+}
+
+/// Validates the `${...}` variables in a template value.
+///
+/// Substitution is textual and the variable set is closed, so an unknown,
+/// empty, or unterminated placeholder is an error here rather than a surprise
+/// at import time (`tasks/032.md` §4).
+pub(crate) fn validate_template_value(
+    location: &str,
+    value: &str,
+    errors: &mut Vec<ValidationError>,
+) {
+    if let Err(error) = service_orchestrator_domain::validate_template_text(value) {
+        errors.push(
+            ValidationError::new(location, error.to_string())
+                .expected("only the supported ${...} variables, or literal text")
+                .suggested_fix(
+                    "Correct the placeholder name; see docs/service-templates.md for the \
+                     supported variables."
+                        .to_owned(),
+                ),
+        );
+    }
+}
+
+/// Parses the named commands of a template's raw command table.
+///
+/// Template commands are parsed like service commands, with one difference: a
+/// command *program* must be a concrete executable (variables would change
+/// which executable runs, which the variable system deliberately cannot
+/// express), while *arguments*, working directories, and command environment
+/// values may use the supported variables (`tasks/032.md` §3, §4).
+pub(crate) fn parse_template_commands(
+    location: &str,
+    raw: &crate::raw::RawCommands,
+    errors: &mut Vec<ValidationError>,
+) -> service_orchestrator_domain::CommandSet {
+    let mut commands = service_orchestrator_domain::CommandSet::new();
+    for (name, kind) in NAMED_COMMAND_KINDS {
+        let Some(raw_command) = named_command(raw, name) else {
+            continue;
+        };
+        let command_location = format!("{location}.{name}");
+        if let Some(spec) = parse_template_command(&command_location, raw_command, errors) {
+            commands.set(kind, spec);
+        }
+    }
+    for (name, raw_command) in &raw.custom {
+        if name.trim().is_empty() {
+            errors.push(ValidationError::new(
+                format!("{location}.custom"),
+                "project-specific command names must not be empty",
+            ));
+            continue;
+        }
+        let command_location = format!("{location}.custom.{name}");
+        let kind = CommandKind::Other(name.clone());
+        if let Some(spec) = parse_template_command(&command_location, raw_command, errors) {
+            commands.set(kind, spec);
+        }
+    }
+    commands
+}
+
+/// Parses one template command, rejecting a variable-bearing program.
+fn parse_template_command(
+    location: &str,
+    raw_command: &RawCommand,
+    errors: &mut Vec<ValidationError>,
+) -> Option<CommandSpec> {
+    if let Some(program) = command_program(raw_command) {
+        if program.contains("${") {
+            errors.push(
+                ValidationError::new(
+                    location,
+                    "a template command program cannot use ${...} variables",
+                )
+                .expected("a concrete executable such as './mvnw' or 'npm'")
+                .suggested_fix(
+                    "Only arguments, working directories, and environment values are \
+                     variable-expanded."
+                        .to_owned(),
+                ),
+            );
+            return None;
+        }
+    }
+    let spec = parse_command(location, raw_command, errors)?;
+    for (i, arg) in spec.args.iter().enumerate() {
+        validate_template_value(&format!("{location}.args[{i}]"), arg, errors);
+    }
+    if let Some(working_dir) = &spec.working_dir {
+        validate_template_value(
+            &format!("{location}.working_dir"),
+            working_dir.as_str(),
+            errors,
+        );
+    }
+    for variable in spec.environment.iter() {
+        validate_template_value(
+            &format!("{location}.environment.{}", variable.key),
+            &variable.value,
+            errors,
+        );
+    }
+    Some(spec)
+}
+
+/// Returns the program of a raw command, when it has one.
+fn command_program(command: &RawCommand) -> Option<&str> {
+    match command {
+        RawCommand::Line(line) => line.split_whitespace().next(),
+        RawCommand::Structured(structured) => Some(structured.program.as_str()),
+    }
+}
+
+/// Returns the raw command declared under a named command key.
+fn named_command<'a>(raw: &'a crate::raw::RawCommands, name: &str) -> Option<&'a RawCommand> {
+    match name {
+        "install" => raw.install.as_ref(),
+        "build" => raw.build.as_ref(),
+        "start" => raw.start.as_ref(),
+        "stop" => raw.stop.as_ref(),
+        "restart" => raw.restart.as_ref(),
+        "test" => raw.test.as_ref(),
+        "liquibase" => raw.liquibase.as_ref(),
+        _ => None,
+    }
+}
+
+/// Parses a template health check.
+///
+/// A template may declare a `process` check or an `http` check. A fixed `port`
+/// check is rejected: the port is assigned per service during a bulk import, so
+/// a template expresses the intent with an HTTP URL that uses `${port}`
+/// (`tasks/032.md` §3, §29).
+pub(crate) fn parse_template_health_check(
+    location: &str,
+    raw: &RawHealthCheck,
+    errors: &mut Vec<ValidationError>,
+) -> Option<HealthCheck> {
+    match raw.kind.as_str() {
+        "port" => {
+            errors.push(
+                ValidationError::new(
+                    format!("{location}.type"),
+                    "a template cannot declare a fixed port",
+                )
+                .expected("a `process` check or an `http` check using ${port}")
+                .suggested_fix(
+                    "Use `type = \"http\"` with, for example, \
+                     `url = \"http://localhost:${port}/actuator/health\"`."
+                        .to_owned(),
+                ),
+            );
+            None
+        }
+        "http" => {
+            if let Some(url) = raw.url.as_deref() {
+                validate_template_value(&format!("{location}.url"), url, errors);
+            }
+            parse_health_check(location, raw, errors)
+        }
+        _ => parse_health_check(location, raw, errors),
+    }
+}
+
 /// Parses the named commands of a raw command table.
 pub(crate) fn parse_commands(
     location: &str,
@@ -695,17 +966,7 @@ pub(crate) fn parse_commands(
 ) -> service_orchestrator_domain::CommandSet {
     let mut commands = service_orchestrator_domain::CommandSet::new();
     for (name, kind) in NAMED_COMMAND_KINDS {
-        let raw_command = match name {
-            "install" => raw.install.as_ref(),
-            "build" => raw.build.as_ref(),
-            "start" => raw.start.as_ref(),
-            "stop" => raw.stop.as_ref(),
-            "restart" => raw.restart.as_ref(),
-            "test" => raw.test.as_ref(),
-            "liquibase" => raw.liquibase.as_ref(),
-            _ => None,
-        };
-        if let Some(raw_command) = raw_command {
+        if let Some(raw_command) = named_command(raw, name) {
             if let Some(spec) = parse_command(&format!("{location}.{name}"), raw_command, errors) {
                 commands.set(kind, spec);
             }
@@ -804,9 +1065,9 @@ pub(crate) fn validate_service_consistency(
                 format!("{location}.runtime"),
                 format!("frontend service '{}' declares no runtime", service.id),
             )
-            .expected("a runtime such as Node 20.19.4")
+            .expected("a runtime such as Node 20.x")
             .suggested_fix(
-                "Add [services.runtime] with `type = \"node\"` and `version = \"20.19.4\"`."
+                "Add [services.runtime] with `type = \"node\"` and `version = \"20.x\"`."
                     .to_owned(),
             ),
         );
@@ -822,8 +1083,7 @@ pub(crate) fn validate_service_consistency(
                 )
                 .expected("a non-empty semantic/version-like string")
                 .suggested_fix(
-                    "Add `version = \"20.19.4\"` (or the required version) to the runtime."
-                        .to_owned(),
+                    "Add `version = \"20.x\"` (or the required version) to the runtime.".to_owned(),
                 ),
             );
         }

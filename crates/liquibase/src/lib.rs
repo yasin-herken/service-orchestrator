@@ -78,7 +78,7 @@ mod provider;
 mod registry;
 mod runner;
 
-pub use context::MigrationContext;
+pub use context::{MigrationContext, MigrationPresetInvocation};
 pub use coordinator::DatabaseCoordinator;
 pub use executor::{register_migration_executors, MigrationTaskExecutor};
 pub use liquibase::LiquibaseProvider;

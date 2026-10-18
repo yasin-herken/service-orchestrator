@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use service_orchestrator_config::management::{
     AffectedReference, ConfigChange, ConfigRepository, ConfigurationDiff, EntityChange, EntityKind,
 };
-use service_orchestrator_config::raw::{RawGroup, RawService, RawWorkspace};
+use service_orchestrator_config::raw::{RawGroup, RawService, RawTemplate, RawWorkspace};
 use service_orchestrator_config::ConfigError;
 
 const BASE: &str = r#"# acme workspace configuration
@@ -108,6 +108,16 @@ fn raw_group(id: &str, services: &[&str]) -> RawGroup {
 
 fn service_change(entity: RawService) -> ConfigChange {
     ConfigChange::service(EntityChange::Create { entity })
+}
+
+fn raw_template(id: &str, category: &str) -> RawTemplate {
+    toml::from_str(&format!(
+        r#"
+        id = "{id}"
+        category = "{category}"
+        "#
+    ))
+    .expect("the raw template parses")
 }
 
 fn assert_no_pending_temp(dir: &Path) {
@@ -373,4 +383,180 @@ fn revision_changes_when_the_file_changes() {
     std::fs::write(&path, format!("{BASE}\n# trailing comment\n")).expect("the file is rewritten");
     let after = repository.snapshot().expect("a snapshot is read").revision;
     assert_ne!(before, after, "an out-of-band edit changes the revision");
+}
+
+#[test]
+fn a_valid_batch_commits_every_change_atomically() {
+    let dir = TestDir::new("batch-valid");
+    let path = dir.write_config(BASE);
+    let repository = ConfigRepository::new(path.clone());
+    let revision = repository.snapshot().expect("a snapshot is read").revision;
+
+    let changes = vec![
+        service_change(raw_service("payment-service", "acme")),
+        service_change(raw_service("billing-service", "acme")),
+    ];
+    let preview = repository
+        .preview_batch(&changes, &revision)
+        .expect("the batch previews");
+    assert!(preview.valid, "{:?}", preview.issues);
+    assert_eq!(preview.diff.added.len(), 2);
+
+    repository
+        .commit_batch(&changes, &revision)
+        .expect("the batch commits");
+
+    let snapshot = repository.snapshot().expect("a snapshot is read");
+    for id in ["payment-service", "billing-service"] {
+        assert!(
+            snapshot.services.iter().any(|service| service.id == id),
+            "{id} is committed with the batch"
+        );
+    }
+    assert_no_pending_temp(&dir.path);
+}
+
+#[test]
+fn an_invalid_change_aborts_the_whole_batch() {
+    let dir = TestDir::new("batch-invalid");
+    let path = dir.write_config(BASE);
+    let repository = ConfigRepository::new(path.clone());
+    let revision = repository.snapshot().expect("a snapshot is read").revision;
+
+    // The second change references a workspace that does not exist.
+    let changes = vec![
+        service_change(raw_service("payment-service", "acme")),
+        service_change(raw_service("billing-service", "ghost")),
+    ];
+    let preview = repository
+        .preview_batch(&changes, &revision)
+        .expect("the batch previews");
+    assert!(!preview.valid, "the invalid member invalidates the batch");
+
+    let error = repository
+        .commit_batch(&changes, &revision)
+        .expect_err("an invalid batch is rejected");
+    assert!(
+        matches!(error, ConfigError::Validation(_)),
+        "expected a validation error, got {error:?}"
+    );
+
+    let unchanged = std::fs::read_to_string(&path).expect("the file is readable");
+    assert!(
+        !unchanged.contains("payment-service") && !unchanged.contains("billing-service"),
+        "not even the valid member is persisted:\n{unchanged}"
+    );
+    assert_no_pending_temp(&dir.path);
+}
+
+#[test]
+fn a_duplicate_create_aborts_the_whole_batch() {
+    let dir = TestDir::new("batch-duplicate");
+    let path = dir.write_config(BASE);
+    let repository = ConfigRepository::new(path.clone());
+    let revision = repository.snapshot().expect("a snapshot is read").revision;
+
+    let changes = vec![
+        service_change(raw_service("payment-service", "acme")),
+        service_change(raw_service("payment-service", "acme")),
+    ];
+    let error = repository
+        .commit_batch(&changes, &revision)
+        .expect_err("a duplicate id in a batch is rejected");
+    assert!(
+        matches!(error, ConfigError::EntityExists { .. }),
+        "expected an entity-exists error, got {error:?}"
+    );
+
+    let unchanged = std::fs::read_to_string(&path).expect("the file is readable");
+    assert!(!unchanged.contains("payment-service"));
+}
+
+#[test]
+fn a_template_change_round_trips() {
+    let dir = TestDir::new("template");
+    let path = dir.write_config(BASE);
+    let repository = ConfigRepository::new(path.clone());
+    let revision = repository.snapshot().expect("a snapshot is read").revision;
+
+    let create = ConfigChange::template(EntityChange::Create {
+        entity: raw_template("spring-boot-backend", "spring_boot_backend"),
+    });
+    let preview = repository
+        .preview(&create, &revision)
+        .expect("the template previews");
+    assert!(preview.valid, "{:?}", preview.issues);
+    assert_eq!(preview.diff.added[0].kind, EntityKind::Template);
+
+    repository
+        .commit(&create, &revision)
+        .expect("the template commits");
+    let snapshot = repository.snapshot().expect("a snapshot is read");
+    assert!(snapshot
+        .templates
+        .iter()
+        .any(|template| template.id == "spring-boot-backend"));
+
+    // Renaming is modeled as create + remove: an update must keep the id.
+    let revision = snapshot.revision.clone();
+    let mut updated = raw_template("spring-boot-backend", "spring_boot_backend");
+    updated.name = Some("Spring Boot Backend".to_owned());
+    let update = ConfigChange::template(EntityChange::Update {
+        id: "spring-boot-backend".to_owned(),
+        entity: updated,
+    });
+    repository
+        .commit(&update, &revision)
+        .expect("the template update commits");
+    let written = std::fs::read_to_string(&path).expect("the file is readable");
+    assert!(written.contains("Spring Boot Backend"));
+
+    let revision = repository.snapshot().expect("a snapshot is read").revision;
+    let remove = ConfigChange::template(EntityChange::Remove {
+        id: "spring-boot-backend".to_owned(),
+    });
+    repository
+        .commit(&remove, &revision)
+        .expect("the template removal commits");
+    let snapshot = repository.snapshot().expect("a snapshot is read");
+    assert!(snapshot.templates.is_empty());
+}
+
+#[test]
+fn removing_a_migration_preset_reports_its_references() {
+    let text = format!(
+        r#"{BASE}
+[services.liquibase]
+preset = "custom"
+
+[[migration_presets]]
+id = "custom"
+goals = ["liquibase:update"]
+"#
+    );
+    let dir = TestDir::new("preset-refs");
+    let path = dir.write_config(&text);
+    let repository = ConfigRepository::new(path);
+    let revision = repository.snapshot().expect("a snapshot is read").revision;
+
+    let remove = ConfigChange::migration_preset(EntityChange::Remove {
+        id: "custom".to_owned(),
+    });
+    let preview = repository
+        .preview(&remove, &revision)
+        .expect("the removal previews");
+
+    assert!(
+        preview.affected_references.iter().any(|reference| {
+            reference.source_kind == EntityKind::Service
+                && reference.source_id == "auth-service"
+                && reference.relation == "migration_preset"
+        }),
+        "the referring service is reported: {:?}",
+        preview.affected_references
+    );
+    assert!(
+        !preview.valid,
+        "removing a referenced preset leaves the configuration invalid"
+    );
 }

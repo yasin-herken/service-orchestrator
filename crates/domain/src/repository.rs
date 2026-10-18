@@ -139,11 +139,24 @@ impl Repository {
 
 fn url_contains_credentials(url: &str) -> bool {
     // Detect `scheme://user:password@host` and `scheme://token@host`.
-    let Some((_, rest)) = url.split_once("://") else {
+    //
+    // The scp-like `git@host:path` form has no `://`; its `git@` is a
+    // username, not a secret, so it is accepted.
+    let Some((scheme, rest)) = url.split_once("://") else {
         return false;
     };
     let authority = rest.split(['/', '?', '#']).next().unwrap_or(rest);
-    authority.contains('@')
+    let Some((userinfo, _host)) = authority.rsplit_once('@') else {
+        return false;
+    };
+    // `ssh://git@host` names a user; a colon in the userinfo is a password.
+    // Every other scheme treats any userinfo as a credential, including a bare
+    // token used as the username on an HTTPS remote.
+    if scheme.eq_ignore_ascii_case("ssh") || scheme.eq_ignore_ascii_case("git+ssh") {
+        userinfo.contains(':')
+    } else {
+        true
+    }
 }
 
 #[cfg(test)]
@@ -181,6 +194,19 @@ mod tests {
     }
 
     #[test]
+    fn accepts_ssh_urls_with_a_username() {
+        for url in [
+            "ssh://git@github.com/acme/auth-service.git",
+            "ssh://git@gitbitbucket.example.com:7999/imos/imos-mys-efatura.git",
+        ] {
+            assert!(
+                Repository::new(url, path(), Branch::new("main").unwrap()).is_ok(),
+                "{url} is a username, not a credential"
+            );
+        }
+    }
+
+    #[test]
     fn rejects_urls_with_embedded_credentials() {
         assert!(Repository::new(
             "https://user:token@github.com/acme/auth-service.git",
@@ -190,6 +216,12 @@ mod tests {
         .is_err());
         assert!(Repository::new(
             "https://ghp_token@github.com/acme/auth-service.git",
+            path(),
+            Branch::new("main").unwrap(),
+        )
+        .is_err());
+        assert!(Repository::new(
+            "ssh://git:secret@github.com/acme/auth-service.git",
             path(),
             Branch::new("main").unwrap(),
         )

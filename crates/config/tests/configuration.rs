@@ -475,7 +475,7 @@ type = "frontend"
 workspace = "acme"
 [services.runtime]
 type = "node"
-version = "20.19.4"
+version = "20.x"
 [services.commands]
 build = "npm run build"
 start = "npm start"

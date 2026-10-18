@@ -203,7 +203,7 @@ mod tests {
     #[test]
     fn nvm_node_bins_are_discovered_newest_first() {
         let home = scratch("nvm");
-        for version in ["v18.20.0", "v22.18.0", "v20.19.4"] {
+        for version in ["v18.20.0", "v22.18.0", "v20.x"] {
             std::fs::create_dir_all(home.join(".nvm/versions/node").join(version).join("bin"))
                 .expect("nvm version exists");
         }
@@ -217,7 +217,7 @@ mod tests {
             nvm,
             vec![
                 home.join(".nvm/versions/node/v22.18.0/bin"),
-                home.join(".nvm/versions/node/v20.19.4/bin"),
+                home.join(".nvm/versions/node/v20.x/bin"),
                 home.join(".nvm/versions/node/v18.20.0/bin"),
             ],
             "newest Node version is searched first"

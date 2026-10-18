@@ -236,3 +236,18 @@ pub const STOP_GROUP: &str = "stop_group";
 pub const START_PROFILE: &str = "start_profile";
 /// Stops every service in a profile.
 pub const STOP_PROFILE: &str = "stop_profile";
+
+// -- bulk import and saved presets ------------------------------------------
+
+/// Discovers repositories below a workspace root, read-only and bounded.
+pub const DISCOVER_REPOSITORIES: &str = "discover_repositories";
+/// Plans a bulk import of selected repositories without changing anything.
+pub const PLAN_BULK_IMPORT: &str = "plan_bulk_import";
+/// Validates and commits a bulk import atomically.
+pub const COMMIT_BULK_IMPORT: &str = "commit_bulk_import";
+/// Lists the configured migration presets with their safety classification.
+pub const LIST_MIGRATION_PRESETS: &str = "list_migration_presets";
+/// Lists the saved bulk-operation presets that apply to a workspace.
+pub const LIST_OPERATION_PRESETS: &str = "list_operation_presets";
+/// Composes the environment request a saved bulk-operation preset describes.
+pub const OPERATION_PRESET_REQUEST: &str = "operation_preset_request";

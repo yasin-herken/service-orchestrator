@@ -104,6 +104,15 @@ pub enum ApplicationError {
         message: String,
     },
 
+    /// A repository discovery scan failed with a structured error.
+    #[error("repository discovery error ({code}): {message}")]
+    Discovery {
+        /// A stable, machine-readable code such as `DISCOVERY_ROOT_MISSING`.
+        code: String,
+        /// A human-readable summary.
+        message: String,
+    },
+
     /// A caller-supplied path was rejected as unsafe or invalid.
     #[error("invalid path: {message}")]
     InvalidPath {
@@ -345,6 +354,15 @@ impl ApplicationError {
     #[must_use]
     pub(crate) fn inspection(error: crate::ports::RepositoryInspectionError) -> Self {
         Self::RepositoryInspection {
+            code: error.code,
+            message: error.message,
+        }
+    }
+
+    /// Builds an [`ApplicationError::Discovery`].
+    #[must_use]
+    pub(crate) fn discovery(error: crate::ports::DiscoveryError) -> Self {
+        Self::Discovery {
             code: error.code,
             message: error.message,
         }

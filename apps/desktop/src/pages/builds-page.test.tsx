@@ -61,7 +61,7 @@ describe('build targets', () => {
     expect(rows[0]).toHaveTextContent('java 21');
     expect(rows[0]).toHaveTextContent('Build');
     expect(rows[1]).toHaveTextContent('npm');
-    expect(rows[1]).toHaveTextContent('node 20.19.4');
+    expect(rows[1]).toHaveTextContent('node 20.x');
   });
 
   it('shows provider capabilities with the core explanation for the rest', async () => {

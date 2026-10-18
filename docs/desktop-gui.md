@@ -2,7 +2,7 @@
 
 The desktop GUI is the graphical interface to Service Orchestrator
 (`tasks/018.md`, `tasks/019.md`, `tasks/020.md`, `tasks/021.md`,
-`tasks/022.md`). It is a Tauri 2 application — a
+`tasks/022.md`, `tasks/023.md`, `tasks/032.md`). It is a Tauri 2 application — a
 React + TypeScript frontend (`apps/desktop`) inside a native macOS window, with a
 small Rust adapter crate (`apps/desktop/src-tauri`) behind it.
 
@@ -25,8 +25,9 @@ displays.
 This document covers the shell, the dashboard, **service lifecycle
 management** (`tasks/019.md`), **Git, build, and library management**
 (`tasks/020.md`), **migration, task, health, and logs management**
-(`tasks/021.md`), **workflow management and profiles** (`tasks/022.md`), and
-**configuration management** (`tasks/023.md`):
+(`tasks/021.md`), **workflow management and profiles** (`tasks/022.md`),
+**configuration management** (`tasks/023.md`), and **template-based bulk
+service import plus the unified bulk operations dashboard** (`tasks/032.md`):
 listing and selecting services, repositories, build targets,
 libraries, and migration targets; start/stop/restart; Git
 fetch/pull/checkout/sync (single and bulk) with a read-only preview; single and
@@ -37,7 +38,9 @@ realtime and historical logs; **profile and group selection, configurable
 environment-workflow options, a read-only dependency-resolved plan, workflow
 execution and monitoring, cancellation, results, and bounded history**;
 **configuration browsing and editing** of workspaces, services, libraries,
-profiles, and groups through a validated, reviewed commit; task
+profiles, and groups through a validated, reviewed commit; **repository discovery,
+a ten-step bulk import wizard, template management, named migration presets, and
+saved bulk-operation presets**; task
 progress; structured logs; cancellation;
 realtime refresh; and confirmation/error handling.
 
@@ -58,6 +61,9 @@ realtime refresh; and confirmation/error handling.
 | Logs screen: unified viewer, scopes, follow, filters, bounded buffer | |
 | Workflows screen: service/profile/group selection, options, read-only plan, execute, monitor (`tasks/022.md`) | |
 | Configuration screen: workspace/service/library/profile/group add, edit, and remove; validate, reload, and repository detection (`tasks/023.md`) | |
+| Templates screen: list/create/edit/duplicate/delete, validate, and daemon-resolved preview (`tasks/032.md`) | |
+| Bulk Import screen: bounded discovery, ten-step reviewed wizard, per-row overrides, atomic commit (`tasks/032.md`) | |
+| Bulk Operations screen: service/profile/group selection, phases, plan/execute/cancel, saved presets (`tasks/032.md`) | |
 | Workflow results (partial success) and bounded, workspace-scoped history | |
 | Shared task monitoring: progress dialog, cancellation, bounded logs | |
 | Realtime task-driven refresh; confirmation, error, and progress dialogs | |
@@ -90,7 +96,9 @@ apps/desktop/
 │   │   ├── useEntityOperations.ts  # shared submit/pending/error for Git/Build/Library
 │   │   ├── useGitOperations.ts     # Git action → single task or bulk workflow
 │   │   ├── useBuildOperations.ts   # build action → single task or bulk workflow
-│   │   └── useLibraryOperations.ts # library build/install/sync/prepare
+│   │   ├── useLibraryOperations.ts # library build/install/sync/prepare
+│   │   ├── useConfigurationReview.ts # preview → diff/validation → revision-checked commit
+│   │   └── useWorkflowRun.ts       # workflow polling, cancellation, terminal state
 │   ├── utils/                 # pure logic: service/repository query, selection, taskProgress
 │   ├── layouts/AppShell.tsx   # sidebar + header + content routing
 │   ├── components/            # presentation only
@@ -99,8 +107,11 @@ apps/desktop/
 │   │   ├── build/             # BuildTargetTable, BuildTargetDetailPanel, BuildCapabilitiesList
 │   │   ├── library/           # LibraryTable, LibraryDetailPanel, VersionAlignmentPanel, PrepareLibraryDialog
 │   │   ├── workflow/          # WorkflowWizard, selection, options, dependency view, preview, progress, results, history
-│   │   └── configuration/     # entity editors (workspace, service, library, profile, group)
-│   ├── pages/                 # Dashboard, Services, Git, Builds, Libraries, Migrations, Workflows, Tasks, Logs, Health, Configuration, placeholders
+│   │   ├── configuration/     # entity editors (workspace, service, library, profile, group)
+│   │   ├── template/          # TemplateEditor, TemplatePreviewDialog, ResolvedEntity
+│   │   ├── bulk-import/       # wizard steps, repository table, detections, overrides, review
+│   │   └── bulk-operations/   # service picker, options, preset editor
+│   ├── pages/                 # Dashboard, Services, Git, Builds, Libraries, Migrations, Workflows, Bulk Operations, Bulk Import, Templates, Tasks, Logs, Health, Configuration, placeholders
 │   └── styles/global.css      # light + dark via prefers-color-scheme
 └── src-tauri/
     ├── Cargo.toml             # its own workspace; excluded from the root one
@@ -118,6 +129,7 @@ apps/desktop/
         ├── library.rs         # library read/mutation use cases
         ├── tasks.rs           # task/workflow/log reads and cancellation
         ├── workflow.rs        # profile/group reads, environment planning and execution, history
+        ├── bulk.rs            # repository discovery, bulk import planning/commit, templates, presets
         ├── validation.rs      # domain-typed identifier parsing at the boundary
         ├── dto.rs             # wire view models incl. Git/Build/Library/Task views
         ├── state.rs           # shared AppState, connection, event forwarding
@@ -299,12 +311,45 @@ workspace from the resolved parameters of its steps (a composed workflow step is
 scheduled with a workflow target, not a service or library one). Workflows that
 have aged out of retention are skipped rather than failing the list.
 
+### Templates, bulk import, and bulk operations (`tasks/032.md`)
+
+| Command | Backing use case | Returns |
+| --- | --- | --- |
+| `discover_repositories` | bounded `discover_repositories` query | discovered repositories, detections, existing entities, warnings, truncation |
+| `plan_bulk_import` | `plan_bulk_import` (read-only) | per-row actions, counts, preview/diff, warnings, proposed entities |
+| `commit_bulk_import` | `commit_bulk_import` with the reviewed revision | created/updated/skipped entities and the new revision |
+| `list_migration_presets` | `list_migration_presets` | built-in and user presets with their safety classification |
+| `list_operation_presets` | `list_operation_presets` | presets that apply to a workspace, each with its composed request |
+| `get_operation_preset_request` | `operation_preset_request` (read-only) | one preset expanded into a `PrepareEnvironmentRequest` |
+
+`plan_bulk_import` sends the exact request the wizard assembled: the selected
+repositories, the shared overrides, the per-row exceptions, and the port base.
+The daemon — not the webview — performs discovery, template resolution,
+variable substitution, port assignment, duplicate detection, dependency
+inspection, and whole-document validation. The “Preview resolved configuration”
+action on the Templates screen uses the same command with one repository, so a
+template preview cannot drift from a real import.
+
+`commit_bulk_import` is forwarded with the revision of the plan the developer
+reviewed. The daemon re-plans against the current configuration, writes the whole
+batch atomically, and reports `CONFIG_CONFLICT` for a stale revision. The
+`confirmed` flag is forwarded as an intent only; the daemon computes the required
+permission itself, and a commit that replaces an existing entity requires
+`Destructive`.
+
+The adapter uses the `service-orchestrator-repository` crate's
+`SystemRepositoryDiscovery` for the real bounded walker and read-only
+inspector, so the IPC path is exercised by the same implementation the daemon
+uses rather than a test double.
+
 ### Errors
 
 A failing command rejects with `{ code, message }`:
 
 - `DAEMON_UNAVAILABLE` — the daemon is unreachable (also drives the banner);
 - `PROTOCOL_INCOMPATIBLE` — the daemon speaks another protocol version;
+- `UNKNOWN_OPERATION` — the running daemon is older than this build and does
+  not know the requested operation; the message names the restart command;
 - `INVALID_INPUT` — an identifier (or an empty bulk selection, or a sync mode or
   branch) failed domain validation;
 - `NOT_FOUND` — the entity belongs to a different workspace;

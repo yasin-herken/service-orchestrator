@@ -66,6 +66,7 @@ pub mod repository;
 pub mod runtime;
 pub mod service;
 pub mod task;
+pub mod template;
 pub mod timestamp;
 pub mod workflow;
 pub mod workspace;
@@ -81,7 +82,10 @@ pub use git::{
 };
 pub use group::ServiceGroup;
 pub use health::{HealthCheck, HealthCheckKind, HttpHealthCheck};
-pub use ids::{GroupId, LibraryId, ProfileId, ServiceId, StepId, TaskId, WorkflowId, WorkspaceId};
+pub use ids::{
+    GroupId, LibraryId, MigrationPresetId, OperationPresetId, ProfileId, ServiceId, StepId, TaskId,
+    TemplateId, WorkflowId, WorkspaceId,
+};
 pub use library::{ArtifactCoordinate, Library};
 pub use migration::{
     LiquibaseExecutionMode, MigrationOperation, MigrationProviderType, MigrationTargetEnvironment,
@@ -96,6 +100,10 @@ pub use repository::{Branch, Repository, RepositoryProvider};
 pub use runtime::{Runtime, RuntimeKind, Version};
 pub use service::{Service, ServiceCapability, ServiceType};
 pub use task::{Task, TaskFailure, TaskKind, TaskProgress, TaskStatus};
+pub use template::{
+    requires_port, resolve_template_text, template_variables, validate_template_text,
+    TemplateContext, TemplateError, TemplateVariable,
+};
 pub use timestamp::Timestamp;
 pub use workflow::{Workflow, WorkflowKind, WorkflowState, WorkflowStep};
 pub use workspace::Workspace;

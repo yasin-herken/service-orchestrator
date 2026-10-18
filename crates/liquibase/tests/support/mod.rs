@@ -97,6 +97,7 @@ impl Workspace {
             workspace_id: WorkspaceId::new("acme").unwrap(),
             service_id: ServiceId::new(SERVICE).unwrap(),
             operation,
+            preset: None,
             path: AbsolutePath::new(self.entity.to_string_lossy().into_owned()).unwrap(),
             workspace_root: AbsolutePath::new(self.root.to_string_lossy().into_owned()).unwrap(),
             non_local_authorized: false,

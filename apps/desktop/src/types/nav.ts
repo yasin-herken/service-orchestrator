@@ -7,6 +7,9 @@ export type PageId =
   | 'libraries'
   | 'migrations'
   | 'workflows'
+  | 'bulk-operations'
+  | 'bulk-import'
+  | 'templates'
   | 'tasks'
   | 'logs'
   | 'health'
@@ -56,6 +59,9 @@ export const PAGES: readonly PageDefinition[] = [
   { id: 'libraries', label: 'Libraries', title: 'Libraries' },
   { id: 'migrations', label: 'Migrations', title: 'Migrations' },
   { id: 'workflows', label: 'Workflows', title: 'Workflows' },
+  { id: 'bulk-operations', label: 'Bulk Operations', title: 'Bulk Operations' },
+  { id: 'bulk-import', label: 'Bulk Import', title: 'Bulk Import' },
+  { id: 'templates', label: 'Templates', title: 'Templates' },
   { id: 'tasks', label: 'Tasks', title: 'Tasks' },
   { id: 'logs', label: 'Logs', title: 'Logs' },
   { id: 'health', label: 'Health', title: 'Health' },

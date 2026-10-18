@@ -25,9 +25,9 @@ use crate::error::ApplicationError;
 use crate::ports::{
     ArtifactInspector, BuildCapabilityIndex, GitManager, HealthIndex, LogService,
     NullArtifactInspector, NullBuildCapabilityIndex, NullGitManager, NullHealthIndex,
-    NullRepositoryInspector, NullServiceRuntimeIndex, NullWorkspaceProbe, RepositoryInspector,
-    ResolvedRepository, ResolvedServiceTarget, RuntimeStateStore, ServiceRuntimeIndex,
-    WorkspaceProbe,
+    NullRepositoryDiscovery, NullRepositoryInspector, NullServiceRuntimeIndex, NullWorkspaceProbe,
+    RepositoryDiscovery, RepositoryInspector, ResolvedRepository, ResolvedServiceTarget,
+    RuntimeStateStore, ServiceRuntimeIndex, WorkspaceProbe,
 };
 
 /// The shared application core.
@@ -45,6 +45,7 @@ pub struct Application {
     build_capabilities: Arc<dyn BuildCapabilityIndex>,
     probe: Arc<dyn WorkspaceProbe>,
     repository_inspector: Arc<dyn RepositoryInspector>,
+    repository_discovery: Arc<dyn RepositoryDiscovery>,
     policy: PolicyEngine,
     authorization: Authorization,
 }
@@ -81,6 +82,7 @@ impl Application {
             build_capabilities: Arc::new(NullBuildCapabilityIndex),
             probe: Arc::new(NullWorkspaceProbe),
             repository_inspector: Arc::new(NullRepositoryInspector),
+            repository_discovery: Arc::new(NullRepositoryDiscovery),
             policy: PolicyEngine::new(),
             authorization: Authorization::standard(),
         }
@@ -186,6 +188,21 @@ impl Application {
         repository_inspector: Arc<dyn RepositoryInspector>,
     ) -> Self {
         self.repository_inspector = repository_inspector;
+        self
+    }
+
+    /// Replaces the repository discovery walker.
+    ///
+    /// The walker is provided by the composition root; it performs the bounded,
+    /// read-only scan behind
+    /// [`discover_repositories`](Self::discover_repositories). Without it, those
+    /// queries report that discovery is unavailable.
+    #[must_use]
+    pub fn with_repository_discovery(
+        mut self,
+        repository_discovery: Arc<dyn RepositoryDiscovery>,
+    ) -> Self {
+        self.repository_discovery = repository_discovery;
         self
     }
 
@@ -296,6 +313,11 @@ impl Application {
     /// Returns the repository inspector boundary.
     pub(crate) fn repository_inspector(&self) -> &dyn RepositoryInspector {
         self.repository_inspector.as_ref()
+    }
+
+    /// Returns the repository discovery boundary.
+    pub(crate) fn repository_discovery(&self) -> &dyn RepositoryDiscovery {
+        self.repository_discovery.as_ref()
     }
 
     /// Resolves an entity's workspace-relative directory into an absolute path.

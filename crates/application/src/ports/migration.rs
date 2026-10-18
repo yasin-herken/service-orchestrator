@@ -34,8 +34,8 @@ use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 use service_orchestrator_domain::{
-    AbsolutePath, MigrationOperation, MigrationProviderType, MigrationTargetEnvironment, ServiceId,
-    WorkspaceId,
+    AbsolutePath, MigrationOperation, MigrationPresetId, MigrationProviderType,
+    MigrationTargetEnvironment, ServiceId, WorkspaceId,
 };
 use thiserror::Error;
 
@@ -48,12 +48,15 @@ pub mod parameter {
     pub const SERVICE: &str = "migration.service";
     /// The provider-neutral operation label, for example `apply`.
     pub const OPERATION: &str = "migration.operation";
+    /// The named migration preset whose goals compose the invocation, when the
+    /// caller selected one (`tasks/032.md` §16, §21).
+    pub const PRESET: &str = "migration.preset";
     /// The absolute working directory of the service.
     pub const PATH: &str = "migration.path";
     /// The workspace root, used to validate the working directory stays inside
     /// it.
     pub const WORKSPACE_ROOT: &str = "migration.workspace_root";
-    /// Whether the caller explicitly authorized a non-local migration target.
+    /// Whether the caller explicitly authorized a destructive migration target.
     pub const NON_LOCAL_AUTHORIZED: &str = "migration.non_local_authorized";
 }
 
@@ -70,16 +73,25 @@ pub struct ResolvedMigrationTarget {
     pub service_id: ServiceId,
     /// The provider-neutral operation to perform.
     pub operation: MigrationOperation,
+    /// The named migration preset composing the invocation, when the caller
+    /// selected one. The manager reads the preset from validated configuration
+    /// at execution time and revalidates its safety classification; the target
+    /// carries only the identifier, never composed goals or authorization
+    /// (`tasks/032.md` §19, §21).
+    #[serde(default)]
+    pub preset: Option<MigrationPresetId>,
     /// The absolute working directory of the service.
     pub path: AbsolutePath,
     /// The workspace root; the working directory must remain inside it.
     pub workspace_root: AbsolutePath,
-    /// Whether the caller explicitly authorized a non-local database target.
+    /// Whether the caller explicitly authorized a destructive database
+    /// operation — a non-local target or a destructive preset.
     ///
     /// This is set from the caller's [`Authorization`](service_orchestrator_policy::Authorization)
-    /// when the operation mutates a database whose environment is not local.
-    /// The manager re-checks it so the policy cannot be bypassed by a
-    /// hand-crafted task (`tasks/011.md` §10, §27).
+    /// when the operation mutates a database whose environment is not local, or
+    /// when a destructive preset is selected. The manager re-checks it so the
+    /// policy cannot be bypassed by a hand-crafted task (`tasks/011.md` §10, §27,
+    /// `tasks/032.md` §19).
     pub non_local_authorized: bool,
 }
 
@@ -111,6 +123,9 @@ impl ResolvedMigrationTarget {
             parameter::OPERATION.to_owned(),
             self.operation.label().to_owned(),
         );
+        if let Some(preset) = &self.preset {
+            parameters.insert(parameter::PRESET.to_owned(), preset.to_string());
+        }
         parameters.insert(parameter::PATH.to_owned(), self.path.to_string());
         parameters.insert(
             parameter::WORKSPACE_ROOT.to_owned(),
@@ -146,6 +161,14 @@ impl ResolvedMigrationTarget {
                     "not a known migration operation".to_owned(),
                 )
             })?;
+        let preset = parameters
+            .get(parameter::PRESET)
+            .map(|value| {
+                MigrationPresetId::new(value).map_err(|error| {
+                    MigrationError::invalid_parameter(parameter::PRESET, error.to_string())
+                })
+            })
+            .transpose()?;
         let path = AbsolutePath::new(required(parameters, parameter::PATH)?).map_err(|error| {
             MigrationError::invalid_parameter(parameter::PATH, error.to_string())
         })?;
@@ -161,6 +184,7 @@ impl ResolvedMigrationTarget {
             workspace_id,
             service_id,
             operation,
+            preset,
             path,
             workspace_root,
             non_local_authorized,
@@ -259,6 +283,28 @@ pub enum MigrationError {
         /// The service identifier.
         service: ServiceId,
         /// The declared (non-local) environment.
+        environment: MigrationTargetEnvironment,
+    },
+
+    /// The requested named migration preset does not exist.
+    #[error("migration preset '{preset}' does not exist")]
+    PresetNotFound {
+        /// The service identifier.
+        service: ServiceId,
+        /// The unknown preset identifier.
+        preset: MigrationPresetId,
+    },
+
+    /// A destructive preset was selected for an environment it does not allow.
+    #[error(
+        "migration preset '{preset}' is not allowed for the '{environment}' database of service '{service}'"
+    )]
+    PresetNotAllowed {
+        /// The service identifier.
+        service: ServiceId,
+        /// The preset identifier.
+        preset: MigrationPresetId,
+        /// The declared database environment.
         environment: MigrationTargetEnvironment,
     },
 
@@ -390,6 +436,8 @@ impl MigrationError {
             Self::InvalidTarget { .. } => "MIGRATION_INVALID_TARGET",
             Self::DatabaseTargetUnknown { .. } => "MIGRATION_DATABASE_TARGET_UNKNOWN",
             Self::DatabaseTargetNotAuthorized { .. } => "MIGRATION_DATABASE_TARGET_NOT_AUTHORIZED",
+            Self::PresetNotFound { .. } => "MIGRATION_PRESET_NOT_FOUND",
+            Self::PresetNotAllowed { .. } => "MIGRATION_PRESET_NOT_ALLOWED",
             Self::StatusUnavailable { .. } => "MIGRATION_STATUS_UNAVAILABLE",
             Self::PreviewUnsupported { .. } => "MIGRATION_PREVIEW_UNSUPPORTED",
             Self::LockConflict { .. } => "MIGRATION_LOCK_CONFLICT",
@@ -413,6 +461,7 @@ mod tests {
             workspace_id: WorkspaceId::new("acme").unwrap(),
             service_id: ServiceId::new("auth-service").unwrap(),
             operation: MigrationOperation::Apply,
+            preset: None,
             path: AbsolutePath::new("/Users/dev/acme/backend/auth-service").unwrap(),
             workspace_root: AbsolutePath::new("/Users/dev/acme").unwrap(),
             non_local_authorized: false,
@@ -434,6 +483,28 @@ mod tests {
         };
         let decoded = ResolvedMigrationTarget::from_parameters(&original.to_parameters()).unwrap();
         assert!(decoded.non_local_authorized);
+    }
+
+    #[test]
+    fn a_selected_preset_round_trips() {
+        let original = ResolvedMigrationTarget {
+            preset: Some(MigrationPresetId::new("reset_local").unwrap()),
+            ..target()
+        };
+        let decoded = ResolvedMigrationTarget::from_parameters(&original.to_parameters()).unwrap();
+        assert_eq!(
+            decoded.preset.as_ref().map(MigrationPresetId::as_str),
+            Some("reset_local")
+        );
+    }
+
+    #[test]
+    fn an_absent_preset_decodes_as_none() {
+        let mut parameters = target().to_parameters();
+        assert!(!parameters.contains_key(parameter::PRESET));
+        parameters.insert(parameter::PRESET.to_owned(), "not a valid id!".to_owned());
+        let error = ResolvedMigrationTarget::from_parameters(&parameters).unwrap_err();
+        assert_eq!(error.code(), "MIGRATION_INVALID_PARAMETER");
     }
 
     #[test]

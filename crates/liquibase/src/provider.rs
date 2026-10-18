@@ -150,6 +150,7 @@ mod tests {
             working_dir: AbsolutePath::new("/w/acme/backend/auth-service").unwrap(),
             workspace_root: AbsolutePath::new("/w/acme").unwrap(),
             commands: MigrationCommandSet::default(),
+            preset: None,
             service_command: None,
             database: MigrationDatabaseConfig {
                 environment: MigrationTargetEnvironment::Local,

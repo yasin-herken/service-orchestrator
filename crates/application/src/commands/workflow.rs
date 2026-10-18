@@ -11,8 +11,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use service_orchestrator_config::ConfiguredWorkspace;
 use service_orchestrator_domain::{
     Branch, BuildOperation, CommandKind, DependencyTarget, GroupId, LibraryId, MigrationOperation,
-    Permission, ProcessState, ProfileId, ServiceCapability, ServiceId, StepId, TaskKind,
-    TaskStatus, WorkflowId, WorkflowKind, WorkflowState, WorkspaceId,
+    MigrationPresetId, Permission, ProcessState, ProfileId, ServiceCapability, ServiceId, StepId,
+    TaskKind, TaskStatus, WorkflowId, WorkflowKind, WorkflowState, WorkspaceId,
 };
 
 use crate::app::Application;
@@ -92,12 +92,13 @@ impl EnvironmentComposer {
 
     /// Groups the recorded steps into canonical phase order.
     fn phases(&self) -> Vec<EnvironmentPlanPhase> {
-        const ORDER: [EnvironmentPhaseKind; 7] = [
+        const ORDER: [EnvironmentPhaseKind; 8] = [
             EnvironmentPhaseKind::Validate,
             EnvironmentPhaseKind::GitSync,
             EnvironmentPhaseKind::LibraryPrepare,
             EnvironmentPhaseKind::Migration,
             EnvironmentPhaseKind::ServiceBuild,
+            EnvironmentPhaseKind::ServiceStop,
             EnvironmentPhaseKind::ServiceStart,
             EnvironmentPhaseKind::HealthCheck,
         ];
@@ -219,8 +220,8 @@ impl Application {
         let mut library_steps: Vec<StepId> = Vec::new();
         for library in &workspace.workspace.libraries {
             if library.commands.contains(&CommandKind::Build) {
-                let target =
-                    self.library_build_target(workspace, library, BuildOperation::Build)?;
+                let operation = library.build_operation.unwrap_or(BuildOperation::Build);
+                let target = self.library_build_target(workspace, library, operation)?;
                 library_steps.push(builder.add_with_parameters(
                     TaskKind::BuildLibrary,
                     Vec::new(),
@@ -231,8 +232,8 @@ impl Application {
         }
         for service in &workspace.workspace.services {
             if service.supports(ServiceCapability::Build) && service.has_build_command() {
-                let target =
-                    self.service_build_target(workspace, service, BuildOperation::Build)?;
+                let operation = service.build_operation.unwrap_or(BuildOperation::Build);
+                let target = self.service_build_target(workspace, service, operation)?;
                 builder.add_with_parameters(
                     TaskKind::BuildService,
                     library_steps.clone(),
@@ -574,8 +575,14 @@ impl Application {
                         }
                     }
                 }
-                let target =
-                    self.library_build_target(workspace, library, BuildOperation::Build)?;
+                let target = self.library_build_target(
+                    workspace,
+                    library,
+                    request
+                        .build_operation
+                        .or(library.build_operation)
+                        .unwrap_or(BuildOperation::Build),
+                )?;
                 let step = composer.add(
                     TaskKind::BuildLibrary,
                     prerequisites,
@@ -600,16 +607,40 @@ impl Application {
                     ));
                     continue;
                 }
-                if config.is_some_and(|config| config.database.environment.requires_authorization())
+                // The effective preset: the request override wins over the
+                // service's configured default. A read-only preset runs the
+                // status operation; every other preset applies, and a
+                // destructive preset still requires explicit authorization.
+                let effective: Option<MigrationPresetId> = request
+                    .migration_preset
+                    .clone()
+                    .or_else(|| config.and_then(|config| config.preset.clone()));
+                let operation = match &effective {
+                    Some(preset) if self.migration_preset_is_read_only(preset) => {
+                        MigrationOperation::Status
+                    }
+                    _ => MigrationOperation::Apply,
+                };
+                let destructive_preset = effective
+                    .as_ref()
+                    .and_then(|preset| self.config().migration_preset(preset))
+                    .is_some_and(|preset| preset.destructive);
+                if destructive_preset
+                    || config
+                        .is_some_and(|config| config.database.environment.requires_authorization())
                 {
                     requires_destructive_authorization = true;
                 }
-                let (target, _timeout) = match mode {
-                    EnvironmentMode::Execute => {
-                        self.resolve_migration(id, MigrationOperation::Apply)?
+                let (target, _timeout) = match (mode, effective.as_ref()) {
+                    (EnvironmentMode::Execute, Some(preset)) => {
+                        self.resolve_migration_with_preset(id, operation, preset)?
                     }
-                    EnvironmentMode::Plan => {
-                        self.resolve_migration_target(id, MigrationOperation::Apply)?
+                    (EnvironmentMode::Plan, Some(preset)) => {
+                        self.resolve_migration_target_with_preset(id, operation, preset)?
+                    }
+                    (EnvironmentMode::Execute, None) => self.resolve_migration(id, operation)?,
+                    (EnvironmentMode::Plan, None) => {
+                        self.resolve_migration_target(id, operation)?
                     }
                 };
                 let service = workspace
@@ -627,10 +658,15 @@ impl Application {
                         }
                     }
                 }
+                let kind = if operation == MigrationOperation::Status {
+                    TaskKind::MigrationStatus
+                } else {
+                    TaskKind::MigrationApply
+                };
                 let step = composer.add(
-                    TaskKind::Liquibase,
+                    kind,
                     prerequisites,
-                    Some(format!("liquibase {id}")),
+                    Some(format!("liquibase {} for {id}", operation.label())),
                     target.to_parameters(),
                     Some(id.clone()),
                     None,
@@ -671,8 +707,14 @@ impl Application {
                         }
                     }
                 }
-                let target =
-                    self.service_build_target(workspace, service, BuildOperation::Build)?;
+                let target = self.service_build_target(
+                    workspace,
+                    service,
+                    request
+                        .build_operation
+                        .or(service.build_operation)
+                        .unwrap_or(BuildOperation::Build),
+                )?;
                 let step = composer.add(
                     TaskKind::BuildService,
                     prerequisites,
@@ -685,8 +727,60 @@ impl Application {
             }
         }
 
+        // -- Shutdown (stop-only or the stop half of a restart) ----------------
+        let mut stop_steps: BTreeMap<ServiceId, StepId> = BTreeMap::new();
+        if request.stop || request.restart {
+            // Reverse dependency order: a dependent stops before the service it
+            // depends on, so a shutdown never outlives its dependencies
+            // (`tasks/032.md` §28).
+            for id in resolved.resolved_services.iter().rev() {
+                let service = workspace
+                    .workspace
+                    .service(id)
+                    .expect("resolved services are configured");
+                if !service.supports(ServiceCapability::Run) {
+                    warnings.push(format!(
+                        "service '{id}' does not declare the run capability and was not stopped"
+                    ));
+                    continue;
+                }
+                let current = self.runtime().service_state(id).unwrap_or_default();
+                if !current.process.is_running()
+                    && !matches!(
+                        current.process,
+                        ProcessState::Starting | ProcessState::Stopping | ProcessState::Unknown
+                    )
+                {
+                    warnings.push(format!("service '{id}' is not running and was not stopped"));
+                    continue;
+                }
+                let target = self.service_runtime_target(workspace, service)?;
+                let step = composer.add(
+                    TaskKind::StopService,
+                    Vec::new(),
+                    Some(format!("stop {id}")),
+                    target.to_parameters(),
+                    Some(id.clone()),
+                    None,
+                );
+                stop_steps.insert(id.clone(), step);
+            }
+        }
+
+        // A restart rebuilds only after the previous process is stopped, so the
+        // stop half of a restart always precedes the build in the DAG
+        // (`tasks/032.md` §28).
+        if request.restart {
+            for (id, step) in &service_build {
+                if let Some(stop) = stop_steps.get(id) {
+                    composer.depend_on(step, stop.clone());
+                }
+            }
+        }
+
         // -- Startup and health ------------------------------------------------
-        if request.start {
+        if request.start || request.restart {
+            let restarting = request.restart;
             let mut start: BTreeMap<ServiceId, StepId> = BTreeMap::new();
             for id in &resolved.resolved_services {
                 let service = workspace
@@ -698,19 +792,24 @@ impl Application {
                     continue;
                 }
                 let current = self.runtime().service_state(id).unwrap_or_default();
-                if current.process.is_running() {
-                    warnings.push(format!(
-                        "service '{id}' is already running and was not restarted"
-                    ));
-                    continue;
-                }
-                if current.process.is_active() {
-                    return Err(ApplicationError::invalid_operation(format!(
-                        "service '{id}' is currently {} and cannot be started",
-                        current.process
-                    )));
+                if !restarting {
+                    if current.process.is_running() {
+                        warnings.push(format!(
+                            "service '{id}' is already running and was not restarted"
+                        ));
+                        continue;
+                    }
+                    if current.process.is_active() {
+                        return Err(ApplicationError::invalid_operation(format!(
+                            "service '{id}' is currently {} and cannot be started",
+                            current.process
+                        )));
+                    }
                 }
                 let mut prerequisites = Vec::new();
+                if let Some(step) = stop_steps.get(id) {
+                    prerequisites.push(step.clone());
+                }
                 if let Some(step) = service_build.get(id) {
                     prerequisites.push(step.clone());
                 }
@@ -991,17 +1090,36 @@ impl Application {
         request: &PrepareEnvironmentRequest,
         resolved: &ResolvedEnvironment,
     ) -> Result<(), ApplicationError> {
+        let runtime_modes = [request.start, request.restart, request.stop]
+            .iter()
+            .filter(|selected| **selected)
+            .count();
+        if runtime_modes > 1 {
+            return Err(ApplicationError::invalid_operation(
+                "start, restart, and stop are mutually exclusive",
+            ));
+        }
+        if request.migration_preset.is_some() && !request.run_liquibase {
+            return Err(ApplicationError::invalid_operation(
+                "a migration preset requires migration to be enabled",
+            ));
+        }
         for id in &resolved.selected_services {
             let service = workspace
                 .workspace
                 .service(id)
                 .expect("selected services are validated to exist");
             self.check_dependencies(workspace, service)?;
-            if request.start
+            if (request.start || request.restart)
                 && !(service.supports(ServiceCapability::Run) && service.has_start_command())
             {
                 return Err(ApplicationError::invalid_operation(format!(
                     "service '{id}' cannot be started"
+                )));
+            }
+            if request.stop && !service.supports(ServiceCapability::Run) {
+                return Err(ApplicationError::invalid_operation(format!(
+                    "service '{id}' cannot be stopped"
                 )));
             }
             if request.build && !service.supports(ServiceCapability::Build) {

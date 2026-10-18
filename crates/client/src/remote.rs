@@ -35,19 +35,21 @@ use async_trait::async_trait;
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use service_orchestrator_application::{
-    ApplicationError, Authorization, BuildCapabilities, BulkOperationSummary, ConfigurationCommit,
-    ConfigurationReload, ConfigurationValidation, DiffOptions, EnvironmentPlan, HealthCheckScope,
+    ApplicationError, Authorization, BuildCapabilities, BulkImportCommit, BulkImportPlan,
+    BulkImportRequest, BulkOperationSummary, ConfigurationCommit, ConfigurationReload,
+    ConfigurationValidation, DiffOptions, DiscoveryScanRequest, EnvironmentPlan, HealthCheckScope,
     LibraryArtifactVerification, LibraryDependent, LibraryPrepareOptions, LibraryStatus, LogEntry,
-    LogPage, LogRequest, LogStreamError, LogSubscription, MigrationStatus, OperationResult,
-    PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest, ProjectConfigurationSuggestion,
+    LogPage, LogRequest, LogStreamError, LogSubscription, MigrationPresetSummary, MigrationStatus,
+    OperationPresetSummary, OperationResult, PrepareEnvironmentRequest,
+    PrepareSelectedLibrariesRequest, ProjectConfigurationSuggestion, RepositoryDiscoveryReport,
     RepositoryInspection, ServiceDiagnostics, ServiceHealth, ServiceRuntimeStatus, ServiceStatus,
     WorkflowCancellation, WorkflowStatus, WorkspaceStatus, WorkspaceValidationReport,
 };
 use service_orchestrator_config::{ConfigChange, ConfigurationPreview, ConfigurationSnapshot};
 use service_orchestrator_domain::{
-    Branch, BranchInfo, GroupId, Library, LibraryId, Profile, ProfileId, RepoDiff,
-    RepositoryStatus, Service, ServiceGroup, ServiceId, Task, TaskId, Workflow, WorkflowId,
-    Workspace, WorkspaceId,
+    Branch, BranchInfo, GroupId, Library, LibraryId, OperationPresetId, Profile, ProfileId,
+    RepoDiff, RepositoryStatus, Service, ServiceGroup, ServiceId, Task, TaskId, Workflow,
+    WorkflowId, Workspace, WorkspaceId,
 };
 use service_orchestrator_execution::TaskEvent;
 use tokio::sync::broadcast;
@@ -1162,6 +1164,47 @@ impl OrchestratorClient for RemoteClient {
         path: &str,
     ) -> Result<ProjectConfigurationSuggestion, ApplicationError> {
         self.call(ops::DETECT_PROJECT_CONFIGURATION, (path,))
+    }
+
+    fn discover_repositories(
+        &self,
+        request: DiscoveryScanRequest,
+    ) -> Result<RepositoryDiscoveryReport, ApplicationError> {
+        self.call(ops::DISCOVER_REPOSITORIES, (request,))
+    }
+
+    fn plan_bulk_import(
+        &self,
+        request: BulkImportRequest,
+    ) -> Result<BulkImportPlan, ApplicationError> {
+        self.call(ops::PLAN_BULK_IMPORT, (request,))
+    }
+
+    fn commit_bulk_import(
+        &self,
+        request: BulkImportRequest,
+        expected_revision: &str,
+    ) -> Result<BulkImportCommit, ApplicationError> {
+        self.call(ops::COMMIT_BULK_IMPORT, (request, expected_revision))
+    }
+
+    fn list_migration_presets(&self) -> Result<Vec<MigrationPresetSummary>, ApplicationError> {
+        self.call(ops::LIST_MIGRATION_PRESETS, ())
+    }
+
+    fn list_operation_presets(
+        &self,
+        workspace_id: Option<&WorkspaceId>,
+    ) -> Result<Vec<OperationPresetSummary>, ApplicationError> {
+        self.call(ops::LIST_OPERATION_PRESETS, (workspace_id,))
+    }
+
+    fn operation_preset_request(
+        &self,
+        workspace_id: &WorkspaceId,
+        preset_id: &OperationPresetId,
+    ) -> Result<PrepareEnvironmentRequest, ApplicationError> {
+        self.call(ops::OPERATION_PRESET_REQUEST, (workspace_id, preset_id))
     }
 
     fn subscribe_configuration_events(&self) -> broadcast::Receiver<ConfigurationChanged> {

@@ -128,7 +128,8 @@ found", or `ARTIFACT_LOCAL_REPOSITORY_UNKNOWN`.
 ## Java version mismatch
 
 **Symptoms:** `RUNTIME_VERSION_MISMATCH`, or a build fails against an unexpected
-JDK.
+JDK (for example Lombok reports `cannot find symbol` for generated members, or
+the log starts with `WARNING: A restricted method in java.lang.System`).
 
 **Fixes:**
 
@@ -136,6 +137,23 @@ JDK.
   adjust the pin.
 - `RuntimeHost` resolves executables across `PATH`, `JAVA_HOME`, and common
   version managers (`nvm`, `fnm`, Volta, `asdf`, `sdkman`, `jenv`).
+- Builds inherit the **daemon's** environment. The service `runtimes` pin is
+  checked when a service starts, but it does not select a JDK for Maven or npm.
+  If the daemon runs on a newer JDK than the project supports, restart it with
+  the matching one, for example:
+
+  ```bash
+  export JAVA_HOME=$(/usr/libexec/java_home -v 21)
+  service-orchestrator daemon stop
+  service-orchestrator daemon
+  ```
+
+  A desktop-launched daemon inherits the desktop app's environment; start the
+  app from the same shell after exporting `JAVA_HOME`, or set it for GUI apps
+  with `launchctl setenv JAVA_HOME "$JAVA_HOME"` and relaunch.
+
+  The JVM warnings themselves are not the failure: the build's `[ERROR]` lines
+  are. Task details now prefer those lines over stderr warnings.
 
 ## Node.js version mismatch
 
@@ -143,7 +161,7 @@ JDK.
 version.
 
 **Fixes:** install the pinned Node version (the project's stated managed-service
-version is 20.19.4), or adjust `runtime.version`.
+version is 20.x), or adjust `runtime.version`.
 
 ## npm install failure
 
