@@ -24,7 +24,9 @@ use async_trait::async_trait;
 use service_orchestrator_application::{
     InMemoryRuntimeStateStore, ResolvedServiceTarget, ServiceRuntimeError,
 };
-use service_orchestrator_config::{Config, ConfiguredWorkspace, ExecutionSettings};
+use service_orchestrator_config::{
+    Config, ConfiguredWorkspace, DiscoverySettings, ExecutionSettings,
+};
 use service_orchestrator_domain::{
     AbsolutePath, CommandKind, CommandSet, CommandSpec, Environment, Port, Runtime, RuntimeKind,
     Service, ServiceId, ServiceType, Version, Workspace, WorkspaceId,
@@ -261,6 +263,10 @@ pub fn fixture(ports: &[u16], runtime: Option<Runtime>) -> Fixture {
     let config = Config {
         version: 1,
         execution: ExecutionSettings::default(),
+        discovery: DiscoverySettings::default(),
+        templates: Vec::new(),
+        migration_presets: Vec::new(),
+        operation_presets: Vec::new(),
         workspaces: vec![ConfiguredWorkspace {
             workspace,
             environment: Environment::new(),

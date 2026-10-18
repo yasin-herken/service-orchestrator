@@ -266,7 +266,7 @@ pub fn basename(program: &str) -> &str {
 /// output.
 ///
 /// This parses `openjdk version "21.0.1"`, `java version "1.8.0_292"`, and
-/// `v20.19.4` alike.
+/// `v20.x` alike.
 #[must_use]
 pub fn extract_version(output: &str) -> Option<String> {
     let mut current = String::new();
@@ -276,6 +276,10 @@ pub fn extract_version(output: &str) -> Option<String> {
             current.push(character);
             started = true;
         } else if character == '.' && started {
+            current.push(character);
+        } else if started && (character == 'x' || character == 'X') && current.ends_with('.') {
+            // A wildcard component such as `20.x` is part of the reported
+            // version; it is the only non-digit allowed after a dot.
             current.push(character);
         } else if started {
             break;
@@ -587,7 +591,7 @@ mod tests {
             extract_version("java version \"1.8.0_292\"").as_deref(),
             Some("1.8.0")
         );
-        assert_eq!(extract_version("v20.19.4\n").as_deref(), Some("20.19.4"));
+        assert_eq!(extract_version("v20.x\n").as_deref(), Some("20.x"));
         assert_eq!(extract_version("no digits here"), None);
     }
 
@@ -595,7 +599,7 @@ mod tests {
     fn major_version_handles_legacy_java() {
         assert_eq!(major_version("21.0.1"), Some(21));
         assert_eq!(major_version("1.8.0"), Some(8));
-        assert_eq!(major_version("v20.19.4"), Some(20));
+        assert_eq!(major_version("v20.x"), Some(20));
         assert_eq!(major_version("not-a-version"), None);
     }
 

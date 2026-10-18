@@ -30,8 +30,10 @@
 use std::sync::Arc;
 
 use service_orchestrator_application::{
-    ConfigurationCommit, ConfigurationReload, ConfigurationValidation,
-    ProjectConfigurationSuggestion, RepositoryInspection,
+    BulkImportCommit, BulkImportPlan, ConfigurationCommit, ConfigurationReload,
+    ConfigurationValidation, MigrationPresetSummary, OperationPresetSummary,
+    PrepareEnvironmentRequest, ProjectConfigurationSuggestion, RepositoryDiscoveryReport,
+    RepositoryInspection,
 };
 use service_orchestrator_client::{DaemonStatus, RemoteClient};
 use service_orchestrator_config::{ConfigChange, ConfigurationPreview, ConfigurationSnapshot};
@@ -53,7 +55,7 @@ use crate::state::AppState;
 use crate::tasks::TaskLogsQuery;
 use crate::workflow::PrepareEnvironmentInput;
 use crate::{
-    build, configuration, git, health, library, logs, migration, mutations, queries, tasks,
+    build, bulk, configuration, git, health, library, logs, migration, mutations, queries, tasks,
     workflow,
 };
 
@@ -1466,6 +1468,130 @@ pub async fn detect_project_configuration(
 ) -> Result<ProjectConfigurationSuggestion, CommandError> {
     query(state.inner(), move |client| {
         configuration::detect(client.as_ref(), &path)
+    })
+    .await
+}
+
+// -- bulk import and saved presets (`tasks/032.md` §7–§15, §36–§38) ----------
+
+/// Discovers repositories below a workspace root, read-only and bounded.
+///
+/// The walk runs in the daemon over the workspace's configured root; the GUI
+/// sends only the workspace and optional bounds. Nothing is executed, built, or
+/// cloned (`tasks/032.md` §7, §50).
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for rejected input, `DISCOVERY_ROOT_MISSING` when the root
+/// does not exist, otherwise a structured `{ code, message }` error.
+#[tauri::command]
+pub async fn discover_repositories(
+    state: State<'_, AppState>,
+    input: bulk::DiscoveryScanInput,
+) -> Result<RepositoryDiscoveryReport, CommandError> {
+    query(state.inner(), move |client| {
+        bulk::discover(client.as_ref(), &input)
+    })
+    .await
+}
+
+/// Plans a bulk import of the selected repositories without changing anything.
+///
+/// The plan carries one row per repository with the composed entity, the
+/// per-row problems, and the whole-document preview; it is read-only and safe
+/// to call while the user edits the selection (`tasks/032.md` §10, §14).
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for rejected input, `CONFIG_CONFLICT` when the configuration
+/// changed while planning, otherwise a structured `{ code, message }` error.
+#[tauri::command]
+pub async fn plan_bulk_import(
+    state: State<'_, AppState>,
+    input: bulk::BulkImportInput,
+) -> Result<BulkImportPlan, CommandError> {
+    query(state.inner(), move |client| {
+        bulk::plan(client.as_ref(), &input)
+    })
+    .await
+}
+
+/// Validates and commits a bulk import atomically.
+///
+/// `expected_revision` is the revision of the plan the user reviewed;
+/// `confirmed` forwards explicit destructive intent for a selection that
+/// replaces an existing entity. The daemon independently verifies the client
+/// kind and peer identity, and its policy decision is final
+/// (`tasks/032.md` §13, §15, §50).
+///
+/// # Errors
+///
+/// `CONFIGURATION_INVALID` when the plan does not validate, `CONFIG_CONFLICT`
+/// for a stale revision, `PermissionDenied` when an update was not authorized,
+/// otherwise a structured `{ code, message }` error.
+#[tauri::command]
+pub async fn commit_bulk_import(
+    state: State<'_, AppState>,
+    input: bulk::BulkImportInput,
+    expected_revision: String,
+    confirmed: bool,
+) -> Result<BulkImportCommit, CommandError> {
+    query(state.inner(), move |client| {
+        bulk::commit(client.as_ref(), &input, &expected_revision, confirmed)
+    })
+    .await
+}
+
+/// Lists the configured migration presets with their safety classification.
+///
+/// # Errors
+///
+/// A structured `{ code, message }` error when the daemon cannot be reached.
+#[tauri::command]
+pub async fn list_migration_presets(
+    state: State<'_, AppState>,
+) -> Result<Vec<MigrationPresetSummary>, CommandError> {
+    query(state.inner(), |client| {
+        bulk::migration_presets(client.as_ref())
+    })
+    .await
+}
+
+/// Lists the saved bulk-operation presets that apply to a workspace.
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for a rejected workspace id, otherwise a structured
+/// `{ code, message }` error.
+#[tauri::command]
+pub async fn list_operation_presets(
+    state: State<'_, AppState>,
+    workspace_id: Option<String>,
+) -> Result<Vec<OperationPresetSummary>, CommandError> {
+    query(state.inner(), move |client| {
+        bulk::operation_presets(client.as_ref(), workspace_id.as_deref())
+    })
+    .await
+}
+
+/// Composes the environment request a saved operation preset describes.
+///
+/// Loading a preset never executes anything and never carries an authorization;
+/// the Bulk Operations screen shows the composed request and execution still
+/// runs the ordinary policy path (`tasks/032.md` §36, §37).
+///
+/// # Errors
+///
+/// `INVALID_INPUT` for rejected identifiers, otherwise a structured
+/// `{ code, message }` error (including an unknown preset).
+#[tauri::command]
+pub async fn get_operation_preset_request(
+    state: State<'_, AppState>,
+    workspace_id: String,
+    preset_id: String,
+) -> Result<PrepareEnvironmentRequest, CommandError> {
+    query(state.inner(), move |client| {
+        bulk::operation_preset_request(client.as_ref(), &workspace_id, &preset_id)
     })
     .await
 }

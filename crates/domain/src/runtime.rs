@@ -1,7 +1,7 @@
 //! Runtime requirements.
 //!
 //! A [`Runtime`] describes *what a service or library needs* (for example Java
-//! 21 or Node 20.19.4). It deliberately says nothing about *how* that runtime is
+//! 21 or Node 20.x). It deliberately says nothing about *how* that runtime is
 //! discovered, installed, or executed; environment discovery and executable
 //! resolution belong to the infrastructure layer.
 
@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::DomainError;
 
-/// A version string such as `21`, `20.19.4`, or `1.8.0-SNAPSHOT`.
+/// A version string such as `21`, `20.x`, or `1.8.0-SNAPSHOT`.
 ///
 /// Versions are kept opaque. The domain does not attempt to parse or compare
 /// them semantically; that is the responsibility of the build and configuration
@@ -104,7 +104,7 @@ impl fmt::Display for RuntimeKind {
 ///
 /// ```text
 /// Java 21
-/// Node 20.19.4
+/// Node 20.x
 /// Maven (any version)
 /// ```
 #[derive(Clone, Debug, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
@@ -157,7 +157,7 @@ mod tests {
     #[test]
     fn accepts_common_versions() {
         assert!(Version::new("21").is_ok());
-        assert!(Version::new("20.19.4").is_ok());
+        assert!(Version::new("20.x").is_ok());
         assert!(Version::new("1.8.0-SNAPSHOT").is_ok());
     }
 

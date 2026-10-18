@@ -103,7 +103,7 @@ url = "git@github.com:demo/admin-ui.git"
 
 [services.runtime]
 type = "node"
-version = "20.19.4"
+version = "20.x"
 
 [services.commands]
 install = "npm install"
@@ -134,6 +134,98 @@ id = "full-stack"
 name = "Full Stack"
 workspace = "demo"
 services = ["orders-api", "admin-ui"]
+
+# ---------------------------------------------------------------------------
+# Repository discovery
+# ---------------------------------------------------------------------------
+
+[discovery]
+max_depth = 5
+exclude = ["vendor"]
+follow_symlinks = true
+max_repositories = 100
+
+# ---------------------------------------------------------------------------
+# Service templates
+# ---------------------------------------------------------------------------
+
+[[templates]]
+id = "spring-boot-backend"
+name = "Spring Boot Backend"
+description = "Maven Spring Boot 3 service with actuator health checks."
+category = "spring_boot_backend"
+type = "backend"
+default_branch = "main"
+build_system = "maven"
+
+[templates.runtime]
+type = "java"
+version = "21"
+
+[templates.commands]
+install = "./mvnw dependency:resolve"
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+test = "./mvnw test"
+
+[templates.liquibase]
+enabled = true
+execution_mode = "maven"
+preset = "status"
+
+[[templates.health_checks]]
+type = "http"
+url = "http://localhost:${port}/actuator/health"
+timeout_seconds = 10
+
+[templates.environment]
+SPRING_PROFILES_ACTIVE = "local"
+
+[[templates]]
+id = "react-frontend"
+name = "React Frontend"
+description = "Node 20 single-page application built with npm."
+category = "react_frontend"
+type = "frontend"
+default_branch = "main"
+build_system = "npm"
+
+[templates.runtime]
+type = "node"
+version = "20.x"
+
+[templates.commands]
+install = "npm install"
+build = "npm run build"
+start = "npm start"
+test = "npm test"
+
+# ---------------------------------------------------------------------------
+# Saved bulk-operation presets
+# ---------------------------------------------------------------------------
+
+[[operation_presets]]
+id = "quick-local"
+name = "Quick Local"
+description = "Sync, build, and restart the core services on the local branch."
+workspace = "demo"
+services = ["orders-api"]
+groups = ["core"]
+default = true
+
+[operation_presets.git]
+enabled = true
+branch = "main"
+
+[operation_presets.build]
+enabled = true
+operation = "build"
+
+[operation_presets.runtime]
+action = "restart"
+
+[operation_presets.health]
+enabled = true
 
 [execution]
 max_parallel_tasks = 4

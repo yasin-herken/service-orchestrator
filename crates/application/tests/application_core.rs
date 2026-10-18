@@ -108,7 +108,7 @@ url = "git@github.com:acme/web-ui.git"
 
 [services.runtime]
 type = "node"
-version = "20.19.4"
+version = "20.x"
 
 [services.commands]
 build = "npm run build"
@@ -968,7 +968,7 @@ fn prepare_environment_wires_the_full_pipeline() {
         TaskKind::GitCheckout,
         TaskKind::BuildLibrary,
         TaskKind::BuildService,
-        TaskKind::Liquibase,
+        TaskKind::MigrationApply,
         TaskKind::StartService,
         TaskKind::HealthCheck,
     ] {
@@ -1183,6 +1183,43 @@ fn plan_prepare_environment_keeps_dependency_order_for_builds_and_starts() {
     assert_eq!(plan.selected_services, vec![service("web-ui")]);
     assert!(plan.resolved_services.contains(&service("auth-service")));
     assert!(!plan.included_dependencies.is_empty());
+}
+
+#[test]
+fn a_restart_stops_before_rebuilding_and_restarts() {
+    let h = harness();
+    for id in [service("auth-service"), service("web-ui")] {
+        h.runtime.set_service_state(
+            &id,
+            ServiceRuntimeState::new().with_process(ProcessState::Running),
+        );
+    }
+
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("web-ui")])
+        .build()
+        .restart();
+    h.app.prepare_environment(request).unwrap();
+
+    let workflows = h.tasks.workflows();
+    let workflow = workflows.first().expect("one environment workflow");
+    let find = |description: &str| {
+        workflow
+            .steps
+            .iter()
+            .find(|step| step.description.as_deref() == Some(description))
+            .unwrap_or_else(|| panic!("missing step '{description}'"))
+    };
+
+    let stop = find("stop auth-service");
+    let build = find("build auth-service");
+    let start = find("start auth-service");
+
+    // The old process is shut down before its replacement is built, and the
+    // build result is what gets started.
+    assert!(build.depends_on.contains(&stop.id));
+    assert!(start.depends_on.contains(&build.id));
+    assert!(start.depends_on.contains(&stop.id));
 }
 
 #[test]
@@ -1815,6 +1852,7 @@ mod configuration {
                 ..RawCommands::default()
             },
             build_system: Some("maven".to_owned()),
+            build_operation: None,
             liquibase: None,
             health_checks: Vec::new(),
             ports: Vec::new(),

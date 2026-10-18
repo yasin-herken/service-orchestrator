@@ -2,6 +2,8 @@ import { useState } from 'react';
 
 import { Header } from '../components/Header';
 import { Sidebar } from '../components/Sidebar';
+import { BulkImportPage } from '../pages/BulkImportPage';
+import { BulkOperationsPage } from '../pages/BulkOperationsPage';
 import { BuildsPage } from '../pages/BuildsPage';
 import { ConfigurationPage } from '../pages/ConfigurationPage';
 import { DashboardPage } from '../pages/DashboardPage';
@@ -13,6 +15,7 @@ import { MigrationsPage } from '../pages/MigrationsPage';
 import { PlaceholderPage } from '../pages/PlaceholderPage';
 import { ServicesPage } from '../pages/ServicesPage';
 import { TasksPage } from '../pages/TasksPage';
+import { TemplatesPage } from '../pages/TemplatesPage';
 import { WorkflowsPage } from '../pages/WorkflowsPage';
 import type { NavIntent, PageId } from '../types/nav';
 
@@ -42,6 +45,9 @@ export function AppShell() {
     'libraries',
     'migrations',
     'workflows',
+    'bulk-operations',
+    'bulk-import',
+    'templates',
     'tasks',
     'logs',
     'health',
@@ -65,10 +71,15 @@ export function AppShell() {
           {page === 'workflows' ? (
             <WorkflowsPage intent={intent} onNavigate={navigate} />
           ) : null}
+          {page === 'bulk-operations' ? (
+            <BulkOperationsPage onNavigate={navigate} />
+          ) : null}
+          {page === 'bulk-import' ? <BulkImportPage onNavigate={navigate} /> : null}
+          {page === 'templates' ? <TemplatesPage /> : null}
           {page === 'tasks' ? <TasksPage intent={intent} onNavigate={navigate} /> : null}
           {page === 'logs' ? <LogsPage intent={intent} /> : null}
           {page === 'health' ? <HealthPage intent={intent} onNavigate={navigate} /> : null}
-          {page === 'configuration' ? <ConfigurationPage /> : null}
+          {page === 'configuration' ? <ConfigurationPage onNavigate={navigate} /> : null}
           {!implemented.includes(page) ? <PlaceholderPage page={page} /> : null}
         </main>
       </div>

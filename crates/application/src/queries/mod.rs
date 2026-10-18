@@ -7,10 +7,12 @@
 
 mod build;
 mod configuration;
+mod discovery;
 mod git;
 mod health;
 mod library;
 mod migration;
+mod operation_presets;
 mod repository;
 mod runtime;
 mod service;

@@ -12,6 +12,9 @@ export const CONFIG_KIND_LABELS: Record<EntityKindView, string> = {
   library: 'Library',
   profile: 'Profile',
   group: 'Group',
+  template: 'Template',
+  migration_preset: 'Migration preset',
+  operation_preset: 'Operation preset',
 };
 
 /** A short `Kind 'id'` label for an entity summary. */

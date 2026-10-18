@@ -36,37 +36,41 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use async_trait::async_trait;
 use service_orchestrator_application::{
     build_parameter, parameter, Application, ArtifactInspectionError, ArtifactInspector,
-    ArtifactPresence, BuildCapabilities, BuildCapabilityIndex, BulkOperationSummary,
-    DependencyVersionInspection, DetectedBuildSystem, DetectedIntegration, DetectedRuntime,
-    DiffOptions, GitError, GitManager, GitOptions, HealthCheckOutcome, HealthState,
+    ArtifactPresence, BuildCapabilities, BuildCapabilityIndex, BulkImportOverrides,
+    BulkImportProposal, BulkImportRowAction, BulkOperationSummary, DependencyVersionInspection,
+    DetectedBuildSystem, DetectedIntegration, DetectedRuntime, DetectionConfidence, DiffOptions,
+    ExistingEntityPolicy, GitError, GitManager, GitOptions, HealthCheckOutcome, HealthState,
     InMemoryRuntimeStateStore, LogEntry, LogLevel, LogSource, MavenMetadata, NodeMetadata,
     ProviderAvailability, RepositoryInspection, RepositoryInspectionError, RepositoryInspector,
     ResolvedArtifact, ResolvedDependency, ResolvedMigrationTarget, ResolvedRepository,
-    ResolvedServiceTarget, RuntimeStateStore, CHECK_HTTP, CHECK_PROCESS, CHECK_TCP,
+    ResolvedServiceTarget, RuntimeStateStore, TechnologyDetection, TemplateSource, CHECK_HTTP,
+    CHECK_PROCESS, CHECK_TCP,
 };
 use service_orchestrator_client::{
     socket_path, ClientKind, OrchestratorClient, RemoteClient, PROTOCOL_VERSION, SOCKET_ENV,
 };
 use service_orchestrator_config::{
     load_from_str, Config, ConfigChange, ConfigManager, EntityChange, FileConfigManager,
+    TemplateCategory,
 };
 use service_orchestrator_daemon::{Daemon, DaemonError, DaemonOptions};
 use service_orchestrator_desktop_lib::{
-    build, configuration,
+    build, bulk, configuration,
     dto::{LogEntryView, OperationOutcome, OperationStatus, WorkflowStatusView},
     git, health, library, logs, migration, mutations, queries, tasks, workflow,
 };
 use service_orchestrator_domain::{
     AbsolutePath, Branch, BranchInfo, BranchKind, BuildOperation, BuildSystem, GitOperation,
-    GitOperationResult, HealthCheckKind, MigrationOperation, ProcessState, RepoDiff,
-    RepositoryLifecycle, RepositoryStatus, ServiceId, Task, TaskKind, TaskStatus, Timestamp,
-    Version, WorkflowId,
+    GitOperationResult, HealthCheckKind, MigrationOperation, MigrationTargetEnvironment,
+    ProcessState, RepoDiff, RepositoryLifecycle, RepositoryStatus, ServiceId, Task, TaskKind,
+    TaskStatus, TemplateId, Timestamp, Version, WorkflowId,
 };
 use service_orchestrator_execution::{
     TaskContext, TaskEngine, TaskExecutor, TaskExecutorError, TaskOutcome,
 };
 use service_orchestrator_health::HealthStore;
 use service_orchestrator_logging::{spawn_task_ingestor, LogHub};
+use service_orchestrator_repository::{SystemRepositoryDiscovery, SystemRepositoryInspector};
 
 /// The fixture configuration, shared with the daemon and MCP adapter tests.
 const FIXTURE: &str = include_str!("../../../../crates/mcp/tests/fixtures/config.toml");
@@ -171,6 +175,27 @@ impl CoreSpec {
              [services.commands]\n\
              build = \"./mvnw clean install\"\n\
              start = \"./mvnw spring-boot:run\"\n"
+        );
+        Self {
+            config,
+            ..Self::default()
+        }
+    }
+
+    /// The fixture with the `demo` workspace root pointed at a real directory.
+    ///
+    /// The desktop IPC tests that exercise repository discovery scan a fixture
+    /// tree, so the configured workspace root must be a directory that exists
+    /// (`tasks/032.md` §7, §45).
+    fn with_workspace_root(root: &std::path::Path) -> Self {
+        let root = root.to_str().expect("the fixture root is UTF-8");
+        let config = FIXTURE.replace(
+            r#"root = "~/Projects/demo""#,
+            &format!(r#"root = "{root}""#),
+        );
+        assert_ne!(
+            config, FIXTURE,
+            "the fixture must declare the demo workspace root"
         );
         Self {
             config,
@@ -528,10 +553,17 @@ fn every_client_sees_the_same_authoritative_daemon() {
         a.protocol_version, PROTOCOL_VERSION,
         "same protocol version"
     );
+    // Attachment is recorded asynchronously, so a freshly connected client can
+    // be counted a moment after its first successful call.
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut clients = a.clients;
+    while clients < 2 && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(25));
+        clients = first.daemon_status().expect("status answers").clients;
+    }
     assert!(
-        a.clients >= 2,
-        "two attached clients share one daemon, got {}",
-        a.clients
+        clients >= 2,
+        "two attached clients share one daemon, got {clients}"
     );
 
     // Reads keep working from the second client while the first is attached.
@@ -2047,7 +2079,12 @@ async fn build_core(spec: &CoreSpec, config_path: &std::path::Path) -> Core {
         .with_build_capabilities(Arc::new(FakeBuildCapabilityIndex))
         .with_health_index(health_index.clone())
         .with_configuration(manager)
-        .with_repository_inspector(Arc::new(FakeRepositoryInspector));
+        .with_repository_inspector(Arc::new(FakeRepositoryInspector))
+        // The real bounded walker and the real read-only inspector serve the
+        // bulk-import wizard's discovery over IPC (`tasks/032.md` §7, §8).
+        .with_repository_discovery(Arc::new(SystemRepositoryDiscovery::new(
+            SystemRepositoryInspector,
+        )));
 
     Core {
         application,
@@ -3302,7 +3339,7 @@ impl RepositoryInspector for FakeRepositoryInspector {
             DetectedRuntime {
                 kind: "node".to_owned(),
                 label: "Node.js".to_owned(),
-                required_version: Some("20.19.4".to_owned()),
+                required_version: Some("20.x".to_owned()),
                 evidence: vec!["package.json".to_owned()],
             },
         ];
@@ -3324,7 +3361,7 @@ impl RepositoryInspector for FakeRepositoryInspector {
         inspection.node = Some(NodeMetadata {
             name: Some("orders-api-ui".to_owned()),
             version: Some("1.0.0".to_owned()),
-            required_node_version: Some("20.19.4".to_owned()),
+            required_node_version: Some("20.x".to_owned()),
             package_manager: Some("npm".to_owned()),
             scripts: vec!["build".to_owned(), "start".to_owned()],
             react: false,
@@ -3417,23 +3454,28 @@ fn an_unconfirmed_removal_is_denied_but_a_confirmed_one_persists() {
     let revision = configuration::snapshot(&client)
         .expect("a snapshot")
         .revision;
-    let change = ConfigChange::group(EntityChange::Remove {
-        id: "core".to_owned(),
+    // `full-stack` is a leaf entity: no profile, group, or saved preset refers
+    // to it, so its removal is a clean drop. The fixture group `core` is
+    // deliberately not used here because the saved operation preset references
+    // it, and a referenced removal is a validation failure rather than a test
+    // of the confirmation policy.
+    let change = ConfigChange::profile(EntityChange::Remove {
+        id: "full-stack".to_owned(),
     });
     let denied = configuration::commit(&client, &change, &revision, false)
         .expect_err("an unconfirmed removal is refused");
     assert_eq!(denied.code, "PermissionDenied");
 
-    // The file is untouched: the group survives the denial.
+    // The file is untouched: the profile survives the denial.
     let snapshot = configuration::snapshot(&client).expect("a snapshot is returned");
-    assert!(snapshot.groups.iter().any(|g| g.id == "core"));
+    assert!(snapshot.profiles.iter().any(|p| p.id == "full-stack"));
 
     // With confirmation the interactive desktop client is allowed to remove it.
     let confirmed = configuration::commit(&client, &change, &snapshot.revision, true)
         .expect("a confirmed removal commits");
     let after = configuration::snapshot(&client).expect("a snapshot is returned");
     assert_eq!(after.revision, confirmed.revision);
-    assert!(!after.groups.iter().any(|g| g.id == "core"));
+    assert!(!after.profiles.iter().any(|p| p.id == "full-stack"));
 }
 
 #[test]
@@ -3457,6 +3499,7 @@ fn an_invalid_change_is_reported_as_a_validation_failure() {
             runtimes: Vec::new(),
             commands: Default::default(),
             build_system: None,
+            build_operation: None,
             liquibase: None,
             health_checks: Vec::new(),
             ports: Vec::new(),
@@ -3516,4 +3559,442 @@ fn a_relative_inspection_path_is_rejected_before_any_inspection() {
     let error =
         configuration::inspect(&client, "../escape").expect_err("a traversal path is refused");
     assert_eq!(error.code, "InvalidPath");
+}
+
+// -- bulk import, discovery, and saved presets (`tasks/032.md` §7–§15, §36–§38)
+
+/// Writes fixture repositories below `root`.
+///
+/// The tree contains the two checkouts the fixture configuration already
+/// knows — one Spring Boot backend and one React frontend — plus a
+/// `node_modules` directory the walker must never enter. Every file is a tiny
+/// static fixture; nothing is built, installed, or executed
+/// (`tasks/032.md` §45, §50).
+fn write_fixture_repositories(root: &std::path::Path) {
+    let write = |relative: &str, contents: &str| {
+        let path = root.join(relative);
+        std::fs::create_dir_all(path.parent().expect("the fixture file has a parent"))
+            .expect("the fixture directory is created");
+        std::fs::write(path, contents).expect("the fixture file is written");
+    };
+    write(
+        "backend/orders-api/pom.xml",
+        "<project><groupId>com.demo</groupId><artifactId>orders-api</artifactId>\
+         <version>1.0.0</version><properties><java.version>21</java.version></properties>\
+         <dependencies><dependency><groupId>org.springframework.boot</groupId>\
+         <artifactId>spring-boot-starter-web</artifactId></dependency></dependencies></project>",
+    );
+    write("backend/orders-api/mvnw", "#!/bin/sh\n");
+    write(
+        "frontend/admin-ui/package.json",
+        r#"{"name":"admin-ui","version":"1.0.0","scripts":{"build":"vite build","start":"vite"},"dependencies":{"react":"^18.0.0"}}"#,
+    );
+    write("node_modules/dep/package.json", r#"{"name":"dep"}"#);
+}
+
+/// A one-repository bulk import of a new service below the fixture workspace.
+fn new_service_import() -> bulk::BulkImportInput {
+    bulk::BulkImportInput {
+        workspace_id: "demo".to_owned(),
+        repositories: vec![bulk::BulkImportSelectionInput {
+            relative_path: "services/catalog-service".to_owned(),
+            template: None,
+            existing: ExistingEntityPolicy::Skip,
+            overrides: BulkImportOverrides::default(),
+        }],
+        bulk: BulkImportOverrides::default(),
+        port_base: Some(9100),
+    }
+}
+
+#[test]
+fn bounded_discovery_reads_real_fixtures_and_never_writes() {
+    let workspace = unique_root().join("workspace");
+    write_fixture_repositories(&workspace);
+    let harness = Harness::start_with_spec(CoreSpec::with_workspace_root(&workspace));
+    let client = harness.client();
+    let revision = configuration::snapshot(&client)
+        .expect("a snapshot is returned")
+        .revision;
+
+    let report = bulk::discover(
+        &client,
+        &bulk::DiscoveryScanInput {
+            workspace_id: "demo".to_owned(),
+            ..bulk::DiscoveryScanInput::default()
+        },
+    )
+    .expect("the scan runs");
+    assert_eq!(report.workspace_id.as_str(), "demo");
+    assert_eq!(report.root, workspace.to_str().expect("a UTF-8 path"));
+    assert!(!report.truncated);
+
+    let paths: Vec<&str> = report
+        .repositories
+        .iter()
+        .map(|repository| repository.repository.relative_path.as_str())
+        .collect();
+    assert_eq!(
+        paths,
+        vec!["backend/orders-api", "frontend/admin-ui"],
+        "the walk is path-sorted and never enters node_modules"
+    );
+
+    // Each row carries the inspection, the detections with their confidence,
+    // the matching *suggestion*, and the existing configured entity.
+    let orders = &report.repositories[0];
+    assert_eq!(
+        orders.suggested_category,
+        Some(TemplateCategory::SpringBootBackend)
+    );
+    assert!(orders.ambiguous_categories.is_empty());
+    assert_eq!(
+        orders.suggested_template.as_ref().map(TemplateId::as_str),
+        Some("spring-boot-backend")
+    );
+    assert_eq!(orders.existing.len(), 1);
+    assert_eq!(orders.existing[0].id, "orders-api");
+    let spring = TechnologyDetection::find(&orders.repository.detections, "spring_boot")
+        .expect("Spring Boot is detected");
+    assert_eq!(spring.confidence, DetectionConfidence::High);
+
+    let admin = &report.repositories[1];
+    assert_eq!(
+        admin.suggested_category,
+        Some(TemplateCategory::ReactFrontend)
+    );
+    assert_eq!(
+        admin.suggested_template.as_ref().map(TemplateId::as_str),
+        Some("react-frontend")
+    );
+    assert_eq!(admin.existing[0].id, "admin-ui");
+
+    // The request bounds are honored end to end: a one-level scan reports
+    // nothing (both checkouts are nested), and an exclusion prunes a subtree.
+    let shallow = bulk::discover(
+        &client,
+        &bulk::DiscoveryScanInput {
+            workspace_id: "demo".to_owned(),
+            max_depth: Some(1),
+            ..bulk::DiscoveryScanInput::default()
+        },
+    )
+    .expect("the bounded scan runs");
+    assert!(shallow.repositories.is_empty());
+
+    let excluding = bulk::discover(
+        &client,
+        &bulk::DiscoveryScanInput {
+            workspace_id: "demo".to_owned(),
+            exclude: vec!["frontend".to_owned()],
+            ..bulk::DiscoveryScanInput::default()
+        },
+    )
+    .expect("the bounded scan runs");
+    assert_eq!(
+        excluding
+            .repositories
+            .iter()
+            .map(|repository| repository.repository.relative_path.as_str())
+            .collect::<Vec<_>>(),
+        vec!["backend/orders-api"]
+    );
+
+    // Discovery is read-only: no configuration write, and the tree is intact.
+    let after = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert_eq!(after.revision, revision, "discovery never writes");
+    assert!(workspace.join("backend/orders-api/pom.xml").is_file());
+
+    // An unknown workspace is refused before any scan.
+    let unknown = bulk::discover(
+        &client,
+        &bulk::DiscoveryScanInput {
+            workspace_id: "ghost".to_owned(),
+            ..bulk::DiscoveryScanInput::default()
+        },
+    )
+    .expect_err("an unknown workspace is refused");
+    assert_eq!(unknown.code, "WorkspaceNotFound");
+
+    let _ = std::fs::remove_dir_all(&workspace);
+}
+
+#[test]
+fn a_missing_workspace_root_is_a_structured_discovery_error() {
+    let absent = unique_root().join("absent");
+    let harness = Harness::start_with_spec(CoreSpec::with_workspace_root(&absent));
+    let client = harness.client();
+
+    let error = bulk::discover(
+        &client,
+        &bulk::DiscoveryScanInput {
+            workspace_id: "demo".to_owned(),
+            ..bulk::DiscoveryScanInput::default()
+        },
+    )
+    .expect_err("a missing root is an error, not an empty report");
+    assert_eq!(error.code, "DISCOVERY_ROOT_MISSING");
+    assert!(
+        error.message.contains("does not exist"),
+        "{}",
+        error.message
+    );
+}
+
+#[test]
+fn a_bulk_import_plans_commits_atomically_and_is_visible_to_every_interface() {
+    let harness = Harness::start();
+    let client = harness.client();
+    let input = new_service_import();
+
+    let plan = bulk::plan(&client, &input).expect("planning succeeds");
+    assert!(plan.valid);
+    assert_eq!(
+        (plan.creates, plan.updates, plan.skips, plan.rejects),
+        (1, 0, 0, 0)
+    );
+    let row = &plan.rows[0];
+    assert_eq!(row.relative_path, "services/catalog-service");
+    assert_eq!(row.entity_id.as_deref(), Some("catalog-service"));
+    assert_eq!(
+        row.template.as_ref().map(TemplateId::as_str),
+        Some("spring-boot-backend"),
+        "the fixture template matches the detected Spring Boot repository"
+    );
+    assert_eq!(row.template_source, TemplateSource::Matched);
+    assert_eq!(
+        row.ports
+            .iter()
+            .map(|port| port.value())
+            .collect::<Vec<_>>(),
+        vec![9100]
+    );
+
+    let Some(BulkImportProposal::Service { service }) = row.proposal.as_ref() else {
+        panic!("the row proposes a service");
+    };
+    assert_eq!(service.ports[0].port, 9100);
+    assert_eq!(
+        service.health_checks[0].url.as_deref(),
+        Some("http://localhost:9100/actuator/health"),
+        "the template's ${{port}} is resolved with the assigned port"
+    );
+    assert_eq!(
+        service
+            .liquibase
+            .as_ref()
+            .and_then(|liquibase| liquibase.preset.as_deref()),
+        Some("status")
+    );
+
+    // Planning wrote nothing.
+    let before = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert_eq!(before.services.len(), 2);
+
+    let commit = bulk::commit(&client, &input, &plan.revision, false).expect("the import commits");
+    assert_eq!(commit.created_services, vec!["catalog-service".to_owned()]);
+    assert!(commit.created_libraries.is_empty());
+    assert!(commit.updated.is_empty() && commit.skipped.is_empty());
+    assert_eq!(commit.counts.services, 3);
+
+    // A fresh connection — another interface — sees the same daemon state.
+    let tui = harness.tui_client();
+    let snapshot = configuration::snapshot(&tui).expect("a snapshot is returned");
+    assert_eq!(snapshot.revision, commit.revision);
+    let imported = snapshot
+        .services
+        .iter()
+        .find(|service| service.id == "catalog-service")
+        .expect("the imported service is visible");
+    assert_eq!(imported.path.as_deref(), Some("services/catalog-service"));
+
+    // The file reloads to the same revision, and a re-plan now skips the row.
+    let reload = configuration::reload(&client).expect("the file reloads");
+    assert_eq!(reload.counts.services, 3);
+    let replanned = bulk::plan(&client, &input).expect("planning succeeds");
+    assert!(replanned.valid);
+    assert_eq!(replanned.skips, 1, "the repository is now a duplicate");
+}
+
+#[test]
+fn an_imported_service_survives_a_daemon_restart() {
+    let mut harness = Harness::start();
+    let input = new_service_import();
+    let client = harness.client();
+    let plan = bulk::plan(&client, &input).expect("planning succeeds");
+    bulk::commit(&client, &input, &plan.revision, false).expect("the import commits");
+    drop(client);
+
+    harness.restart();
+
+    let client = harness.client();
+    let snapshot = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert!(
+        snapshot
+            .services
+            .iter()
+            .any(|service| service.id == "catalog-service"),
+        "the import was persisted atomically and reloads after a restart"
+    );
+}
+
+#[test]
+fn a_bulk_import_against_a_stale_revision_is_a_conflict() {
+    let harness = Harness::start();
+    let client = harness.client();
+    let input = new_service_import();
+    let plan = bulk::plan(&client, &input).expect("planning succeeds");
+
+    // Another interface changes the configuration between review and commit.
+    let revision = configuration::snapshot(&client)
+        .expect("a snapshot is returned")
+        .revision;
+    configuration::commit(
+        &client,
+        &ConfigChange::workspace(EntityChange::Create {
+            entity: new_workspace("payments"),
+        }),
+        &revision,
+        false,
+    )
+    .expect("the concurrent change commits");
+
+    let error = bulk::commit(&client, &input, &plan.revision, false)
+        .expect_err("the stale plan is refused");
+    assert_eq!(error.code, "CONFIG_CONFLICT");
+
+    let snapshot = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert!(
+        !snapshot
+            .services
+            .iter()
+            .any(|service| service.id == "catalog-service"),
+        "nothing from the stale plan was written"
+    );
+}
+
+#[test]
+fn a_bulk_update_needs_confirmation_and_replaces_the_entity_only_then() {
+    let harness = Harness::start();
+    let client = harness.client();
+    let mut input = new_service_import();
+    input.repositories[0].relative_path = "backend/orders-api".to_owned();
+    input.repositories[0].existing = ExistingEntityPolicy::Update;
+
+    let plan = bulk::plan(&client, &input).expect("planning succeeds");
+    assert!(plan.valid);
+    assert_eq!(
+        (plan.creates, plan.updates, plan.skips, plan.rejects),
+        (0, 1, 0, 0)
+    );
+    assert!(matches!(
+        plan.rows[0].action,
+        BulkImportRowAction::Update { .. }
+    ));
+
+    // Without explicit destructive intent the daemon refuses the replacement.
+    let denied = bulk::commit(&client, &input, &plan.revision, false)
+        .expect_err("an unconfirmed replacement is refused");
+    assert_eq!(denied.code, "PermissionDenied");
+    let untouched = configuration::snapshot(&client).expect("a snapshot is returned");
+    let orders = untouched
+        .services
+        .iter()
+        .find(|service| service.id == "orders-api")
+        .expect("the service survives the denial");
+    assert_eq!(
+        orders
+            .ports
+            .iter()
+            .map(|port| port.port)
+            .collect::<Vec<_>>(),
+        vec![8081],
+        "the hand-written configuration is untouched"
+    );
+
+    // Confirmed explicitly, the update replaces the entity in place.
+    let confirmed =
+        bulk::commit(&client, &input, &plan.revision, true).expect("the confirmed update commits");
+    assert_eq!(confirmed.updated.len(), 1);
+    assert_eq!(confirmed.updated[0].id, "orders-api");
+    let replaced = configuration::snapshot(&client).expect("a snapshot is returned");
+    assert_eq!(replaced.services.len(), 2, "an update never adds a service");
+    let orders = replaced
+        .services
+        .iter()
+        .find(|service| service.id == "orders-api")
+        .expect("the service is replaced in place");
+    assert_eq!(
+        orders
+            .ports
+            .iter()
+            .map(|port| port.port)
+            .collect::<Vec<_>>(),
+        vec![9100]
+    );
+    assert_eq!(
+        orders.health_checks[0].url.as_deref(),
+        Some("http://localhost:9100/actuator/health")
+    );
+}
+
+#[test]
+fn migration_and_operation_presets_load_without_executing_or_authorizing() {
+    let harness = Harness::start();
+    let client = harness.client();
+
+    let presets = bulk::migration_presets(&client).expect("the presets load");
+    let status = presets
+        .iter()
+        .find(|preset| preset.id.as_str() == "status")
+        .expect("the built-in status preset exists");
+    assert!(status.builtin && status.read_only && !status.destructive);
+    let reset = presets
+        .iter()
+        .find(|preset| preset.id.as_str() == "reset_local")
+        .expect("the built-in reset preset exists");
+    assert!(reset.destructive && !reset.read_only);
+    assert_eq!(
+        reset.allowed_environments,
+        vec![MigrationTargetEnvironment::Local],
+        "the precondition list is reported, never an authorization"
+    );
+
+    let summaries = bulk::operation_presets(&client, Some("demo")).expect("the presets load");
+    assert_eq!(summaries.len(), 1);
+    let quick = &summaries[0];
+    assert_eq!(quick.id.as_str(), "quick-local");
+    assert!(quick.default);
+    assert_eq!(quick.workspace_id.as_str(), "demo");
+
+    let request = bulk::operation_preset_request(&client, "demo", "quick-local")
+        .expect("the preset composes a request");
+    assert!(request.sync && request.build && request.restart && request.wait_for_health);
+    assert!(!request.start && !request.stop && !request.run_liquibase);
+    assert_eq!(request.build_operation, Some(BuildOperation::Build));
+    assert_eq!(
+        request
+            .services
+            .iter()
+            .map(ServiceId::as_str)
+            .collect::<Vec<_>>(),
+        vec!["orders-api", "admin-ui"],
+        "the explicit service and the group's members are combined"
+    );
+    assert_eq!(request.branch.as_ref().map(Branch::as_str), Some("main"));
+
+    // Loading performed no work: no task was ever submitted.
+    let tasks = tasks::list_tasks(&client, None).expect("tasks load");
+    assert!(tasks.is_empty(), "a saved preset never executes on load");
+
+    // Unknown presets and workspaces are reported, never guessed.
+    let unknown = bulk::operation_preset_request(&client, "demo", "nope")
+        .expect_err("an unknown preset is refused");
+    assert_eq!(unknown.code, "InvalidOperation");
+    let ghost = bulk::operation_presets(&client, Some("ghost"))
+        .expect_err("an unknown workspace is refused");
+    assert_eq!(ghost.code, "WorkspaceNotFound");
+    let ghost = bulk::operation_preset_request(&client, "ghost", "quick-local")
+        .expect_err("an unknown workspace is refused");
+    assert_eq!(ghost.code, "WorkspaceNotFound");
 }

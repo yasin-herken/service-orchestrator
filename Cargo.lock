@@ -809,6 +809,7 @@ dependencies = [
  "service-orchestrator-mcp",
  "service-orchestrator-policy",
  "service-orchestrator-process",
+ "service-orchestrator-repository",
  "service-orchestrator-runtime",
  "service-orchestrator-tui",
  "tokio",
@@ -996,6 +997,15 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+]
+
+[[package]]
+name = "service-orchestrator-repository"
+version = "0.1.0"
+dependencies = [
+ "serde_json",
+ "service-orchestrator-application",
+ "service-orchestrator-config",
 ]
 
 [[package]]

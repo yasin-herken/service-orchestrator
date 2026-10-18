@@ -6,6 +6,9 @@ import type {
   BranchView,
   BuildCapabilitiesView,
   BuildTargetSummary,
+  BulkImportCommitView,
+  BulkImportInputView,
+  BulkImportPlanView,
   BulkSummaryView,
   ConfigChangeView,
   ConfigurationChangedEvent,
@@ -16,6 +19,7 @@ import type {
   ConfigurationValidationView,
   ConnectionSnapshot,
   DaemonStatus,
+  DiscoveryScanInputView,
   EnvironmentPlanView,
   GitStatusView,
   GitSyncMode,
@@ -27,12 +31,15 @@ import type {
   LibrarySummary,
   LogPageView,
   LogStreamEvent,
+  MigrationPresetSummaryView,
   MigrationRowView,
   MigrationStatusView,
   OperationOutcome,
+  OperationPresetSummaryView,
   PrepareEnvironmentInput,
   ProfileView,
   ProjectSuggestionView,
+  RepositoryDiscoveryReportView,
   RepositoryInspectionView,
   RepositoryProbeView,
   RepositorySummary,
@@ -331,6 +338,50 @@ export interface OrchestratorDesktopApi {
   inspectRepository(path: string): Promise<RepositoryProbeView>;
   /** Detects a suggested service configuration from a repository. */
   detectProjectConfiguration(path: string): Promise<ProjectSuggestionView>;
+  /**
+   * Scans a workspace root for repositories, read-only and bounded.
+   *
+   * Discovery performs no build, script, clone, or Git command; it reads
+   * well-known project files and reports detections with explicit confidence
+   * (`tasks/032.md` §7, §50).
+   */
+  discoverRepositories(input: DiscoveryScanInputView): Promise<RepositoryDiscoveryReportView>;
+  /**
+   * Plans a bulk import without changing anything.
+   *
+   * The plan carries one row per repository, its composed entity, the
+   * per-repository problems, and the whole-document preview. It is safe to
+   * call while the user edits the selection (`tasks/032.md` §10, §14).
+   */
+  planBulkImport(input: BulkImportInputView): Promise<BulkImportPlanView>;
+  /**
+   * Validates and commits a bulk import atomically.
+   *
+   * `expectedRevision` is the revision of the plan the user reviewed; a stale
+   * value is reported as `CONFIG_CONFLICT`. `confirmed` forwards explicit
+   * destructive intent for a selection that replaces an existing entity; the
+   * daemon independently verifies the client and the user, and its policy
+   * decision is final (`tasks/032.md` §13, §15).
+   */
+  commitBulkImport(
+    input: BulkImportInputView,
+    expectedRevision: string,
+    confirmed: boolean,
+  ): Promise<BulkImportCommitView>;
+  /** The configured migration presets with their safety classification. */
+  listMigrationPresets(): Promise<MigrationPresetSummaryView[]>;
+  /** The saved bulk-operation presets that apply to a workspace. */
+  listOperationPresets(workspaceId?: string): Promise<OperationPresetSummaryView[]>;
+  /**
+   * Composes the environment request a saved operation preset describes.
+   *
+   * Loading a preset executes nothing and carries no authorization; execution
+   * still runs the ordinary plan/validate/authorize path (`tasks/032.md` §37).
+   */
+  getOperationPresetRequest(
+    workspaceId: string,
+    presetId: string,
+  ): Promise<PrepareEnvironmentInput>;
   /** The adapter's current daemon connection state. */
   getConnectionState(): Promise<ConnectionSnapshot>;
   /** Subscribes to daemon connection changes; resolves to an unsubscriber. */
@@ -527,6 +578,27 @@ export const desktopApi: OrchestratorDesktopApi = {
     call<RepositoryProbeView>('inspect_repository_path', { path }),
   detectProjectConfiguration: (path) =>
     call<ProjectSuggestionView>('detect_project_configuration', { path }),
+  discoverRepositories: (input) =>
+    call<RepositoryDiscoveryReportView>('discover_repositories', { input }),
+  planBulkImport: (input) =>
+    call<BulkImportPlanView>('plan_bulk_import', { input }),
+  commitBulkImport: (input, expectedRevision, confirmed) =>
+    call<BulkImportCommitView>('commit_bulk_import', {
+      input,
+      expectedRevision,
+      confirmed,
+    }),
+  listMigrationPresets: () =>
+    call<MigrationPresetSummaryView[]>('list_migration_presets'),
+  listOperationPresets: (workspaceId) =>
+    call<OperationPresetSummaryView[]>('list_operation_presets', {
+      workspaceId: workspaceId ?? null,
+    }),
+  getOperationPresetRequest: (workspaceId, presetId) =>
+    call<PrepareEnvironmentInput>('get_operation_preset_request', {
+      workspaceId,
+      presetId,
+    }),
   getConnectionState: () => call<ConnectionSnapshot>('get_connection_state'),
   onConnectionChanged: (handler) =>
     subscribe<ConnectionSnapshot>(DAEMON_CONNECTION_EVENT, handler),

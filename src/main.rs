@@ -41,14 +41,13 @@ use service_orchestrator_liquibase::{register_migration_executors, MigrationMana
 use service_orchestrator_logging::{spawn_process_ingestor, spawn_task_ingestor, LogHub};
 use service_orchestrator_mcp::{RemoteTaskMonitor, TaskMonitor};
 use service_orchestrator_process::ProcessManager;
+use service_orchestrator_repository::{SystemRepositoryDiscovery, SystemRepositoryInspector};
 use service_orchestrator_runtime::{register_service_executors, ServiceManager};
 use service_orchestrator_tui::{RemoteTaskObserver, TaskObserver};
 
 mod probe;
-mod repository;
 
 use probe::SystemWorkspaceProbe;
-use repository::SystemRepositoryInspector;
 
 /// The environment variable that overrides the configuration file location.
 const CONFIG_ENV: &str = "SERVICE_ORCHESTRATOR_CONFIG";
@@ -377,7 +376,13 @@ async fn bootstrap(
     .with_configuration(Arc::clone(&configuration))
     // The real, read-only repository inspector behind `inspect_repository` and
     // the service wizard's technology detection (`tasks/023.md` §17, §18).
-    .with_repository_inspector(Arc::new(SystemRepositoryInspector));
+    .with_repository_inspector(Arc::new(SystemRepositoryInspector))
+    // The real, read-only, bounded repository walker behind the bulk-import
+    // wizard's discovery step (`tasks/032.md` §7, §8). It shares the inspector
+    // above so one definition of "detected technology" backs both.
+    .with_repository_discovery(Arc::new(SystemRepositoryDiscovery::new(
+        SystemRepositoryInspector,
+    )));
 
     Ok(Runtime {
         application,

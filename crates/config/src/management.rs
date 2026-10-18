@@ -37,7 +37,8 @@ use crate::error::{ConfigError, ValidationError};
 use crate::loader::{load_from_str, ConfigLoader, TomlFileLoader};
 use crate::model::Config;
 use crate::raw::{
-    RawConfig, RawExecution, RawGroup, RawLibrary, RawProfile, RawService, RawWorkspace,
+    RawConfig, RawDiscovery, RawExecution, RawGroup, RawLibrary, RawMigrationPreset,
+    RawOperationPreset, RawProfile, RawService, RawTemplate, RawWorkspace,
 };
 
 // ---------------------------------------------------------------------------
@@ -58,18 +59,27 @@ pub enum EntityKind {
     Profile,
     /// A service group.
     Group,
+    /// A reusable service template (`tasks/032.md` §3).
+    Template,
+    /// A named migration preset (`tasks/032.md` §16).
+    MigrationPreset,
+    /// A saved bulk-operation preset (`tasks/032.md` §36).
+    OperationPreset,
 }
 
 impl EntityKind {
     /// Every entity kind, in configuration-file order.
     #[must_use]
-    pub const fn all() -> [EntityKind; 5] {
+    pub const fn all() -> [EntityKind; 8] {
         [
             EntityKind::Workspace,
             EntityKind::Service,
             EntityKind::Library,
             EntityKind::Profile,
             EntityKind::Group,
+            EntityKind::Template,
+            EntityKind::MigrationPreset,
+            EntityKind::OperationPreset,
         ]
     }
 
@@ -82,6 +92,9 @@ impl EntityKind {
             EntityKind::Library => "library",
             EntityKind::Profile => "profile",
             EntityKind::Group => "group",
+            EntityKind::Template => "template",
+            EntityKind::MigrationPreset => "migration_preset",
+            EntityKind::OperationPreset => "operation_preset",
         }
     }
 
@@ -100,6 +113,9 @@ impl EntityKind {
             EntityKind::Library => "libraries",
             EntityKind::Profile => "profiles",
             EntityKind::Group => "groups",
+            EntityKind::Template => "templates",
+            EntityKind::MigrationPreset => "migration_presets",
+            EntityKind::OperationPreset => "operation_presets",
         }
     }
 }
@@ -167,6 +183,12 @@ pub enum ConfigChange {
     Profile(Box<EntityChange<RawProfile>>),
     /// A group change.
     Group(Box<EntityChange<RawGroup>>),
+    /// A service-template change.
+    Template(Box<EntityChange<RawTemplate>>),
+    /// A migration-preset change.
+    MigrationPreset(Box<EntityChange<RawMigrationPreset>>),
+    /// A saved-operation-preset change.
+    OperationPreset(Box<EntityChange<RawOperationPreset>>),
 }
 
 impl ConfigChange {
@@ -179,6 +201,9 @@ impl ConfigChange {
             ConfigChange::Library(_) => EntityKind::Library,
             ConfigChange::Profile(_) => EntityKind::Profile,
             ConfigChange::Group(_) => EntityKind::Group,
+            ConfigChange::Template(_) => EntityKind::Template,
+            ConfigChange::MigrationPreset(_) => EntityKind::MigrationPreset,
+            ConfigChange::OperationPreset(_) => EntityKind::OperationPreset,
         }
     }
 
@@ -191,6 +216,9 @@ impl ConfigChange {
             ConfigChange::Library(change) => change.action(),
             ConfigChange::Profile(change) => change.action(),
             ConfigChange::Group(change) => change.action(),
+            ConfigChange::Template(change) => change.action(),
+            ConfigChange::MigrationPreset(change) => change.action(),
+            ConfigChange::OperationPreset(change) => change.action(),
         }
     }
 
@@ -203,6 +231,9 @@ impl ConfigChange {
             ConfigChange::Library(change) => change.target_id(),
             ConfigChange::Profile(change) => change.target_id(),
             ConfigChange::Group(change) => change.target_id(),
+            ConfigChange::Template(change) => change.target_id(),
+            ConfigChange::MigrationPreset(change) => change.target_id(),
+            ConfigChange::OperationPreset(change) => change.target_id(),
         }
     }
 
@@ -218,6 +249,9 @@ impl ConfigChange {
             ConfigChange::Library(change) => change_id(change, |entity| entity.id.as_str()),
             ConfigChange::Profile(change) => change_id(change, |entity| entity.id.as_str()),
             ConfigChange::Group(change) => change_id(change, |entity| entity.id.as_str()),
+            ConfigChange::Template(change) => change_id(change, |entity| entity.id.as_str()),
+            ConfigChange::MigrationPreset(change) => change_id(change, |entity| entity.id.as_str()),
+            ConfigChange::OperationPreset(change) => change_id(change, |entity| entity.id.as_str()),
         };
         match id {
             Some(id) => format!("{} {} '{}'", self.action(), self.kind().label(), id),
@@ -270,6 +304,24 @@ impl ConfigChange {
     #[must_use]
     pub fn group(change: EntityChange<RawGroup>) -> Self {
         Self::Group(Box::new(change))
+    }
+
+    /// Wraps a service-template change.
+    #[must_use]
+    pub fn template(change: EntityChange<RawTemplate>) -> Self {
+        Self::Template(Box::new(change))
+    }
+
+    /// Wraps a migration-preset change.
+    #[must_use]
+    pub fn migration_preset(change: EntityChange<RawMigrationPreset>) -> Self {
+        Self::MigrationPreset(Box::new(change))
+    }
+
+    /// Wraps a saved-operation-preset change.
+    #[must_use]
+    pub fn operation_preset(change: EntityChange<RawOperationPreset>) -> Self {
+        Self::OperationPreset(Box::new(change))
     }
 }
 
@@ -434,8 +486,16 @@ pub struct ConfigurationSnapshot {
     pub profiles: Vec<RawProfile>,
     /// The raw groups.
     pub groups: Vec<RawGroup>,
+    /// The raw service templates.
+    pub templates: Vec<RawTemplate>,
+    /// The raw migration presets.
+    pub migration_presets: Vec<RawMigrationPreset>,
+    /// The raw saved-operation presets.
+    pub operation_presets: Vec<RawOperationPreset>,
     /// The global execution settings.
     pub execution: RawExecution,
+    /// The repository-discovery settings.
+    pub discovery: RawDiscovery,
 }
 
 // ---------------------------------------------------------------------------
@@ -491,6 +551,15 @@ impl ConfigDocument {
                 apply_entity(&mut self.doc, EntityKind::Profile, change)
             }
             ConfigChange::Group(change) => apply_entity(&mut self.doc, EntityKind::Group, change),
+            ConfigChange::Template(change) => {
+                apply_entity(&mut self.doc, EntityKind::Template, change)
+            }
+            ConfigChange::MigrationPreset(change) => {
+                apply_entity(&mut self.doc, EntityKind::MigrationPreset, change)
+            }
+            ConfigChange::OperationPreset(change) => {
+                apply_entity(&mut self.doc, EntityKind::OperationPreset, change)
+            }
         }
     }
 }
@@ -626,6 +695,9 @@ raw_entity!(RawService);
 raw_entity!(RawLibrary);
 raw_entity!(RawProfile);
 raw_entity!(RawGroup);
+raw_entity!(RawTemplate);
+raw_entity!(RawMigrationPreset);
+raw_entity!(RawOperationPreset);
 
 // ---------------------------------------------------------------------------
 // Diffing
@@ -649,6 +721,24 @@ fn compute_diff(old: &RawConfig, new: &RawConfig) -> ConfigurationDiff {
     );
     diff_kind(EntityKind::Profile, &old.profiles, &new.profiles, &mut diff);
     diff_kind(EntityKind::Group, &old.groups, &new.groups, &mut diff);
+    diff_kind(
+        EntityKind::Template,
+        &old.templates,
+        &new.templates,
+        &mut diff,
+    );
+    diff_kind(
+        EntityKind::MigrationPreset,
+        &old.migration_presets,
+        &new.migration_presets,
+        &mut diff,
+    );
+    diff_kind(
+        EntityKind::OperationPreset,
+        &old.operation_presets,
+        &new.operation_presets,
+        &mut diff,
+    );
     diff
 }
 
@@ -825,6 +915,16 @@ fn affected_references(raw: &RawConfig, kind: EntityKind, id: &str) -> Vec<Affec
                     references.push(reference(EntityKind::Group, &group.id, "workspace", id));
                 }
             }
+            for preset in &raw.operation_presets {
+                if preset.workspace.as_deref().map(str::trim) == Some(id) {
+                    references.push(reference(
+                        EntityKind::OperationPreset,
+                        &preset.id,
+                        "workspace",
+                        id,
+                    ));
+                }
+            }
         }
         EntityKind::Service => {
             for group in &raw.groups {
@@ -848,6 +948,16 @@ fn affected_references(raw: &RawConfig, kind: EntityKind, id: &str) -> Vec<Affec
                         EntityKind::Service,
                         &service.id,
                         "dependency",
+                        id,
+                    ));
+                }
+            }
+            for preset in &raw.operation_presets {
+                if preset.services.iter().any(|member| member.trim() == id) {
+                    references.push(reference(
+                        EntityKind::OperationPreset,
+                        &preset.id,
+                        "service",
                         id,
                     ));
                 }
@@ -891,8 +1001,82 @@ fn affected_references(raw: &RawConfig, kind: EntityKind, id: &str) -> Vec<Affec
                     references.push(reference(EntityKind::Profile, &profile.id, "group", id));
                 }
             }
+            for preset in &raw.operation_presets {
+                if preset.groups.iter().any(|member| member.trim() == id) {
+                    references.push(reference(
+                        EntityKind::OperationPreset,
+                        &preset.id,
+                        "group",
+                        id,
+                    ));
+                }
+            }
         }
-        EntityKind::Profile => {}
+        EntityKind::Profile => {
+            for preset in &raw.operation_presets {
+                if preset.profiles.iter().any(|member| member.trim() == id) {
+                    references.push(reference(
+                        EntityKind::OperationPreset,
+                        &preset.id,
+                        "profile",
+                        id,
+                    ));
+                }
+            }
+        }
+        EntityKind::MigrationPreset => {
+            for service in &raw.services {
+                if service
+                    .liquibase
+                    .as_ref()
+                    .and_then(|liquibase| liquibase.preset.as_deref())
+                    .map(str::trim)
+                    == Some(id)
+                {
+                    references.push(reference(
+                        EntityKind::Service,
+                        &service.id,
+                        "migration_preset",
+                        id,
+                    ));
+                }
+            }
+            for template in &raw.templates {
+                if template
+                    .liquibase
+                    .as_ref()
+                    .and_then(|liquibase| liquibase.preset.as_deref())
+                    .map(str::trim)
+                    == Some(id)
+                {
+                    references.push(reference(
+                        EntityKind::Template,
+                        &template.id,
+                        "migration_preset",
+                        id,
+                    ));
+                }
+            }
+            for preset in &raw.operation_presets {
+                if preset
+                    .migration
+                    .as_ref()
+                    .and_then(|migration| migration.preset.as_deref())
+                    .map(str::trim)
+                    == Some(id)
+                {
+                    references.push(reference(
+                        EntityKind::OperationPreset,
+                        &preset.id,
+                        "migration_preset",
+                        id,
+                    ));
+                }
+            }
+        }
+        // Nothing references a template or an operation preset: both are
+        // entry points a developer chooses, never targets of a reference.
+        EntityKind::Template | EntityKind::OperationPreset => {}
     }
     references
 }
@@ -998,7 +1182,11 @@ impl ConfigRepository {
             libraries: raw.libraries,
             profiles: raw.profiles,
             groups: raw.groups,
+            templates: raw.templates,
+            migration_presets: raw.migration_presets,
+            operation_presets: raw.operation_presets,
             execution: raw.execution,
+            discovery: raw.discovery,
         })
     }
 
@@ -1018,27 +1206,52 @@ impl ConfigRepository {
         change: &ConfigChange,
         expected_revision: &str,
     ) -> Result<ConfigurationPreview, ConfigError> {
+        self.preview_batch(std::slice::from_ref(change), expected_revision)
+    }
+
+    /// Applies a batch of changes in memory and returns the diff and validation
+    /// result without writing anything.
+    ///
+    /// The batch is applied in order to a single document, so the preview and
+    /// the subsequent commit see exactly the same result. This is what makes a
+    /// bulk import atomic at the persistence boundary
+    /// (`tasks/032.md` §15): the whole batch either validates and commits, or
+    /// nothing is written.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`] as described by [`ConfigRepository::preview`].
+    /// A structural failure in any change aborts the whole batch.
+    pub fn preview_batch(
+        &self,
+        changes: &[ConfigChange],
+        expected_revision: &str,
+    ) -> Result<ConfigurationPreview, ConfigError> {
         let mut document = self.read_document()?;
         ensure_revision(&self.path, &document.revision, expected_revision)?;
         let old_raw = document.raw()?;
-        document.apply(change)?;
+        for change in changes {
+            document.apply(change)?;
+        }
         let rendered = document.render();
         let proposed_revision = revision_of(&rendered);
         let origin = self.path.display().to_string();
         let (valid, issues) = validate_rendered(&rendered, &origin);
         let new_raw = toml::from_str::<RawConfig>(&rendered).unwrap_or_else(|_| old_raw.clone());
         let diff = compute_diff(&old_raw, &new_raw);
-        let affected_references = match (change.action(), change.target_id()) {
-            ("remove", Some(id)) => affected_references(&old_raw, change.kind(), id),
-            _ => Vec::new(),
-        };
+        let mut affected = Vec::new();
+        for change in changes {
+            if let ("remove", Some(id)) = (change.action(), change.target_id()) {
+                affected.extend(affected_references(&old_raw, change.kind(), id));
+            }
+        }
         Ok(ConfigurationPreview {
             revision: document.revision,
             proposed_revision,
             valid,
             diff,
             issues,
-            affected_references,
+            affected_references: affected,
             running_impact: Vec::new(),
         })
     }
@@ -1059,9 +1272,30 @@ impl ConfigRepository {
         change: &ConfigChange,
         expected_revision: &str,
     ) -> Result<Config, ConfigError> {
+        self.commit_batch(std::slice::from_ref(change), expected_revision)
+    }
+
+    /// Validates and persists a batch of changes atomically, returning the
+    /// reloaded configuration.
+    ///
+    /// The changes are applied in order to one document; the whole proposal is
+    /// validated, and only then is the file written atomically. A failure at
+    /// any point leaves the existing configuration untouched
+    /// (`tasks/032.md` §15).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`] as described by [`ConfigRepository::commit`].
+    pub fn commit_batch(
+        &self,
+        changes: &[ConfigChange],
+        expected_revision: &str,
+    ) -> Result<Config, ConfigError> {
         let mut document = self.read_document()?;
         ensure_revision(&self.path, &document.revision, expected_revision)?;
-        document.apply(change)?;
+        for change in changes {
+            document.apply(change)?;
+        }
         let rendered = document.render();
         let origin = self.path.display().to_string();
         let config = load_from_str(&rendered, &origin)?;
@@ -1244,6 +1478,18 @@ pub trait ConfigManager: Send + Sync {
         expected_revision: &str,
     ) -> Result<ConfigurationPreview, ConfigError>;
 
+    /// Previews a batch of changes without committing any of them.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`] as described by
+    /// [`ConfigRepository::preview_batch`].
+    fn preview_batch(
+        &self,
+        changes: &[ConfigChange],
+        expected_revision: &str,
+    ) -> Result<ConfigurationPreview, ConfigError>;
+
     /// Validates, persists, and reloads a change.
     ///
     /// # Errors
@@ -1251,6 +1497,18 @@ pub trait ConfigManager: Send + Sync {
     /// Returns a [`ConfigError`] as described by [`ConfigRepository::commit`].
     fn commit(&self, change: &ConfigChange, expected_revision: &str)
         -> Result<Config, ConfigError>;
+
+    /// Validates, persists, and reloads a batch of changes atomically.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`ConfigError`] as described by
+    /// [`ConfigRepository::commit_batch`].
+    fn commit_batch(
+        &self,
+        changes: &[ConfigChange],
+        expected_revision: &str,
+    ) -> Result<Config, ConfigError>;
 
     /// Re-reads and validates the file, updating the current configuration.
     ///
@@ -1322,12 +1580,33 @@ impl ConfigManager for FileConfigManager {
         self.repository.preview(change, expected_revision)
     }
 
+    fn preview_batch(
+        &self,
+        changes: &[ConfigChange],
+        expected_revision: &str,
+    ) -> Result<ConfigurationPreview, ConfigError> {
+        self.repository.preview_batch(changes, expected_revision)
+    }
+
     fn commit(
         &self,
         change: &ConfigChange,
         expected_revision: &str,
     ) -> Result<Config, ConfigError> {
         let config = self.repository.commit(change, expected_revision)?;
+        *self
+            .current
+            .write()
+            .expect("configuration lock is not poisoned") = Arc::new(config.clone());
+        Ok(config)
+    }
+
+    fn commit_batch(
+        &self,
+        changes: &[ConfigChange],
+        expected_revision: &str,
+    ) -> Result<Config, ConfigError> {
+        let config = self.repository.commit_batch(changes, expected_revision)?;
         *self
             .current
             .write()
@@ -1395,9 +1674,31 @@ impl ConfigManager for StaticConfigManager {
         })
     }
 
+    fn preview_batch(
+        &self,
+        _changes: &[ConfigChange],
+        _expected_revision: &str,
+    ) -> Result<ConfigurationPreview, ConfigError> {
+        Err(ConfigError::Document {
+            message: "configuration management is not available without a configuration file"
+                .to_owned(),
+        })
+    }
+
     fn commit(
         &self,
         _change: &ConfigChange,
+        _expected_revision: &str,
+    ) -> Result<Config, ConfigError> {
+        Err(ConfigError::Document {
+            message: "configuration management is not available without a configuration file"
+                .to_owned(),
+        })
+    }
+
+    fn commit_batch(
+        &self,
+        _changes: &[ConfigChange],
         _expected_revision: &str,
     ) -> Result<Config, ConfigError> {
         Err(ConfigError::Document {
@@ -1439,6 +1740,7 @@ mod tests {
             runtimes: Vec::new(),
             commands: Default::default(),
             build_system: None,
+            build_operation: None,
             liquibase: None,
             health_checks: Vec::new(),
             ports: Vec::new(),
@@ -1469,5 +1771,12 @@ mod tests {
         assert_eq!(EntityKind::Library.table(), "libraries");
         assert_eq!(EntityKind::Profile.table(), "profiles");
         assert_eq!(EntityKind::Group.table(), "groups");
+        assert_eq!(EntityKind::Template.table(), "templates");
+        assert_eq!(EntityKind::MigrationPreset.table(), "migration_presets");
+        assert_eq!(EntityKind::OperationPreset.table(), "operation_presets");
+        assert_eq!(EntityKind::all().len(), 8);
+        for kind in EntityKind::all() {
+            assert_eq!(kind.label(), kind.as_str());
+        }
     }
 }

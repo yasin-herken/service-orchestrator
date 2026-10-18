@@ -7,7 +7,8 @@
 //! read queries and the mutating commands alike.
 
 use service_orchestrator_domain::{
-    Branch, GroupId, LibraryId, ProfileId, ServiceId, TaskId, WorkflowId, WorkspaceId,
+    Branch, GroupId, LibraryId, MigrationPresetId, OperationPresetId, ProfileId, ServiceId, TaskId,
+    TemplateId, WorkflowId, WorkspaceId,
 };
 
 use crate::error::CommandError;
@@ -122,6 +123,38 @@ pub(crate) fn parse_task_id(raw: &str) -> Result<TaskId, CommandError> {
 pub(crate) fn parse_workflow_id(raw: &str) -> Result<WorkflowId, CommandError> {
     WorkflowId::new(raw)
         .map_err(|error| CommandError::invalid_input(format!("invalid workflow id: {error}")))
+}
+
+/// Validates a template identifier through the domain.
+///
+/// # Errors
+///
+/// Returns `INVALID_INPUT` when the domain rejects the identifier.
+pub(crate) fn parse_template_id(raw: &str) -> Result<TemplateId, CommandError> {
+    TemplateId::new(raw)
+        .map_err(|error| CommandError::invalid_input(format!("invalid template id: {error}")))
+}
+
+/// Validates a migration-preset identifier through the domain.
+///
+/// # Errors
+///
+/// Returns `INVALID_INPUT` when the domain rejects the identifier.
+pub(crate) fn parse_migration_preset_id(raw: &str) -> Result<MigrationPresetId, CommandError> {
+    MigrationPresetId::new(raw).map_err(|error| {
+        CommandError::invalid_input(format!("invalid migration preset id: {error}"))
+    })
+}
+
+/// Validates a saved-operation-preset identifier through the domain.
+///
+/// # Errors
+///
+/// Returns `INVALID_INPUT` when the domain rejects the identifier.
+pub(crate) fn parse_operation_preset_id(raw: &str) -> Result<OperationPresetId, CommandError> {
+    OperationPresetId::new(raw).map_err(|error| {
+        CommandError::invalid_input(format!("invalid operation preset id: {error}"))
+    })
 }
 
 #[cfg(test)]

@@ -191,9 +191,10 @@ default_branch = "main"                         # optional; falls back to the se
 provider = "git"                                # optional
 ```
 
-URLs must not embed credentials (`scheme://user:token@host`); authentication
-comes from the environment. The repository's checkout path is the service's
-`path`.
+URLs must not embed credentials (`scheme://user:token@host`, or an HTTPS
+token used as the username); authentication comes from the environment. A plain
+SSH username (`ssh://git@host/...` or `git@host:path`) is not a credential and
+is accepted. The repository's checkout path is the service's `path`.
 
 ### 5.4 Runtime
 
@@ -449,6 +450,110 @@ and a secret-manager reference — so the value is never written to disk. The
 domain's `EnvironmentVariable` currently models literal values only, and this
 task does not implement external sources.
 
+### 5.16 Service templates
+
+```toml
+[[templates]]
+id = "spring-boot-backend"
+name = "Spring Boot Backend"
+category = "spring_boot_backend"
+type = "backend"
+default_branch = "main"
+build_system = "maven"
+build_operation = "build"
+
+[templates.runtime]
+type = "java"
+version = "21"
+
+[templates.commands]
+build = "./mvnw clean install"
+start = "./mvnw spring-boot:run"
+
+[[templates.health_checks]]
+type = "http"
+url = "http://localhost:${port}/actuator/health"
+```
+
+Templates are defaults for the Bulk Service Import wizard. They are never a
+second service model, and they deliberately carry no ports, repository URL,
+database target, or credentials. Values may use the closed variable set
+`${serviceName}`, `${repositoryName}`, `${repositoryPath}`, `${workspaceRoot}`,
+`${relativePath}`, and `${port}`. A template of type `library` creates a
+`[[libraries]]` entry. Unknown, empty, or unterminated placeholders are rejected;
+branches and command programs may not contain variables. See
+[`service-templates.md`](service-templates.md).
+
+### 5.17 Named migration presets
+
+```toml
+[[migration_presets]]
+id = "sql-preview"
+name = "SQL Preview"
+goals = ["liquibase:updateSQL"]
+contexts = ["local"]
+read_only = true
+
+[[migration_presets]]
+id = "reset-local"
+goals = ["liquibase:dropAll", "liquibase:update"]
+destructive = true
+allowed_environments = ["local"]
+```
+
+`status`, `update`, and `reset_local` are built in; a user preset with the same
+id replaces its built-in. A preset names validated Maven goals, never a shell
+command or an option. `read_only` and `destructive` are mutually exclusive, a
+preset containing `dropAll` must be destructive, and a destructive preset must
+declare a non-empty `allowed_environments` list. That list is a precondition,
+not authorization. A service may select a preset with
+`[services.liquibase] preset = "…"`. See
+[`migration-presets.md`](migration-presets.md).
+
+### 5.18 Saved operation presets
+
+```toml
+[[operation_presets]]
+id = "quick-local"
+name = "Quick Local"
+workspace = "acme"
+groups = ["core"]
+default = true
+
+[operation_presets.git]
+enabled = true
+
+[operation_presets.runtime]
+action = "restart"
+
+[operation_presets.health]
+enabled = true
+```
+
+A saved preset stores a selection (at least one of `services`, `profiles`,
+`groups`) and the operation flags used by the Bulk Operations screen. Omitted
+phase groups are disabled, except `migration.enabled`, which defaults to whether
+a preset id is named. At most one preset per workspace may be `default = true`.
+Presets never store credentials or authorization and never execute on load. See
+[`bulk-operations.md`](bulk-operations.md).
+
+### 5.19 Discovery bounds
+
+```toml
+[discovery]
+max_depth = 6
+exclude = ["vendor"]
+follow_symlinks = true
+max_repositories = 200
+```
+
+These bounds apply to the Bulk Service Import scan. The built-in exclusions
+(`.git`, `node_modules`, `target`, `build`, `dist`, `out`) are always applied;
+configured `exclude` entries are added. `follow_symlinks` only follows links that
+stay inside the workspace root. `max_depth` is capped at 64 and
+`max_repositories` is clamped to 1–10 000. See
+[`bulk-service-import.md`](bulk-service-import.md).
+
 ---
 
 ## 6. Path resolution
@@ -485,6 +590,13 @@ against the real filesystem, and repositories are not assumed to exist.
 | liquibase `provider` | `liquibase` | |
 | liquibase `execution_mode` | `maven` | `maven` or `cli`. |
 | liquibase `database.environment` | `unknown` | Only `local` migrates without explicit authorization; `unknown` is non-local. |
+| migration preset `read_only` / `destructive` | `false` | `read_only` and `destructive` are mutually exclusive. |
+| template `name` | the template `id` | |
+| operation preset `workspace` | inferred | From declared members when omitted; a preset without a workspace applies anywhere. |
+| operation preset phase group | disabled | Except `migration.enabled`, which defaults to `preset.is_some()`. |
+| `discovery.max_depth` | `6` | Capped at `64`. |
+| `discovery.max_repositories` | `200` | Clamped to `1–10 000`. |
+| `discovery.follow_symlinks` | `true` | Followed links must stay inside the workspace root. |
 | `execution.max_parallel_tasks` | `4` | |
 | `execution.default_timeout_seconds` | `1800` | |
 
@@ -543,6 +655,26 @@ crate, then a final `Workspace::validate` in the domain.
 Checks are intentionally practical rather than exhaustive; assumptions that are
 not required are not enforced.
 
+### Templates and presets
+
+- Duplicate template, migration-preset, or operation-preset ids.
+- Unknown, empty, or unterminated template variable; a variable in a branch or
+  a command program.
+- A migration preset with no goals, an unsupported provider, or a non-`maven`
+  execution mode.
+- A goal containing whitespace, a leading `-`, or shell metacharacters.
+- `read_only` together with `destructive`, or `dropAll` without
+  `destructive = true`.
+- A destructive preset without concrete `allowed_environments`, or one that
+  allows `unknown`.
+- A service `liquibase.preset` that does not exist, or a destructive preset
+  whose `allowed_environments` does not cover the service's declared database
+  environment.
+- An operation preset with no services/profiles/groups, a member that is not in
+  the preset's workspace, more than one `default = true` per workspace, or an
+  unknown migration preset in `migration.preset`.
+- Discovery bounds outside their limits.
+
 ### Error shape
 
 Errors are actionable and may be reported several at a time:
@@ -563,7 +695,7 @@ Expected:
 a non-empty semantic/version-like string
 
 Suggested fix:
-Add `version = "20.19.4"` (or the required version) to the runtime.
+Add `version = "20.x"` (or the required version) to the runtime.
 ```
 
 The Rust types are:
@@ -595,10 +727,19 @@ pub trait ConfigManager: Send + Sync {
         -> Result<ConfigurationPreview, ConfigError>;
     fn commit(&self, change: &ConfigChange, expected_revision: &str)
         -> Result<Config, ConfigError>;
+    fn preview_batch(&self, changes: &[ConfigChange], expected_revision: &str)
+        -> Result<ConfigurationPreview, ConfigError>;
+    fn commit_batch(&self, changes: &[ConfigChange], expected_revision: &str)
+        -> Result<Config, ConfigError>;
     fn reload(&self) -> Result<Arc<Config>, ConfigError>;
     fn validate(&self) -> Result<(), ConfigError>;
 }
 ```
+
+`preview_batch` / `commit_batch` exist for Bulk Service Import: all changes are
+applied in order to one in-memory document, the whole document is validated, and
+the file is written once. There is no partial import. A stale revision fails the
+whole batch with `ConfigError::Conflict`.
 
 `FileConfigManager` is the file-backed implementation. Its `commit` validates the
 *entire* proposed document in memory, re-checks the on-disk revision, and only
@@ -622,8 +763,8 @@ schema on the wire:
 
 `EntityChange<T>` is `create { entity }`, `update { id, entity }`, or
 `remove { id }`; `ConfigChange` is `workspace | service | library | profile |
-group`. A whole document is never uploaded, so an edit cannot clobber unrelated
-sections it did not read.
+group | template | migration_preset | operation_preset`. A whole document is
+never uploaded, so an edit cannot clobber unrelated sections it did not read.
 
 ### Preview
 
@@ -679,8 +820,9 @@ validates it like any other change.
 See [`examples/config.toml`](../examples/config.toml) for a document that
 exercises every section: one workspace, a backend and a frontend service, a
 library, dependencies, a group, a profile, runtimes, commands, Liquibase, health
-checks, ports, and execution settings. The file is loaded verbatim by the
-integration test suite.
+checks, ports, execution settings, three service templates, named migration
+presets, a saved operation preset, and discovery bounds. The file is loaded
+verbatim by the integration test suite.
 
 ---
 

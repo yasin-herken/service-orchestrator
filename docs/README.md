@@ -30,9 +30,13 @@ go wrong.
 | [`builds.md`](builds.md) | Maven and npm builds, wrappers, node/java versions, build logs, failures. |
 | [`libraries.md`](libraries.md) | Shared libraries, artifact coordinates, local install, verification, version alignment. |
 | [`migrations.md`](migrations.md) | Liquibase integration, status, preview, apply, target safety, failure handling. |
+| [`migration-presets.md`](migration-presets.md) | Named Liquibase presets, contexts, destructive safety, and execution policy. |
 | [`health.md`](health.md) | Process, TCP, and HTTP checks, readiness, health status, common failures. |
 | [`logs-and-diagnostics.md`](logs-and-diagnostics.md) | Service, task, and workflow logs; filtering, paging, retention, redaction. |
 | [`workflows.md`](workflows.md) | Prepare Environment, profiles, groups, dependency resolution, planning, cancellation. |
+| [`bulk-operations.md`](bulk-operations.md) | The unified bulk operations screen, phase options, saved presets, and results. |
+| [`service-templates.md`](service-templates.md) | Reusable service/library defaults, template variables, and automatic matching. |
+| [`bulk-service-import.md`](bulk-service-import.md) | Bounded discovery, the ten-step import wizard, overrides, and atomic commit. |
 | [`desktop-gui.md`](desktop-gui.md) | The Tauri 2 desktop GUI: screens, navigation, and operations. |
 | [`tui.md`](tui.md) | The Ratatui terminal interface: screens, keys, and operations. |
 | [`mcp.md`](mcp.md) | The MCP server: tools, resources, prompts, client setup, and security. |

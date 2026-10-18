@@ -88,6 +88,10 @@ pub enum MigrationSafety {
     LocalWrite,
     /// A mutation of a non-local database the caller authorized.
     AuthorizedWrite,
+    /// A destructive operation (for example `liquibase:dropAll`) that destroys
+    /// database objects and always requires explicit authorization, even against
+    /// a local database (`tasks/032.md` §19).
+    Destructive,
 }
 
 impl MigrationSafety {
@@ -98,6 +102,7 @@ impl MigrationSafety {
             Self::ReadOnly => "read_only",
             Self::LocalWrite => "local_write",
             Self::AuthorizedWrite => "authorized_write",
+            Self::Destructive => "destructive",
         }
     }
 
@@ -105,6 +110,12 @@ impl MigrationSafety {
     #[must_use]
     pub const fn is_write(self) -> bool {
         !matches!(self, Self::ReadOnly)
+    }
+
+    /// Returns `true` when the plan destroys database objects.
+    #[must_use]
+    pub const fn is_destructive(self) -> bool {
+        matches!(self, Self::Destructive)
     }
 }
 
@@ -260,9 +271,13 @@ mod tests {
         assert_eq!(MigrationSafety::ReadOnly.label(), "read_only");
         assert_eq!(MigrationSafety::LocalWrite.label(), "local_write");
         assert_eq!(MigrationSafety::AuthorizedWrite.label(), "authorized_write");
+        assert_eq!(MigrationSafety::Destructive.label(), "destructive");
         assert!(!MigrationSafety::ReadOnly.is_write());
         assert!(MigrationSafety::LocalWrite.is_write());
         assert!(MigrationSafety::AuthorizedWrite.is_write());
+        assert!(MigrationSafety::Destructive.is_write());
+        assert!(MigrationSafety::Destructive.is_destructive());
+        assert!(!MigrationSafety::LocalWrite.is_destructive());
     }
 
     #[test]

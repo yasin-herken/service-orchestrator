@@ -5,6 +5,9 @@ import type {
   BranchView,
   BuildCapabilitiesView,
   BuildTargetSummary,
+  BulkImportCommitView,
+  BulkImportPlanView,
+  BulkImportRowView,
   BulkSummaryView,
   ConfigChangeView,
   ConfigurationCommitView,
@@ -15,6 +18,8 @@ import type {
   ConfigurationValidationView,
   ConnectionSnapshot,
   DaemonStatus,
+  DiscoveredRepositoryView,
+  DiscoveryScanInputView,
   EnvironmentPlanView,
   GitStatusView,
   GitSyncPreview,
@@ -26,16 +31,24 @@ import type {
   LibrarySummary,
   LogEntryView,
   LogPageView,
+  MigrationPresetSummaryView,
   MigrationRowView,
   MigrationStatusView,
   OperationOutcome,
+  OperationPresetSummaryView,
+  PrepareEnvironmentInput,
   ProfileView,
   ProjectSuggestionView,
   RawArtifactView,
+  RawDiscoveryView,
   RawGroupView,
   RawLibraryView,
+  RawMigrationPresetView,
+  RawOperationPresetView,
   RawProfileView,
   RawServiceView,
+  RawTemplateView,
+  RepositoryDiscoveryReportView,
   RepositoryInspectionView,
   RepositoryProbeView,
   RepositorySummary,
@@ -43,6 +56,7 @@ import type {
   ServiceDetail,
   ServiceSummary,
   TaskView,
+  TechnologyDetectionView,
   ValidationIssueView,
   VersionAlignmentView,
   WorkflowStatusView,
@@ -405,7 +419,7 @@ export function makeBuildTargets(): BuildTargetSummary[] {
       display_name: 'admin-ui',
       kind: 'frontend',
       build_system: 'npm',
-      runtimes: [{ kind: 'node', version: '20.19.4' }],
+      runtimes: [{ kind: 'node', version: '20.x' }],
       capability: makeNpmCapabilities(),
     }),
   ];
@@ -1035,6 +1049,97 @@ export function makeRawProfile(
   };
 }
 
+/** Builds a raw Spring Boot backend template. */
+export function makeRawTemplate(
+  overrides: Partial<RawTemplateView> = {},
+): RawTemplateView {
+  return {
+    id: 'spring-boot-backend',
+    name: 'Spring Boot Backend',
+    description: 'Maven Spring Boot service with actuator health checks.',
+    category: 'spring_boot_backend',
+    type: 'backend',
+    default_branch: 'main',
+    build_system: 'maven',
+    build_operation: 'build',
+    runtime: { type: 'java', version: '21' },
+    commands: {
+      build: './mvnw clean install',
+      start: './mvnw spring-boot:run',
+    },
+    liquibase: { enabled: true, execution_mode: 'maven', preset: 'status' },
+    health_checks: [
+      { type: 'http', url: 'http://localhost:${port}/actuator/health' },
+    ],
+    environment: { SPRING_PROFILES_ACTIVE: 'local' },
+    ...overrides,
+  };
+}
+
+/** Builds a raw named migration preset. */
+export function makeRawMigrationPreset(
+  overrides: Partial<RawMigrationPresetView> = {},
+): RawMigrationPresetView {
+  return {
+    id: 'update',
+    name: 'Update',
+    description: 'Apply pending changesets.',
+    provider: 'liquibase',
+    execution_mode: 'maven',
+    goals: ['liquibase:update'],
+    contexts: ['sql', 'data', 'onlyDev'],
+    destructive: false,
+    read_only: false,
+    ...overrides,
+  };
+}
+
+/** Builds a raw destructive reset preset scoped to local targets only. */
+export function makeRawResetPreset(
+  overrides: Partial<RawMigrationPresetView> = {},
+): RawMigrationPresetView {
+  return makeRawMigrationPreset({
+    id: 'reset-local',
+    name: 'Reset local database',
+    goals: ['liquibase:dropAll', 'liquibase:update'],
+    destructive: true,
+    allowed_environments: ['local'],
+    ...overrides,
+  });
+}
+
+/** Builds a raw saved bulk-operation preset. */
+export function makeRawOperationPreset(
+  overrides: Partial<RawOperationPresetView> = {},
+): RawOperationPresetView {
+  return {
+    id: 'quick-local',
+    name: 'Quick local',
+    description: 'Sync, build, and restart the core services.',
+    workspace: 'demo',
+    default: true,
+    services: ['orders-api'],
+    git: { enabled: true, branch: 'main' },
+    build: { enabled: true, operation: 'build' },
+    runtime: { action: 'restart' },
+    health: { enabled: true },
+    ...overrides,
+  };
+}
+
+/** Builds the global discovery settings. */
+export function makeRawDiscovery(
+  overrides: Partial<RawDiscoveryView> = {},
+): RawDiscoveryView {
+  return {
+    max_depth: 6,
+    exclude: ['vendor'],
+    follow_symlinks: true,
+    max_repositories: 200,
+    ...overrides,
+  };
+}
+
 /**
  * Builds a raw configuration snapshot matching the demo fixture.
  *
@@ -1054,7 +1159,11 @@ export function makeConfigurationSnapshot(
     libraries: [makeRawLibrary()],
     profiles: [makeRawProfile()],
     groups: [makeRawGroup()],
+    templates: [makeRawTemplate()],
+    migration_presets: [makeRawMigrationPreset(), makeRawResetPreset()],
+    operation_presets: [makeRawOperationPreset()],
     execution: { max_parallel_tasks: 4 },
+    discovery: makeRawDiscovery(),
     ...overrides,
   };
 }
@@ -1227,7 +1336,7 @@ export function makeRepositoryProbe(
       {
         kind: 'node',
         label: 'Node.js',
-        required_version: '20.19.4',
+        required_version: '20.x',
         evidence: ['package.json'],
       },
     ],
@@ -1244,7 +1353,7 @@ export function makeRepositoryProbe(
     node: {
       name: 'orders-api-ui',
       version: '1.0.0',
-      required_node_version: '20.19.4',
+      required_node_version: '20.x',
       package_manager: 'npm',
       scripts: ['build', 'start'],
       react: false,
@@ -1281,5 +1390,253 @@ export function makeServiceCreateChange(): ConfigChangeView {
       action: 'create',
       entity: makeRawService({ id: 'billing-api', name: 'billing-api' }),
     },
+  };
+}
+
+// -- repository discovery and bulk import -------------------------------------
+
+/** Builds one detected technology. */
+export function makeDetection(
+  overrides: Partial<TechnologyDetectionView> = {},
+): TechnologyDetectionView {
+  return {
+    technology: 'maven',
+    label: 'Maven',
+    confidence: 'high',
+    evidence: ['pom.xml'],
+    ...overrides,
+  };
+}
+
+/** Builds a discovered repository view with sensible defaults. */
+export function makeDiscoveredRepository(
+  overrides: Partial<DiscoveredRepositoryView> = {},
+): DiscoveredRepositoryView {
+  return {
+    repository: {
+      name: 'orders-api',
+      relative_path: 'backend/orders-api',
+      inspection: makeRepositoryProbe(),
+      detections: [makeDetection()],
+    },
+    suggested_category: 'spring_boot_backend',
+    suggested_template: 'spring-boot-backend',
+    candidate_templates: ['spring-boot-backend'],
+    ...overrides,
+  };
+}
+
+/** Builds a bounded discovery report with two repositories. */
+export function makeDiscoveryReport(
+  overrides: Partial<RepositoryDiscoveryReportView> = {},
+): RepositoryDiscoveryReportView {
+  return {
+    workspace_id: 'demo',
+    root: '/Users/dev/Projects/demo',
+    repositories: [
+      makeDiscoveredRepository(),
+      makeDiscoveredRepository({
+        repository: {
+          name: 'admin-ui',
+          relative_path: 'frontend/admin-ui',
+          inspection: makeRepositoryProbe({
+            path: '/Users/dev/Projects/demo/frontend/admin-ui',
+            integrations: [{ kind: 'react', label: 'React', evidence: ['package.json'] }],
+          }),
+          detections: [
+            makeDetection({ technology: 'npm', label: 'npm', evidence: ['package.json'] }),
+            makeDetection({
+              technology: 'react',
+              label: 'React',
+              evidence: ['package.json'],
+            }),
+          ],
+        },
+        suggested_category: 'react_frontend',
+        suggested_template: 'react-frontend',
+        candidate_templates: ['react-frontend'],
+      }),
+    ],
+    truncated: false,
+    warnings: [],
+    ...overrides,
+  };
+}
+
+/** A discovery-scan request for the demo workspace. */
+export function makeDiscoveryInput(
+  overrides: Partial<DiscoveryScanInputView> = {},
+): DiscoveryScanInputView {
+  return {
+    workspace_id: 'demo',
+    follow_symlinks: true,
+    ...overrides,
+  };
+}
+
+/** Builds one bulk-import plan row. */
+export function makeBulkImportRow(
+  overrides: Partial<BulkImportRowView> = {},
+): BulkImportRowView {
+  return {
+    relative_path: 'backend/orders-api',
+    absolute_path: '/Users/dev/Projects/demo/backend/orders-api',
+    template: 'spring-boot-backend',
+    template_source: 'matched',
+    entity_kind: 'service',
+    entity_id: 'orders-api',
+    action: { action: 'create' },
+    detections: [makeDetection()],
+    ports: [8081],
+    proposal: {
+      entity: 'service',
+      service: makeRawService({ id: 'orders-api', name: undefined }),
+    },
+    warnings: [],
+    errors: [],
+    ...overrides,
+  };
+}
+
+/** Builds a valid bulk-import plan that creates two services. */
+export function makeBulkImportPlan(
+  overrides: Partial<BulkImportPlanView> = {},
+): BulkImportPlanView {
+  return {
+    workspace_id: 'demo',
+    revision: 'rev-1',
+    rows: [
+      makeBulkImportRow(),
+      makeBulkImportRow({
+        relative_path: 'frontend/admin-ui',
+        absolute_path: '/Users/dev/Projects/demo/frontend/admin-ui',
+        template: 'react-frontend',
+        entity_id: 'admin-ui',
+        ports: [3000],
+        proposal: {
+          entity: 'service',
+          service: makeRawService({
+            id: 'admin-ui',
+            name: undefined,
+            type: 'frontend',
+            path: 'frontend/admin-ui',
+            build_system: 'npm',
+            runtime: { type: 'node', version: '20.x' },
+            ports: [{ port: 3000 }],
+          }),
+        },
+      }),
+    ],
+    valid: true,
+    creates: 2,
+    updates: 0,
+    skips: 0,
+    rejects: 0,
+    preview: makeConfigurationPreview({
+      diff: {
+        added: [
+          { kind: 'service', id: 'orders-api', name: 'orders-api' },
+          { kind: 'service', id: 'admin-ui', name: 'admin-ui' },
+        ],
+        updated: [],
+        removed: [],
+      },
+    }),
+    warnings: [],
+    ...overrides,
+  };
+}
+
+/** Builds the result of committing a bulk import. */
+export function makeBulkImportCommit(
+  overrides: Partial<BulkImportCommitView> = {},
+): BulkImportCommitView {
+  return {
+    workspace_id: 'demo',
+    revision: 'rev-2',
+    created_services: ['orders-api', 'admin-ui'],
+    created_libraries: [],
+    updated: [],
+    skipped: [],
+    counts: makeConfigurationCounts({ services: 3 }),
+    ...overrides,
+  };
+}
+
+// -- migration and operation presets ------------------------------------------
+
+/** Builds a migration-preset summary (the read-only built-in status preset). */
+export function makeMigrationPresetSummary(
+  overrides: Partial<MigrationPresetSummaryView> = {},
+): MigrationPresetSummaryView {
+  return {
+    id: 'status',
+    name: 'Status',
+    description: 'Inspect pending changesets without changing the database.',
+    contexts: [],
+    read_only: true,
+    destructive: false,
+    allowed_environments: [],
+    builtin: true,
+    ...overrides,
+  };
+}
+
+/** The built-in migration presets as the daemon lists them. */
+export function makeMigrationPresetSummaries(): MigrationPresetSummaryView[] {
+  return [
+    makeMigrationPresetSummary(),
+    makeMigrationPresetSummary({
+      id: 'update',
+      name: 'Update',
+      description: 'Apply pending changesets.',
+      contexts: ['sql', 'data', 'onlyDev'],
+      read_only: false,
+      destructive: false,
+    }),
+    makeMigrationPresetSummary({
+      id: 'reset_local',
+      name: 'Reset local database',
+      description: 'Drop all objects and reapply every changeset.',
+      contexts: ['sql', 'data', 'onlyDev'],
+      read_only: false,
+      destructive: true,
+      allowed_environments: ['local'],
+    }),
+  ];
+}
+
+/** Builds a saved operation-preset summary. */
+export function makeOperationPresetSummary(
+  overrides: Partial<OperationPresetSummaryView> = {},
+): OperationPresetSummaryView {
+  return {
+    id: 'quick-local',
+    name: 'Quick local',
+    description: 'Sync, build, and restart the core services.',
+    workspace_id: 'demo',
+    default: true,
+    request: makeOperationPresetRequest(),
+    ...overrides,
+  };
+}
+
+/** The request a saved operation preset composes. */
+export function makeOperationPresetRequest(
+  overrides: Partial<PrepareEnvironmentInput> = {},
+): PrepareEnvironmentInput {
+  return {
+    workspace_id: 'demo',
+    services: ['orders-api', 'admin-ui'],
+    branch: 'main',
+    sync: true,
+    include_dependencies: true,
+    build_operation: 'build',
+    build: true,
+    start: false,
+    restart: true,
+    stop: false,
+    wait_for_health: true,
+    ...overrides,
   };
 }

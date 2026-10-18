@@ -47,7 +47,7 @@ use service_orchestrator_domain::{
 use service_orchestrator_execution::Cancellation;
 use service_orchestrator_process::{ExitReason, ProcessError, ProcessManager};
 
-use crate::context::MigrationContext;
+use crate::context::{MigrationContext, MigrationPresetInvocation};
 use crate::coordinator::DatabaseCoordinator;
 use crate::plan::MigrationPlan;
 use crate::provider::{BuildHost, SystemBuildHost};
@@ -230,6 +230,32 @@ impl MigrationManager {
         let environment = merged_environment(workspace, service, liquibase);
         let service_command = service.commands.get(&CommandKind::Liquibase).cloned();
 
+        // Resolve the named preset, if the caller selected one, from the
+        // *current* configuration: the task carries only its identifier, so a
+        // commit or a re-read is honoured and no authorization state is ever
+        // stored on the task (`tasks/032.md` §19, §21).
+        let preset = match &target.preset {
+            Some(id) => {
+                let preset =
+                    config
+                        .migration_preset(id)
+                        .ok_or_else(|| MigrationError::PresetNotFound {
+                            service: service_id.clone(),
+                            preset: id.clone(),
+                        })?;
+                Some(MigrationPresetInvocation {
+                    id: id.clone(),
+                    goals: preset.goals.clone(),
+                    contexts: preset.contexts.clone(),
+                    destructive: preset.destructive,
+                    read_only: preset.read_only,
+                    allowed_environments: preset.allowed_environments.clone(),
+                    timeout_seconds: preset.timeout_seconds,
+                })
+            }
+            None => None,
+        };
+
         Ok(MigrationContext {
             service_id: service_id.clone(),
             operation: target.operation,
@@ -238,6 +264,7 @@ impl MigrationManager {
             working_dir: target.path.clone(),
             workspace_root: target.workspace_root.clone(),
             commands: liquibase.commands.clone(),
+            preset,
             service_command,
             database: liquibase.database.clone(),
             environment,
@@ -253,12 +280,65 @@ impl MigrationManager {
     /// [`MigrationError::DatabaseTargetUnknown`] so the interface can prompt for
     /// the missing declaration (`tasks/011.md` §10, §27).
     ///
+    /// A named preset is revalidated here, immediately before planning or
+    /// execution: a destructive preset always requires explicit authorization —
+    /// even against a local database — and its `allowed_environments` list must
+    /// cover the target. The list never grants authorization by itself
+    /// (`tasks/032.md` §19).
+    ///
     /// # Errors
     ///
     /// Returns [`MigrationError::DatabaseTargetUnknown`] or
     /// [`MigrationError::DatabaseTargetNotAuthorized`] when a mutating operation
-    /// targets a non-local database the caller did not authorize.
+    /// targets a non-local database the caller did not authorize, and
+    /// [`MigrationError::PresetNotAllowed`] or
+    /// [`MigrationError::InvalidConfiguration`] when a selected preset does not
+    /// cover the target or the operation.
     pub fn check_safety(&self, context: &MigrationContext) -> Result<(), MigrationError> {
+        if let Some(preset) = &context.preset {
+            if preset.read_only && context.operation.is_mutating() {
+                return Err(MigrationError::InvalidConfiguration {
+                    service: context.service_id.clone(),
+                    message: format!(
+                        "migration preset '{}' is read-only and cannot run the '{}' operation",
+                        preset.id,
+                        context.operation.label()
+                    ),
+                });
+            }
+            if preset.destructive {
+                if !context.operation.is_mutating() {
+                    return Err(MigrationError::InvalidConfiguration {
+                        service: context.service_id.clone(),
+                        message: format!(
+                            "destructive migration preset '{}' requires a mutating operation",
+                            preset.id
+                        ),
+                    });
+                }
+                if !preset.allows_environment(&context.database.environment) {
+                    return Err(match &context.database.environment {
+                        MigrationTargetEnvironment::Unknown => {
+                            MigrationError::DatabaseTargetUnknown {
+                                service: context.service_id.clone(),
+                            }
+                        }
+                        environment => MigrationError::PresetNotAllowed {
+                            service: context.service_id.clone(),
+                            preset: preset.id.clone(),
+                            environment: environment.clone(),
+                        },
+                    });
+                }
+                if !context.non_local_authorized {
+                    return Err(MigrationError::DatabaseTargetNotAuthorized {
+                        service: context.service_id.clone(),
+                        environment: context.database.environment.clone(),
+                    });
+                }
+                return Ok(());
+            }
+        }
         if !context.operation.is_mutating() {
             return Ok(());
         }
@@ -543,6 +623,7 @@ environment = "local"
             workspace_id: WorkspaceId::new("acme").unwrap(),
             service_id: ServiceId::new("auth-service").unwrap(),
             operation,
+            preset: None,
             // `/tmp` exists on every supported platform, so a migration process
             // can actually be spawned; the build runner tests use the same.
             path: AbsolutePath::new("/tmp").unwrap(),

@@ -66,9 +66,23 @@ impl From<ApplicationError> for CommandError {
         // CONFIG_CONFLICT, CONFIG_ENTITY_NOT_FOUND, INSPECTION_FAILED, …)
         // rather than an outer variant name.
         match &error {
-            ApplicationError::RuntimeUnavailable { code, message }
-            | ApplicationError::Configuration { code, message }
-            | ApplicationError::RepositoryInspection { code, message } => {
+            ApplicationError::RuntimeUnavailable { code, message } => {
+                let mapped = Self::new(code.clone(), message.clone());
+                // A daemon from an older build answers new operations with
+                // `UNKNOWN_OPERATION`. The fix is to restart the daemon; say so
+                // instead of leaving the user with a cryptic "unknown
+                // operation" message.
+                if code == service_orchestrator_client::codes::UNKNOWN_OPERATION {
+                    return mapped.with_hint(
+                        "the running daemon is older than this application; run \
+                         `service-orchestrator daemon stop` and retry",
+                    );
+                }
+                return mapped;
+            }
+            ApplicationError::Configuration { code, message }
+            | ApplicationError::RepositoryInspection { code, message }
+            | ApplicationError::Discovery { code, message } => {
                 return Self::new(code.clone(), message.clone());
             }
             _ => {}
@@ -118,6 +132,22 @@ mod tests {
         };
         let command: CommandError = error.into();
         assert_eq!(command.code, codes::PROTOCOL_INCOMPATIBLE);
+    }
+
+    #[test]
+    fn an_old_daemon_is_reported_with_a_restart_hint() {
+        let error = ApplicationError::RuntimeUnavailable {
+            code: codes::UNKNOWN_OPERATION.to_owned(),
+            message: "the daemon does not recognize the operation 'discover_repositories'"
+                .to_owned(),
+        };
+        let command: CommandError = error.into();
+        assert_eq!(command.code, codes::UNKNOWN_OPERATION);
+        assert!(
+            command.message.contains("daemon stop"),
+            "the message tells the user how to recover: {}",
+            command.message
+        );
     }
 
     #[test]

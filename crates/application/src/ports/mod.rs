@@ -28,6 +28,7 @@
 
 pub(crate) mod artifact;
 pub(crate) mod build;
+pub(crate) mod discovery;
 pub(crate) mod git;
 pub(crate) mod health;
 pub(crate) mod logs;
@@ -44,6 +45,10 @@ pub use artifact::{
 pub use build::{
     parameter as build_parameter, BuildCapabilityIndex, BuildError, NullBuildCapabilityIndex,
     ResolvedBuildCommand, ResolvedBuildTarget,
+};
+pub use discovery::{
+    DetectionConfidence, DiscoveredRepository, DiscoveryError, DiscoveryReport, DiscoveryRequest,
+    NullRepositoryDiscovery, RepositoryDiscovery, TechnologyDetection,
 };
 pub use git::{
     parameter, DiffOptions, GitError, GitManager, GitOptions, NullGitManager, ResolvedRepository,

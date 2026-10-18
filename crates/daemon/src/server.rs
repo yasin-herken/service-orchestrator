@@ -407,6 +407,13 @@ async fn handle_request(
         service_orchestrator_client::ops::COMMIT_CONFIGURATION => {
             handle_commit_configuration(shared, out, request, same_user).await;
         }
+        // A bulk import is one atomic configuration commit over many entities;
+        // it takes the same write lock and broadcasts the same change event, so
+        // the TUI, the desktop app, and MCP all observe it
+        // (`tasks/032.md` §15, §42, §50).
+        service_orchestrator_client::ops::COMMIT_BULK_IMPORT => {
+            handle_commit_bulk_import(shared, out, request, same_user).await;
+        }
         // A reload re-reads the file and refreshes the cached snapshot.
         service_orchestrator_client::ops::RELOAD_CONFIGURATION => {
             handle_reload_configuration(shared, out, request).await;
@@ -513,6 +520,67 @@ async fn handle_commit_configuration(
             let _ = shared.config_events.send(ConfigurationChanged {
                 revision: commit.revision.clone(),
                 description: commit.description.clone(),
+            });
+            respond(out, &request, encode(commit)).await;
+        }
+        Err(error) => respond(out, &request, Err(error)).await,
+    }
+}
+
+/// Validates and persists a bulk import, then refreshes the daemon and
+/// broadcasts a change event.
+///
+/// The import is a single atomic [`ConfigRepository`](service_orchestrator_config::ConfigRepository)
+/// batch, so a partially imported workspace can never be observed; the refresh
+/// below makes the new entities visible to every interface before the response
+/// is written (`tasks/032.md` §15, §42).
+async fn handle_commit_bulk_import(
+    shared: &Arc<Shared>,
+    out: &mpsc::Sender<ServerMessage>,
+    request: RequestEnvelope,
+    same_user: bool,
+) {
+    let allow_destructive = dispatch::destructive_allowed(&request, same_user);
+    let authorization = if allow_destructive {
+        Authorization::allow_destructive()
+    } else {
+        Authorization::standard()
+    };
+    let decoded: Result<(service_orchestrator_application::BulkImportRequest, String), _> =
+        serde_json::from_value(request.params.clone());
+    let (import, revision) = match decoded {
+        Ok(decoded) => decoded,
+        Err(error) => {
+            respond(
+                out,
+                &request,
+                Err(unavailable(
+                    codes::INVALID_REQUEST,
+                    format!("invalid bulk import parameters: {error}"),
+                )),
+            )
+            .await;
+            return;
+        }
+    };
+
+    let mut application = shared.application.write().await;
+    // As with a single-entity commit, the import runs on an authorized clone
+    // that shares the configuration manager, so the shared core's snapshot is
+    // refreshed from the manager below (`tasks/015.md` §23).
+    let authorized = application.clone().with_authorization(authorization);
+    match authorized.commit_bulk_import(import, &revision) {
+        Ok(commit) => {
+            application.refresh_configuration();
+            drop(application);
+            let description = format!(
+                "imported {} service(s) and {} library(ies) in bulk",
+                commit.created_services.len(),
+                commit.created_libraries.len()
+            );
+            let _ = shared.config_events.send(ConfigurationChanged {
+                revision: commit.revision.clone(),
+                description,
             });
             respond(out, &request, encode(commit)).await;
         }

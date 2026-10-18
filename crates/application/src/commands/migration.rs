@@ -20,7 +20,8 @@
 //! cannot be bypassed with a hand-crafted task.
 
 use service_orchestrator_domain::{
-    MigrationOperation, Permission, ServiceId, TaskKind, WorkflowKind, WorkspaceId,
+    MigrationOperation, MigrationPresetId, MigrationTargetEnvironment, Permission, ServiceId,
+    TaskKind, WorkflowKind, WorkspaceId,
 };
 use service_orchestrator_execution::TaskDefinition;
 
@@ -187,9 +188,15 @@ impl Application {
     /// Resolves a workspace-aware migration target and its effective timeout.
     ///
     /// The returned target carries only identity and the working directory; the
-    /// provider, execution mode, commands, database target, and environment are
-    /// read from validated configuration by the migration adapter at execution
-    /// time, so no credential is ever stored on a task (`tasks/011.md` §11).
+    /// provider, execution mode, commands, preset, database target, and
+    /// environment are read from validated configuration by the migration
+    /// adapter at execution time, so no credential is ever stored on a task
+    /// (`tasks/011.md` §11).
+    ///
+    /// The effective preset is the service's configured
+    /// [`liquibase.preset`](service_orchestrator_config::LiquibaseConfig::preset):
+    /// a read-only preset never turns an apply into a status, so an explicit
+    /// apply falls back to the service's per-operation command instead.
     ///
     /// # Errors
     ///
@@ -202,7 +209,30 @@ impl Application {
         service_id: &ServiceId,
         operation: MigrationOperation,
     ) -> Result<(ResolvedMigrationTarget, u64), ApplicationError> {
-        self.resolve_migration_impl(service_id, operation, true)
+        self.resolve_migration_impl(service_id, operation, None, true)
+    }
+
+    /// Resolves a migration target with an explicit named preset.
+    ///
+    /// The preset overrides the service's configured default. A destructive
+    /// preset always requires [`Permission::Destructive`], and its
+    /// `allowed_environments` list must cover the service's declared database
+    /// environment; the list itself never grants authorization
+    /// (`tasks/032.md` §19).
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Application::resolve_migration`], plus an
+    /// [`ApplicationError::InvalidOperation`] when the preset is unknown,
+    /// incompatible with the operation, or not allowed for the target
+    /// environment.
+    pub(crate) fn resolve_migration_with_preset(
+        &self,
+        service_id: &ServiceId,
+        operation: MigrationOperation,
+        preset: &MigrationPresetId,
+    ) -> Result<(ResolvedMigrationTarget, u64), ApplicationError> {
+        self.resolve_migration_impl(service_id, operation, Some(preset), true)
     }
 
     /// Resolves a migration target *without* applying the permission policy.
@@ -218,7 +248,18 @@ impl Application {
         service_id: &ServiceId,
         operation: MigrationOperation,
     ) -> Result<(ResolvedMigrationTarget, u64), ApplicationError> {
-        self.resolve_migration_impl(service_id, operation, false)
+        self.resolve_migration_impl(service_id, operation, None, false)
+    }
+
+    /// Resolves a migration target with an explicit preset *without* applying
+    /// the permission policy; see [`Application::resolve_migration_target`].
+    pub(crate) fn resolve_migration_target_with_preset(
+        &self,
+        service_id: &ServiceId,
+        operation: MigrationOperation,
+        preset: &MigrationPresetId,
+    ) -> Result<(ResolvedMigrationTarget, u64), ApplicationError> {
+        self.resolve_migration_impl(service_id, operation, Some(preset), false)
     }
 
     /// Resolves a migration target, optionally enforcing the shared policy.
@@ -226,6 +267,7 @@ impl Application {
         &self,
         service_id: &ServiceId,
         operation: MigrationOperation,
+        preset: Option<&MigrationPresetId>,
         authorize: bool,
     ) -> Result<(ResolvedMigrationTarget, u64), ApplicationError> {
         let (workspace, service) = self.locate_service(service_id)?;
@@ -248,8 +290,21 @@ impl Application {
         })?;
         let path = self.absolute_entity_path(workspace, relative)?;
 
+        // The effective preset: an explicit selection overrides the service's
+        // configured default. A read-only default never silently turns an apply
+        // into a status operation.
+        let effective = match preset {
+            Some(preset) => Some(preset.clone()),
+            None if operation == MigrationOperation::Apply => config
+                .preset
+                .clone()
+                .filter(|id| !self.migration_preset_is_read_only(id)),
+            None => None,
+        };
+        let validated = self.validate_migration_preset(service_id, operation, config, effective)?;
+
         let non_local_authorized = if authorize {
-            self.authorize_migration(operation, config)?
+            self.authorize_migration(operation, config, validated.as_ref())?
         } else {
             false
         };
@@ -258,6 +313,7 @@ impl Application {
             workspace_id: workspace.workspace.id.clone(),
             service_id: service_id.clone(),
             operation,
+            preset: validated.as_ref().map(|preset| preset.id.clone()),
             path,
             workspace_root: workspace.workspace.root.clone(),
             non_local_authorized,
@@ -274,22 +330,89 @@ impl Application {
 
         let timeout = config
             .timeout_seconds
+            .or_else(|| validated.as_ref().and_then(|preset| preset.timeout_seconds))
             .unwrap_or_else(|| self.default_timeout_seconds());
         Ok((target, timeout))
     }
 
+    /// Returns `true` when a preset which may be configured on a service is
+    /// read-only. An unknown preset is never read-only: configuration
+    /// normalization already rejects an unknown reference, so this only
+    /// protects against a stale cache.
+    pub(crate) fn migration_preset_is_read_only(&self, preset: &MigrationPresetId) -> bool {
+        self.config()
+            .migration_preset(preset)
+            .is_some_and(|preset| preset.read_only)
+    }
+
+    /// Validates a preset against the operation and the service's declared
+    /// database environment.
+    ///
+    /// The rules mirror the configuration-level validation and are rechecked
+    /// here because a request may select a preset the service does not
+    /// configure: a read-only preset cannot mutate, a destructive preset
+    /// requires a mutating operation and an environment its
+    /// `allowed_environments` list covers, and the list never grants
+    /// authorization by itself (`tasks/032.md` §19).
+    fn validate_migration_preset(
+        &self,
+        service_id: &ServiceId,
+        operation: MigrationOperation,
+        config: &service_orchestrator_config::LiquibaseConfig,
+        preset: Option<MigrationPresetId>,
+    ) -> Result<Option<service_orchestrator_config::MigrationPreset>, ApplicationError> {
+        let Some(id) = preset else {
+            return Ok(None);
+        };
+        let preset = self.config().migration_preset(&id).ok_or_else(|| {
+            ApplicationError::invalid_operation(format!("migration preset '{id}' does not exist"))
+        })?;
+        if preset.read_only && operation.is_mutating() {
+            return Err(ApplicationError::invalid_operation(format!(
+                "migration preset '{id}' is read-only and cannot run the '{}' operation",
+                operation.label()
+            )));
+        }
+        if preset.destructive {
+            if !operation.is_mutating() {
+                return Err(ApplicationError::invalid_operation(format!(
+                    "destructive migration preset '{id}' requires a mutating operation"
+                )));
+            }
+            let environment = &config.database.environment;
+            if !preset.allows_environment(environment) {
+                return Err(ApplicationError::invalid_operation(format!(
+                    "migration preset '{id}' is not allowed for the '{environment}' database of service '{service_id}'{}",
+                    if *environment == MigrationTargetEnvironment::Unknown {
+                        ": the database target is not identified"
+                    } else {
+                        ""
+                    }
+                )));
+            }
+        }
+        Ok(Some(preset))
+    }
+
     /// Applies the permission a migration operation requires, returning whether
-    /// a non-local database target was explicitly authorized.
+    /// a destructive database operation was explicitly authorized.
+    ///
+    /// A destructive preset always requires [`Permission::Destructive`] — even
+    /// against a local database — because `dropAll` destroys objects regardless
+    /// of the environment's name (`tasks/032.md` §19).
     fn authorize_migration(
         &self,
         operation: MigrationOperation,
         config: &service_orchestrator_config::LiquibaseConfig,
+        preset: Option<&service_orchestrator_config::MigrationPreset>,
     ) -> Result<bool, ApplicationError> {
         if !operation.is_mutating() {
             self.authorize(Permission::Read)?;
             return Ok(false);
         }
-        if config.database.environment.requires_authorization() {
+        if preset.is_some_and(|preset| preset.destructive)
+            || config.database.environment.requires_authorization()
+        {
             self.authorize(Permission::Destructive)?;
             Ok(true)
         } else {

@@ -12,7 +12,7 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
-use crate::build::BuildSystem;
+use crate::build::{BuildOperation, BuildSystem};
 use crate::command::CommandSet;
 use crate::dependency::{Dependency, DependencyTarget};
 use crate::environment::Environment;
@@ -215,6 +215,10 @@ pub struct Library {
     /// adapter.
     #[serde(default)]
     pub build_system: Option<BuildSystem>,
+    /// The build operation used by default when no request overrides it
+    /// (`tasks/032.md` §3, §12).
+    #[serde(default)]
+    pub build_operation: Option<BuildOperation>,
     /// The library's dependencies. These must target other libraries.
     pub dependencies: Vec<Dependency>,
     /// The environment variables passed to the library's commands.
@@ -245,6 +249,7 @@ impl Library {
             runtimes: Vec::new(),
             commands: CommandSet::new(),
             build_system: None,
+            build_operation: None,
             dependencies: Vec::new(),
             environment: Environment::new(),
         })
@@ -315,6 +320,13 @@ impl Library {
     #[must_use]
     pub fn with_build_system(mut self, build_system: BuildSystem) -> Self {
         self.build_system = Some(build_system);
+        self
+    }
+
+    /// Sets the default build operation.
+    #[must_use]
+    pub const fn with_build_operation(mut self, operation: BuildOperation) -> Self {
+        self.build_operation = Some(operation);
         self
     }
 

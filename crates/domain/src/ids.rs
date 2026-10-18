@@ -159,6 +159,21 @@ define_id!(
     StepId,
     "workflow step"
 );
+define_id!(
+    /// Identifies a reusable service template (`tasks/032.md` §3).
+    TemplateId,
+    "service template"
+);
+define_id!(
+    /// Identifies a named migration preset (`tasks/032.md` §16).
+    MigrationPresetId,
+    "migration preset"
+);
+define_id!(
+    /// Identifies a saved bulk-operation preset (`tasks/032.md` §36).
+    OperationPresetId,
+    "operation preset"
+);
 
 #[cfg(test)]
 mod tests {
@@ -218,5 +233,13 @@ mod tests {
         let service = ServiceId::new("shared-name").unwrap();
         let task = TaskId::new("shared-name").unwrap();
         assert_eq!(service.as_str(), task.as_str());
+    }
+
+    #[test]
+    fn accepts_template_and_preset_identifiers() {
+        assert!(TemplateId::new("spring-boot-backend").is_ok());
+        assert!(MigrationPresetId::new("reset_local").is_ok());
+        assert!(OperationPresetId::new("sync-all-to-master").is_ok());
+        assert!(MigrationPresetId::new("reset local").is_err());
     }
 }

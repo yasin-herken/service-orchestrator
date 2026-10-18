@@ -1,10 +1,11 @@
-//! The real, read-only [`RepositoryInspector`] used by the composition root.
+//! The real, read-only [`RepositoryInspector`] the composition root wires into
+//! the application core.
 //!
-//! This adapter is the only place in the binary that reads a developer's
-//! repository directory for configuration purposes. It performs **reads only**:
-//! it never runs a build, a script, `npm install`, or a Git command, and it
-//! never writes (`tasks/023.md` §17, §20). Every observation is a *suggestion*
-//! for the service wizard, not a committed fact.
+//! This adapter is the only place that reads a developer's repository
+//! directory for inspection purposes. It performs **reads only**: it never runs
+//! a build, a script, `npm install`, or a Git command, and it never writes
+//! (`tasks/023.md` §17, §20). Every observation is a *suggestion* for the
+//! service wizard, not a committed fact.
 //!
 //! The logic is intentionally bounded. It reads well-known files (and at most a
 //! small prefix of any one of them), looks for `.git/HEAD` and `.git/config`,
@@ -45,7 +46,7 @@ const PROJECT_FILES: &[&str] = &[
 /// It reads a local directory through the standard library and produces the
 /// structured [`RepositoryInspection`] the application core consumes.
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct SystemRepositoryInspector;
+pub struct SystemRepositoryInspector;
 
 impl RepositoryInspector for SystemRepositoryInspector {
     fn inspect(&self, path: &str) -> Result<RepositoryInspection, RepositoryInspectionError> {
@@ -451,14 +452,14 @@ mod tests {
                 "dependencies":{"react":"^18.0.0"}}"#,
         )
         .expect("the manifest is written");
-        std::fs::write(dir.join(".nvmrc"), "20.19.4\n").expect("the nvmrc is written");
+        std::fs::write(dir.join(".nvmrc"), "20.x\n").expect("the nvmrc is written");
 
         let inspection = SystemRepositoryInspector
             .inspect(dir.to_str().expect("a path"))
             .expect("inspection succeeds");
         let node = inspection.node.clone().expect("Node metadata is detected");
         assert_eq!(node.name.as_deref(), Some("web-ui"));
-        assert_eq!(node.required_node_version.as_deref(), Some("20.19.4"));
+        assert_eq!(node.required_node_version.as_deref(), Some("20.x"));
         assert!(node.scripts.contains(&"build".to_owned()));
         assert!(node.react);
         assert_eq!(

@@ -27,8 +27,15 @@ import type {
   RawWorkspaceView,
 } from '../types/models';
 
-/** The entity kinds shown as tabs, in order. */
-type ConfigTab = EntityKindView;
+/**
+ * The entity kinds this screen edits directly.
+ *
+ * Templates and operation presets have dedicated screens so their domain
+ * guidance (variables, resolution preview, preset safety) is not duplicated
+ * here; migration presets are declared in the configuration file and validated
+ * by the daemon. The narrower union keeps the editor switch exhaustive.
+ */
+type ConfigTab = Exclude<EntityKindView, 'template' | 'migration_preset' | 'operation_preset'>;
 
 /** Human-readable tab labels. */
 const TAB_LABELS: Record<ConfigTab, string> = {
@@ -84,7 +91,11 @@ function scoped<T extends { workspace?: string }>(
  * newer configuration and a frontend confirmation is never treated as
  * authorization (`tasks/023.md` §30, §38, §47).
  */
-export function ConfigurationPage() {
+export function ConfigurationPage({
+  onNavigate,
+}: {
+  onNavigate?: (page: 'templates' | 'bulk-operations') => void;
+} = {}) {
   const { snapshot: connection } = useConnection();
   const connected = connection.state === 'connected';
   const {
@@ -483,6 +494,55 @@ export function ConfigurationPage() {
             )}
           </>
         )}
+      </div>
+
+      <div className="card">
+        <div className="card__header">
+          <div>
+            <h3 className="card__title">Templates and presets</h3>
+            <p className="muted">
+              These configuration entities are declared in the same file and committed through
+              the same revision-checked manager, but they have dedicated screens.
+            </p>
+          </div>
+        </div>
+        <dl className="detail-grid">
+          <div>
+            <dt>Service templates</dt>
+            <dd>{snapshot?.templates.length ?? 0}</dd>
+          </div>
+          <div>
+            <dt>Migration presets</dt>
+            <dd>{snapshot?.migration_presets.length ?? 0}</dd>
+          </div>
+          <div>
+            <dt>Operation presets</dt>
+            <dd>
+              {snapshot?.operation_presets.filter(
+                (preset) =>
+                  preset.workspace === undefined || preset.workspace === activeWorkspaceId,
+              ).length ?? 0}
+            </dd>
+          </div>
+        </dl>
+        {onNavigate ? (
+          <div className="detail-actions">
+            <button
+              type="button"
+              className="button button--small"
+              onClick={() => onNavigate('templates')}
+            >
+              Open Templates
+            </button>
+            <button
+              type="button"
+              className="button button--small"
+              onClick={() => onNavigate('bulk-operations')}
+            >
+              Open Bulk Operations
+            </button>
+          </div>
+        ) : null}
       </div>
 
       {editor?.kind === 'workspace' ? (

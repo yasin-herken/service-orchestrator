@@ -5,6 +5,9 @@ import type {
   BranchView,
   BuildCapabilitiesView,
   BuildTargetSummary,
+  BulkImportCommitView,
+  BulkImportInputView,
+  BulkImportPlanView,
   BulkSummaryView,
   ConfigChangeView,
   ConfigurationChangedEvent,
@@ -15,6 +18,7 @@ import type {
   ConfigurationValidationView,
   ConnectionSnapshot,
   DaemonStatus,
+  DiscoveryScanInputView,
   EnvironmentPlanView,
   GitStatusView,
   GitSyncMode,
@@ -26,12 +30,15 @@ import type {
   LibrarySummary,
   LogPageView,
   LogStreamEvent,
+  MigrationPresetSummaryView,
   MigrationRowView,
   MigrationStatusView,
   OperationOutcome,
+  OperationPresetSummaryView,
   PrepareEnvironmentInput,
   ProfileView,
   ProjectSuggestionView,
+  RepositoryDiscoveryReportView,
   RepositoryInspectionView,
   RepositoryProbeView,
   RepositorySummary,
@@ -208,6 +215,24 @@ export const mockDesktopApi = {
   reloadConfiguration: vi.fn<() => Promise<ConfigurationReloadView>>(),
   inspectRepository: vi.fn<(path: string) => Promise<RepositoryProbeView>>(),
   detectProjectConfiguration: vi.fn<(path: string) => Promise<ProjectSuggestionView>>(),
+  discoverRepositories: vi.fn<
+    (input: DiscoveryScanInputView) => Promise<RepositoryDiscoveryReportView>
+  >(),
+  planBulkImport: vi.fn<(input: BulkImportInputView) => Promise<BulkImportPlanView>>(),
+  commitBulkImport: vi.fn<
+    (
+      input: BulkImportInputView,
+      expectedRevision: string,
+      confirmed: boolean,
+    ) => Promise<BulkImportCommitView>
+  >(),
+  listMigrationPresets: vi.fn<() => Promise<MigrationPresetSummaryView[]>>(),
+  listOperationPresets: vi.fn<
+    (workspaceId?: string) => Promise<OperationPresetSummaryView[]>
+  >(),
+  getOperationPresetRequest: vi.fn<
+    (workspaceId: string, presetId: string) => Promise<PrepareEnvironmentInput>
+  >(),
   getConnectionState: vi.fn<() => Promise<ConnectionSnapshot>>(),
   onConnectionChanged: vi.fn<(handler: ConnectionHandler) => Promise<() => void>>(
     subscribeConnections,

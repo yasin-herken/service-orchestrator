@@ -120,7 +120,7 @@ loading (`config`) builds the `Workspace`; the domain validates it.
 | `kind` | `ServiceType`: `Backend`, `Frontend`, `Library`, `Other`. |
 | `repository` | Optional `Repository` (URL, local path, default branch, provider). |
 | `path` | Optional workspace-relative `RelativePath`. |
-| `runtimes` | Required `Runtime`s (for example Java 21, Node 20.19.4). |
+| `runtimes` | Required `Runtime`s (for example Java 21, Node 20.x). |
 | `commands` | `CommandSet` of structured commands. |
 | `dependencies` | `Dependency` references to services and libraries. |
 | `health_checks` | `HealthCheck`s to run against the service. |

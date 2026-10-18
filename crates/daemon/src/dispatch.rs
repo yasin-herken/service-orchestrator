@@ -13,14 +13,15 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use serde_json::Value;
 use service_orchestrator_application::{
-    Application, ApplicationError, Authorization, HealthCheckScope, LibraryPrepareOptions,
-    LogRequest, PrepareEnvironmentRequest, PrepareSelectedLibrariesRequest,
+    Application, ApplicationError, Authorization, BulkImportRequest, DiscoveryScanRequest,
+    HealthCheckScope, LibraryPrepareOptions, LogRequest, PrepareEnvironmentRequest,
+    PrepareSelectedLibrariesRequest,
 };
 use service_orchestrator_client::ops;
 use service_orchestrator_client::{codes, unavailable, DiffParams, RequestEnvelope};
 use service_orchestrator_config::ConfigChange;
 use service_orchestrator_domain::{
-    Branch, GroupId, LibraryId, ProfileId, ServiceId, TaskId, WorkspaceId,
+    Branch, GroupId, LibraryId, OperationPresetId, ProfileId, ServiceId, TaskId, WorkspaceId,
 };
 use service_orchestrator_execution::{clamp_task_limit, TaskEngine, MAX_TASK_LIST_LIMIT};
 
@@ -106,6 +107,27 @@ pub(crate) async fn route(
         ops::DETECT_PROJECT_CONFIGURATION => {
             let (path,): (String,) = decode(params)?;
             encode(app.detect_project_configuration(&path)?)
+        }
+
+        // -- bulk import and saved presets ----------------------------------
+        // The bulk-import commit is handled by the server, which owns the write
+        // lock and the change-event broadcast (`tasks/032.md` §15, §42).
+        ops::DISCOVER_REPOSITORIES => {
+            let (request,): (DiscoveryScanRequest,) = decode(params)?;
+            encode(app.discover_repositories(request)?)
+        }
+        ops::PLAN_BULK_IMPORT => {
+            let (request,): (BulkImportRequest,) = decode(params)?;
+            encode(app.plan_bulk_import(request)?)
+        }
+        ops::LIST_MIGRATION_PRESETS => encode(app.list_migration_presets()?),
+        ops::LIST_OPERATION_PRESETS => {
+            let (workspace,): (Option<WorkspaceId>,) = decode(params)?;
+            encode(app.list_operation_presets(workspace.as_ref())?)
+        }
+        ops::OPERATION_PRESET_REQUEST => {
+            let (workspace, preset): (WorkspaceId, OperationPresetId) = decode(params)?;
+            encode(app.operation_preset_request(&workspace, &preset)?)
         }
 
         // -- workspaces, groups, profiles ----------------------------------

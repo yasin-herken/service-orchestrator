@@ -18,6 +18,7 @@
 //! emitted by [`state::AppState`].
 
 pub mod build;
+pub mod bulk;
 mod commands;
 pub mod configuration;
 pub mod connection;
@@ -172,6 +173,12 @@ pub fn run() {
             commands::reload_configuration,
             commands::inspect_repository_path,
             commands::detect_project_configuration,
+            commands::discover_repositories,
+            commands::plan_bulk_import,
+            commands::commit_bulk_import,
+            commands::list_migration_presets,
+            commands::list_operation_presets,
+            commands::get_operation_preset_request,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build the desktop application")

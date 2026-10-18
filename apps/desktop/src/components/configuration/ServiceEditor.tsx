@@ -384,7 +384,7 @@ export function ServiceEditor({
               <input
                 className="input"
                 value={nodeVersion}
-                placeholder="20.19.4"
+                placeholder="20.x"
                 onChange={(event) => setNodeVersion(event.target.value)}
               />
             </label>
