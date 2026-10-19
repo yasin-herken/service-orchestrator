@@ -34,6 +34,7 @@ go wrong.
 | [`health.md`](health.md) | Process, TCP, and HTTP checks, readiness, health status, common failures. |
 | [`logs-and-diagnostics.md`](logs-and-diagnostics.md) | Service, task, and workflow logs; filtering, paging, retention, redaction. |
 | [`workflows.md`](workflows.md) | Prepare Environment, profiles, groups, dependency resolution, planning, cancellation. |
+| [`workspace-control-center.md`](workspace-control-center.md) | The desktop default landing screen: selection, inline operations, advanced overrides, plan, execution, progress, results, and reconnection. |
 | [`bulk-operations.md`](bulk-operations.md) | The unified bulk operations screen, phase options, saved presets, and results. |
 | [`service-templates.md`](service-templates.md) | Reusable service/library defaults, template variables, and automatic matching. |
 | [`bulk-service-import.md`](bulk-service-import.md) | Bounded discovery, the ten-step import wizard, overrides, and atomic commit. |

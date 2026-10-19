@@ -76,6 +76,15 @@ pub struct PrepareEnvironmentInput {
     pub branch: Option<String>,
     /// Whether to synchronize repositories. Defaults to `true`.
     pub sync: bool,
+    /// Whether to fetch each repository. Defaults to `true`; effective only
+    /// when `sync` is enabled.
+    pub git_fetch: bool,
+    /// Whether to check out a branch. Defaults to `true`; effective only when
+    /// `sync` is enabled.
+    pub git_checkout: bool,
+    /// Whether to fast-forward pull each repository. Defaults to `true`;
+    /// effective only when `sync` is enabled.
+    pub git_pull: bool,
     /// Whether to include the transitive required dependency closure.
     /// Defaults to `true`.
     pub include_dependencies: bool,
@@ -106,6 +115,9 @@ pub struct PrepareEnvironmentInput {
     pub stop: bool,
     /// Whether to wait for health after starting. Defaults to `true`.
     pub wait_for_health: bool,
+    /// Whether to run configured health checks without starting services.
+    /// Defaults to `false`; mutually exclusive with `stop`.
+    pub health_checks: bool,
 }
 
 impl Default for PrepareEnvironmentInput {
@@ -117,6 +129,9 @@ impl Default for PrepareEnvironmentInput {
             group: None,
             branch: None,
             sync: true,
+            git_fetch: true,
+            git_checkout: true,
+            git_pull: true,
             include_dependencies: true,
             build_libraries: false,
             run_liquibase: false,
@@ -127,6 +142,7 @@ impl Default for PrepareEnvironmentInput {
             restart: false,
             stop: false,
             wait_for_health: true,
+            health_checks: false,
         }
     }
 }
@@ -212,6 +228,9 @@ pub fn build_request(
         group,
         branch,
         sync: input.sync,
+        git_fetch: input.git_fetch,
+        git_checkout: input.git_checkout,
+        git_pull: input.git_pull,
         include_dependencies: input.include_dependencies,
         build_libraries: input.build_libraries,
         run_liquibase: input.run_liquibase,
@@ -222,6 +241,7 @@ pub fn build_request(
         restart: input.restart,
         stop: input.stop,
         wait_for_health: input.wait_for_health,
+        health_checks: input.health_checks,
     })
 }
 
@@ -508,21 +528,29 @@ mod tests {
     fn safe_defaults_are_sync_only() {
         let defaults = PrepareEnvironmentInput::default();
         assert!(defaults.sync);
+        assert!(defaults.git_fetch);
+        assert!(defaults.git_checkout);
+        assert!(defaults.git_pull);
         assert!(defaults.include_dependencies);
         assert!(defaults.wait_for_health);
         assert!(!defaults.run_liquibase);
         assert!(!defaults.build);
         assert!(!defaults.build_libraries);
         assert!(!defaults.start);
+        assert!(!defaults.health_checks);
         assert_eq!(defaults.branch, None);
 
         let request = build_request(&input()).expect("a valid request");
         assert!(request.sync);
+        assert!(request.git_fetch);
+        assert!(request.git_checkout);
+        assert!(request.git_pull);
         assert!(request.include_dependencies);
         assert!(request.wait_for_health);
         assert!(!request.run_liquibase, "migrations are never a default");
         assert!(!request.build);
         assert!(!request.start);
+        assert!(!request.health_checks);
         assert_eq!(request.branch, None);
     }
 
@@ -531,24 +559,32 @@ mod tests {
         let request = build_request(&PrepareEnvironmentInput {
             branch: Some("develop".to_owned()),
             sync: false,
+            git_fetch: false,
+            git_checkout: false,
+            git_pull: false,
             include_dependencies: false,
             build_libraries: true,
             run_liquibase: true,
             build: true,
             start: true,
             wait_for_health: false,
+            health_checks: true,
             ..input()
         })
         .expect("a valid request");
 
         assert_eq!(request.branch.expect("a branch").to_string(), "develop");
         assert!(!request.sync);
+        assert!(!request.git_fetch);
+        assert!(!request.git_checkout);
+        assert!(!request.git_pull);
         assert!(!request.include_dependencies);
         assert!(request.build_libraries);
         assert!(request.run_liquibase);
         assert!(request.build);
         assert!(request.start);
         assert!(!request.wait_for_health);
+        assert!(request.health_checks);
     }
 
     #[test]

@@ -2,9 +2,10 @@
 
 The desktop GUI is the graphical interface to Service Orchestrator
 (`tasks/018.md`, `tasks/019.md`, `tasks/020.md`, `tasks/021.md`,
-`tasks/022.md`, `tasks/023.md`, `tasks/032.md`). It is a Tauri 2 application — a
-React + TypeScript frontend (`apps/desktop`) inside a native macOS window, with a
-small Rust adapter crate (`apps/desktop/src-tauri`) behind it.
+`tasks/022.md`, `tasks/023.md`, `tasks/032.md`, `tasks/033.md`). It is a Tauri
+2 application — a React + TypeScript frontend (`apps/desktop`) inside a native
+macOS window, with a small Rust adapter crate (`apps/desktop/src-tauri`) behind
+it.
 
 It is an **interface**, exactly like the Ratatui TUI and the MCP server:
 
@@ -26,8 +27,10 @@ This document covers the shell, the dashboard, **service lifecycle
 management** (`tasks/019.md`), **Git, build, and library management**
 (`tasks/020.md`), **migration, task, health, and logs management**
 (`tasks/021.md`), **workflow management and profiles** (`tasks/022.md`),
-**configuration management** (`tasks/023.md`), and **template-based bulk
-service import plus the unified bulk operations dashboard** (`tasks/032.md`):
+**configuration management** (`tasks/023.md`), **template-based bulk
+service import plus the unified bulk operations dashboard** (`tasks/032.md`),
+and the **Workspace Control Center**, the default landing screen that composes
+the existing environment workflow on one page (`tasks/033.md`):
 listing and selecting services, repositories, build targets,
 libraries, and migration targets; start/stop/restart; Git
 fetch/pull/checkout/sync (single and bulk) with a read-only preview; single and
@@ -47,6 +50,7 @@ realtime refresh; and confirmation/error handling.
 | Delivered | Not yet delivered |
 | --- | --- |
 | Application shell: sidebar, header, workspace selector | Docker and Kubernetes targets |
+| Workspace Control Center: default landing screen, selection, inline operations, plan, execution, progress, results (`tasks/033.md`) | |
 | Dashboard: real workspace/daemon counters, task activity feed | Automatic updates |
 | Services table: state, health, branch, port, last operation | Destructive Git operations (`git reset`, `git clean`, force stop) |
 | Multi-selection with stable ids, select-all-visible, by type/state | Automatic Maven POM rewriting or version changes |
@@ -110,8 +114,9 @@ apps/desktop/
 │   │   ├── configuration/     # entity editors (workspace, service, library, profile, group)
 │   │   ├── template/          # TemplateEditor, TemplatePreviewDialog, ResolvedEntity
 │   │   ├── bulk-import/       # wizard steps, repository table, detections, overrides, review
-│   │   └── bulk-operations/   # service picker, options, preset editor
-│   ├── pages/                 # Dashboard, Services, Git, Builds, Libraries, Migrations, Workflows, Bulk Operations, Bulk Import, Templates, Tasks, Logs, Health, Configuration, placeholders
+│   │   ├── bulk-operations/   # service picker, options, preset editor
+│   │   └── control-center/    # service picker, inline operations, advanced settings, library tools, log dialogs
+│   ├── pages/                 # Workspace Control Center, Dashboard, Services, Git, Builds, Libraries, Migrations, Workflows, Bulk Operations, Bulk Import, Templates, Tasks, Logs, Health, Configuration, placeholders
 │   └── styles/global.css      # light + dark via prefers-color-scheme
 └── src-tauri/
     ├── Cargo.toml             # its own workspace; excluded from the root one
@@ -1048,6 +1053,8 @@ three screens use **one** task-monitoring implementation, not three:
 | `Enter` | a focused entity row | open the detail panel |
 | `Space` / `Enter` | a focused row with no selection (Tasks, Health) | open the detail panel |
 | `Space` / `Enter` | a focused button | activate it |
+| `⌘K` / `Ctrl+K` | Workspace Control Center | open the service picker |
+| `⌘Enter` / `Ctrl+Enter` | Workspace Control Center | run the current configuration |
 | `Esc` | any dialog | close it (cancel) |
 
 Checkboxes and buttons are native, labelled controls, so screen readers announce
@@ -1165,6 +1172,15 @@ Frontend (`apps/desktop`):
   confirmation, partial-success results, bounded history, workspace-scope
   reset, plan failures, and the daemon-disconnect behaviour that disables
   execution while preserving the workflow id.
+- `tasks/033.md` coverage (`pages/control-center-page.test.tsx`,
+  `components/control-center/model.test.ts`): the Control Center as the default
+  screen, searchable/kind-filtered selection that preserves checks, profile
+  selection, multi-selection, operation toggles, branch/build/preset overrides,
+  advanced settings with read-only configuration, read-only planning and stale
+  plans, one-request execution, destructive authorization, quick actions,
+  inline progress and task logs, cancellation, inline terminal results,
+  reconnection without replay, restoring saved state without executing, and
+  request/quick-action/normalization helpers.
 - `tasks/024.md` coverage: task-event ordering and terminal-state freezing
   (`context/taskEvents.test.tsx` — a late progress frame and a duplicate
   terminal event leave a settled task and its `terminalRevision` unchanged);
@@ -1420,3 +1436,71 @@ editing is disabled, the loaded snapshot is kept, and nothing is written locally
 After a successful commit the screen refreshes, and because the daemon broadcasts
 a `configuration` event, every other screen (and other clients) converges on the
 same configuration.
+
+---
+
+## 29. Workspace Control Center (`tasks/033.md`)
+
+The Workspace Control Center is the **default landing screen** and the
+everyday one-screen workflow. It keeps every existing screen intact and adds no
+second execution path: it composes the same `prepare_environment` workflow the
+Workflows screen uses, through the same typed desktop API and shared daemon.
+
+### Layout
+
+1. **Overview** — active workspace, service count, connection banner, and
+   quick actions (Git Sync Only, Build Only, Start Only, Stop Only, Restart
+   Only, Health Check Only, Full Prepare Environment).
+2. **Selected services** — applied selection with name, kind, process state,
+   and health state.
+3. **Operation configuration** — inline Git fetch/checkout/fast-forward pull
+   and target branch, library build plus on-demand library tools, Liquibase
+   preset, build operation, exclusive runtime action, and health checks.
+4. **Plan & run** — **Preview plan** and **Prepare & Run** with the daemon's
+   read-only plan rendered inline.
+5. **Progress** — workflow id, phase, aggregate and per-phase counts,
+   per-service task state, task logs, and cancellation.
+6. **Results** — the daemon's terminal result, structured failures, task ids,
+   per-service tasks, and final runtime/health re-read from the daemon.
+
+### Selection
+
+The picker (`⌘K` / `Ctrl+K`) supports search, kind filters, select all/visible,
+clear, profiles, groups, and multi-selection over stable workspace-scoped ids.
+Filtering never changes the selection; dependencies are resolved by the plan,
+not by the picker.
+
+### Operations and overrides
+
+Every inline control maps to a real request field. Irrelevant controls are
+hidden, not faked. **Advanced settings…** edits only request overrides
+(dependency inclusion, readiness, build operation, migration preset); values
+owned by service configuration are shown read-only with secrets masked. Nothing
+is persisted as configuration.
+
+### Flow
+
+Previewing calls `plan_prepare_environment` and changes nothing. **Prepare &
+Run**, and every quick action, builds the same request, plans it, asks for an
+extra acknowledgement only when the plan contains a protected operation, and
+submits exactly one `prepare_environment` workflow. Execution re-plans and
+re-authorizes in the daemon.
+
+### Progress, results, and reconnection
+
+Progress and results poll the daemon through `useWorkflowRun` and the task
+engine; no terminal state is invented locally. Cancellation uses the daemon's
+`cancel_workflow` and preserves completed work. On disconnection, mutating
+actions are disabled, the selection/options/plan/workflow id are preserved, and
+a safe reconnect resumes observation without replaying any operation. If the
+workspace cannot be read because the daemon is unreachable, the screen says it
+is waiting for the connection instead of claiming no workspace exists.
+
+### Saved state
+
+The last active workspace and its selection and options are stored in versioned
+local storage (`service-orchestrator.control-center.v1`). Restoring them is
+inert; no plan, workflow id, credential, secret, or authorization is stored.
+
+See [`workspace-control-center.md`](workspace-control-center.md) for the full
+screen reference, safety rules, and keyboard shortcuts.

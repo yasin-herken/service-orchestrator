@@ -46,11 +46,14 @@ export function WorkflowProgress({
   status,
   tasks,
   startedAt,
+  onOpenTask,
 }: {
   status: WorkflowStatusView;
   tasks: readonly TaskView[];
   /** The wall-clock second the GUI started observing, for elapsed time. */
   startedAt: number;
+  /** Opens a task's bounded logs without leaving the current screen. */
+  onOpenTask?: (taskId: string) => void;
 }) {
   const counts = countByStatus(tasks);
   const elapsed =
@@ -147,6 +150,16 @@ export function WorkflowProgress({
               <span className="muted">
                 {task.duration_ms !== null ? formatMillis(task.duration_ms) : ''}
               </span>
+              {onOpenTask ? (
+                <button
+                  type="button"
+                  className="button button--small"
+                  onClick={() => onOpenTask(task.id)}
+                  aria-label={`Open logs for ${task.id}`}
+                >
+                  Logs
+                </button>
+              ) : null}
               {task.failure ? (
                 <span className="workflow-progress__failure">
                   {task.failure.code}: {task.failure.message}

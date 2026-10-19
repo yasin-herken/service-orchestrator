@@ -117,10 +117,32 @@ pub struct PrepareEnvironmentRequest {
     /// An optional branch to check out before building.
     #[serde(default)]
     pub branch: Option<Branch>,
-    /// Whether to synchronize repositories (fetch, optional checkout,
-    /// fast-forward pull). Defaults to `true`.
+    /// Whether to synchronize repositories. Defaults to `true`. This is the
+    /// master switch for the Git phase: when disabled, none of
+    /// [`git_fetch`](Self::git_fetch), [`git_checkout`](Self::git_checkout), or
+    /// [`git_pull`](Self::git_pull) schedules a task, even if they are set.
     #[serde(default = "default_true")]
     pub sync: bool,
+    /// Whether to fetch each selected repository. Defaults to `true` and has an
+    /// effect only when [`sync`](Self::sync) is enabled.
+    ///
+    /// When fetch, checkout, and pull are all enabled and no
+    /// [`branch`](Self::branch) override is set, the core keeps one `GitSync`
+    /// step per repository (fetch → configured default branch → fast-forward).
+    /// A more selective request composes the individual Git steps instead.
+    #[serde(default = "default_true")]
+    pub git_fetch: bool,
+    /// Whether to check out a branch. Defaults to `true` and has an effect only
+    /// when [`sync`](Self::sync) is enabled. The target is
+    /// [`branch`](Self::branch) when set, otherwise each repository's configured
+    /// default branch. The working tree is never discarded: a dirty checkout is
+    /// refused by the Git manager.
+    #[serde(default = "default_true")]
+    pub git_checkout: bool,
+    /// Whether to fast-forward pull each selected repository. Defaults to
+    /// `true` and has an effect only when [`sync`](Self::sync) is enabled.
+    #[serde(default = "default_true")]
+    pub git_pull: bool,
     /// Whether to include the transitive closure of required service and library
     /// dependencies. Defaults to `true`.
     #[serde(default = "default_true")]
@@ -164,6 +186,18 @@ pub struct PrepareEnvironmentRequest {
     /// [`restart`](Self::restart) is set.
     #[serde(default = "default_true")]
     pub wait_for_health: bool,
+    /// Whether to run the selected services' configured health checks even when
+    /// they are not started. Defaults to `false`.
+    ///
+    /// This is the standalone form used by "Health Check Only": it schedules
+    /// one `HealthCheck` step per participating service that declares checks.
+    /// When services are also started and [`wait_for_health`](Self::wait_for_health)
+    /// is enabled, the post-start health steps already satisfy the request and
+    /// are never duplicated. Health checks are read-only and are mutually
+    /// exclusive with [`stop`](Self::stop), because checking a service while it
+    /// is being shut down would report an ambiguous state.
+    #[serde(default)]
+    pub health_checks: bool,
 }
 
 /// The `serde` default for boolean options that default to `true`.
@@ -185,6 +219,9 @@ impl PrepareEnvironmentRequest {
             group: None,
             branch: None,
             sync: true,
+            git_fetch: true,
+            git_checkout: true,
+            git_pull: true,
             include_dependencies: true,
             build_libraries: false,
             run_liquibase: false,
@@ -195,6 +232,7 @@ impl PrepareEnvironmentRequest {
             restart: false,
             stop: false,
             wait_for_health: true,
+            health_checks: false,
         }
     }
 
@@ -233,6 +271,27 @@ impl PrepareEnvironmentRequest {
     #[must_use]
     pub const fn with_sync(mut self, sync: bool) -> Self {
         self.sync = sync;
+        self
+    }
+
+    /// Enables or disables the fetch half of Git synchronization.
+    #[must_use]
+    pub const fn with_git_fetch(mut self, fetch: bool) -> Self {
+        self.git_fetch = fetch;
+        self
+    }
+
+    /// Enables or disables the checkout half of Git synchronization.
+    #[must_use]
+    pub const fn with_git_checkout(mut self, checkout: bool) -> Self {
+        self.git_checkout = checkout;
+        self
+    }
+
+    /// Enables or disables the fast-forward pull half of Git synchronization.
+    #[must_use]
+    pub const fn with_git_pull(mut self, pull: bool) -> Self {
+        self.git_pull = pull;
         self
     }
 
@@ -314,6 +373,20 @@ impl PrepareEnvironmentRequest {
     #[must_use]
     pub const fn with_wait_for_health(mut self, wait: bool) -> Self {
         self.wait_for_health = wait;
+        self
+    }
+
+    /// Enables standalone health checks even when services are not started.
+    #[must_use]
+    pub const fn health_checks(mut self) -> Self {
+        self.health_checks = true;
+        self
+    }
+
+    /// Enables or disables standalone health checks.
+    #[must_use]
+    pub const fn with_health_checks(mut self, checks: bool) -> Self {
+        self.health_checks = checks;
         self
     }
 }

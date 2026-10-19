@@ -1468,6 +1468,12 @@ export interface PrepareEnvironmentInput {
   branch?: string;
   /** Synchronize repositories first. Defaults to `true`. */
   sync?: boolean;
+  /** Fetch each repository. Defaults to `true`; effective only when `sync` is on. */
+  git_fetch?: boolean;
+  /** Check out the target or configured default branch. Defaults to `true`. */
+  git_checkout?: boolean;
+  /** Fast-forward pull each repository. Defaults to `true`. */
+  git_pull?: boolean;
   /** Include the required dependency closure. Defaults to `true`. */
   include_dependencies?: boolean;
   /** Build the required libraries. Defaults to `false`. */
@@ -1488,6 +1494,8 @@ export interface PrepareEnvironmentInput {
   stop?: boolean;
   /** Wait for health after starting. Defaults to `true`. */
   wait_for_health?: boolean;
+  /** Run configured health checks without starting services. Defaults to `false`. */
+  health_checks?: boolean;
 }
 
 // -- repository discovery and bulk import -------------------------------------

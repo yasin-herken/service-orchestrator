@@ -28,9 +28,23 @@ function statCard(container: HTMLElement, label: string): HTMLElement {
   return card as HTMLElement;
 }
 
+/**
+ * Renders the app and opens the Dashboard.
+ *
+ * The Control Center is the default landing screen (`tasks/033.md`), so these
+ * dashboard assertions navigate there explicitly.
+ */
+async function renderDashboard() {
+  const view = await renderApp();
+  const user = userEvent.setup();
+  await user.click(screen.getByRole('button', { name: 'Dashboard' }));
+  await flush();
+  return view;
+}
+
 describe('dashboard', () => {
   it('derives counts from real workspace status data', async () => {
-    const view = await renderApp();
+    const view = await renderDashboard();
 
     expect(statCard(view.container, 'Active workspace')).toHaveTextContent('Demo Platform');
     expect(statCard(view.container, 'Active workspace')).toHaveTextContent(
@@ -43,7 +57,7 @@ describe('dashboard', () => {
   });
 
   it('shows real daemon status details', async () => {
-    const view = await renderApp();
+    const view = await renderDashboard();
 
     expect(view.container).toHaveTextContent('4242');
     expect(view.container).toHaveTextContent('v1');
@@ -73,7 +87,7 @@ describe('dashboard', () => {
       ]),
     );
 
-    const view = await renderApp();
+    const view = await renderDashboard();
     await waitFor(() =>
       expect(statCard(view.container, 'Unhealthy')).toHaveTextContent('1'),
     );
@@ -87,7 +101,7 @@ describe('dashboard', () => {
     });
 
     const user = userEvent.setup();
-    await renderApp();
+    await renderDashboard();
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent("workspace 'demo' does not exist");
@@ -105,7 +119,7 @@ describe('dashboard', () => {
     });
 
     const user = userEvent.setup();
-    await renderApp();
+    await renderDashboard();
 
     const alert = await screen.findByRole('alert');
     expect(alert).toHaveTextContent('the daemon is not running');
@@ -118,7 +132,7 @@ describe('dashboard', () => {
   it('shows an empty state when no workspace is configured', async () => {
     mockDesktopApi.listWorkspaces.mockResolvedValue([]);
 
-    await renderApp();
+    await renderDashboard();
     expect(await screen.findByText('No workspaces configured')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
@@ -128,7 +142,7 @@ describe('dashboard', () => {
       makeDisconnected('the daemon is not running'),
     );
 
-    await renderApp();
+    await renderDashboard();
     expect(await screen.findByRole('alert')).toHaveTextContent(
       'the daemon is not running',
     );
@@ -139,7 +153,7 @@ describe('dashboard', () => {
   });
 
   it('renders live task activity forwarded from the daemon', async () => {
-    await renderApp();
+    await renderDashboard();
 
     act(() => emitTaskEvent({ TaskStarted: { id: 'task-1', kind: 'start_service' } }));
     await flush();
@@ -149,7 +163,7 @@ describe('dashboard', () => {
   });
 
   it('renders failure details in the activity feed', async () => {
-    await renderApp();
+    await renderDashboard();
 
     act(() =>
       emitTaskEvent({

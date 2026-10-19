@@ -95,6 +95,7 @@ export function WorkflowResults({
             {status.failures.map((failure) => (
               <li key={failure.task_id} className="workflow-results__failure">
                 <span className="error-details__code">{failure.code}</span>
+                <span className="detail-grid__mono">{failure.task_id}</span>
                 <span>
                   {failure.service ?? failure.library ?? '—'} · {failure.kind}
                 </span>
@@ -121,6 +122,7 @@ export function WorkflowResults({
                 {task.service_id ?? task.library_id ?? '—'}
               </span>
               <span className="workflow-progress__kind">{task.kind}</span>
+              <span className="detail-grid__mono">{task.id}</span>
               <span
                 className={`progress__status progress__status--${task.status}`}
                 data-status={task.status}

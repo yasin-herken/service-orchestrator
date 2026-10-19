@@ -1186,6 +1186,66 @@ fn plan_prepare_environment_keeps_dependency_order_for_builds_and_starts() {
 }
 
 #[test]
+fn plan_prepare_environment_composes_granular_git_steps() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("auth-service")])
+        .with_dependencies(false)
+        .with_git_checkout(false)
+        .with_git_pull(false);
+    let plan = h.app.plan_prepare_environment(&request).unwrap();
+
+    let git = plan
+        .phases
+        .iter()
+        .find(|phase| phase.kind == EnvironmentPhaseKind::GitSync)
+        .expect("a Git phase");
+    // Each participating repository contributes exactly one fetch step; the
+    // required library is included alongside the selected service.
+    assert!(git.steps.iter().all(|step| step.task == TaskKind::GitFetch));
+    let service_step = git
+        .steps
+        .iter()
+        .find(|step| step.service == Some(service("auth-service")))
+        .expect("a fetch step for the selected service");
+    assert_eq!(service_step.task, TaskKind::GitFetch);
+    assert!(git.steps.iter().any(|step| step.library.is_some()));
+}
+
+#[test]
+fn plan_prepare_environment_checks_health_without_starting_services() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("auth-service")])
+        .with_dependencies(false)
+        .with_sync(false)
+        .health_checks();
+    let plan = h.app.plan_prepare_environment(&request).unwrap();
+
+    let phases: BTreeSet<EnvironmentPhaseKind> = plan.phases.iter().map(|p| p.kind).collect();
+    assert!(phases.contains(&EnvironmentPhaseKind::HealthCheck));
+    assert!(!phases.contains(&EnvironmentPhaseKind::ServiceStart));
+    assert_eq!(plan.step_count, 1);
+    assert_eq!(plan.phases[0].steps[0].task, TaskKind::HealthCheck);
+}
+
+#[test]
+fn prepare_environment_rejects_health_checks_with_stop() {
+    let h = harness();
+    let request = PrepareEnvironmentRequest::new(workspace())
+        .with_services([service("auth-service")])
+        .with_dependencies(false)
+        .with_sync(false)
+        .stop()
+        .health_checks();
+    assert!(matches!(
+        h.app.prepare_environment(request).unwrap_err(),
+        ApplicationError::InvalidOperation { .. }
+    ));
+    assert!(h.tasks.workflows().is_empty());
+}
+
+#[test]
 fn a_restart_stops_before_rebuilding_and_restarts() {
     let h = harness();
     for id in [service("auth-service"), service("web-ui")] {

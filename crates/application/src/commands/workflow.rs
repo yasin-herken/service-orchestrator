@@ -472,77 +472,100 @@ impl Application {
         let mut requires_destructive_authorization = false;
 
         // -- Git synchronization ----------------------------------------------
-        let mut service_sync: BTreeMap<ServiceId, StepId> = BTreeMap::new();
-        let mut library_sync: BTreeMap<LibraryId, StepId> = BTreeMap::new();
-        let mut service_checkout: BTreeMap<ServiceId, StepId> = BTreeMap::new();
-        let mut library_checkout: BTreeMap<LibraryId, StepId> = BTreeMap::new();
+        let mut service_git: BTreeMap<ServiceId, StepId> = BTreeMap::new();
+        let mut library_git: BTreeMap<LibraryId, StepId> = BTreeMap::new();
 
         if request.sync {
-            for id in &resolved.resolved_services {
-                if let Some(parameters) = self.service_repository_parameters(workspace, id)? {
-                    let step = composer.add(
-                        TaskKind::GitSync,
-                        Vec::new(),
-                        Some(format!("sync {id}")),
-                        parameters,
-                        Some(id.clone()),
-                        None,
-                    );
-                    service_sync.insert(id.clone(), step);
-                }
-            }
-            for library in &resolved.libraries {
-                if let Some(parameters) = self.library_repository_parameters(workspace, library)? {
-                    let step = composer.add(
-                        TaskKind::GitSync,
-                        Vec::new(),
-                        Some(format!("sync {library}")),
-                        parameters,
-                        None,
-                        Some(library.clone()),
-                    );
-                    library_sync.insert(library.clone(), step);
-                }
-            }
-            if let Some(branch) = &request.branch {
+            if !request.git_fetch && !request.git_checkout && !request.git_pull {
+                warnings.push(
+                    "Git synchronization was requested but fetch, checkout, and pull are all disabled; no Git step was scheduled"
+                        .to_owned(),
+                );
+            } else if request.git_fetch && request.git_checkout && request.git_pull {
+                // Preserve the established synchronization contract: one
+                // `GitSync` step fetches, returns to the configured default
+                // branch, and fast-forwards. A branch override adds an explicit
+                // checkout afterwards, exactly as it did before granular
+                // controls existed.
                 for id in &resolved.resolved_services {
-                    let Some(sync) = service_sync.get(id).cloned() else {
-                        continue;
-                    };
-                    let Some(mut parameters) = self.service_repository_parameters(workspace, id)?
-                    else {
-                        continue;
-                    };
-                    parameters.insert(parameter::BRANCH.to_owned(), branch.to_string());
-                    let step = composer.add(
-                        TaskKind::GitCheckout,
-                        vec![sync],
-                        Some(format!("checkout {branch} for {id}")),
-                        parameters,
-                        Some(id.clone()),
-                        None,
-                    );
-                    service_checkout.insert(id.clone(), step);
+                    if let Some(parameters) = self.service_repository_parameters(workspace, id)? {
+                        let sync = composer.add(
+                            TaskKind::GitSync,
+                            Vec::new(),
+                            Some(format!("sync {id}")),
+                            parameters,
+                            Some(id.clone()),
+                            None,
+                        );
+                        let last = match &request.branch {
+                            Some(branch) => {
+                                let mut parameters = self
+                                    .service_repository_parameters(workspace, id)?
+                                    .expect("repository parameters were resolved");
+                                parameters.insert(parameter::BRANCH.to_owned(), branch.to_string());
+                                composer.add(
+                                    TaskKind::GitCheckout,
+                                    vec![sync],
+                                    Some(format!("checkout {branch} for {id}")),
+                                    parameters,
+                                    Some(id.clone()),
+                                    None,
+                                )
+                            }
+                            None => sync,
+                        };
+                        service_git.insert(id.clone(), last);
+                    }
                 }
                 for library in &resolved.libraries {
-                    let Some(sync) = library_sync.get(library).cloned() else {
-                        continue;
-                    };
-                    let Some(mut parameters) =
+                    if let Some(parameters) =
                         self.library_repository_parameters(workspace, library)?
-                    else {
-                        continue;
-                    };
-                    parameters.insert(parameter::BRANCH.to_owned(), branch.to_string());
-                    let step = composer.add(
-                        TaskKind::GitCheckout,
-                        vec![sync],
-                        Some(format!("checkout {branch} for {library}")),
-                        parameters,
-                        None,
-                        Some(library.clone()),
-                    );
-                    library_checkout.insert(library.clone(), step);
+                    {
+                        let sync = composer.add(
+                            TaskKind::GitSync,
+                            Vec::new(),
+                            Some(format!("sync {library}")),
+                            parameters,
+                            None,
+                            Some(library.clone()),
+                        );
+                        let last = match &request.branch {
+                            Some(branch) => {
+                                let mut parameters = self
+                                    .library_repository_parameters(workspace, library)?
+                                    .expect("repository parameters were resolved");
+                                parameters.insert(parameter::BRANCH.to_owned(), branch.to_string());
+                                composer.add(
+                                    TaskKind::GitCheckout,
+                                    vec![sync],
+                                    Some(format!("checkout {branch} for {library}")),
+                                    parameters,
+                                    None,
+                                    Some(library.clone()),
+                                )
+                            }
+                            None => sync,
+                        };
+                        library_git.insert(library.clone(), last);
+                    }
+                }
+            } else {
+                // A selective request composes the individual Git steps. The
+                // checkout target is the explicit branch or the repository's
+                // configured default branch; nothing is invented here.
+                for id in &resolved.resolved_services {
+                    if let Some(step) =
+                        self.compose_git_steps(&mut composer, workspace, request, id)?
+                    {
+                        service_git.insert(id.clone(), step);
+                    }
+                }
+                for library in &resolved.libraries {
+                    if let Some(step) =
+                        self.compose_library_git_steps(&mut composer, workspace, request, library)?
+                    {
+                        library_git.insert(library.clone(), step);
+                    }
                 }
             }
         }
@@ -562,10 +585,7 @@ impl Application {
                     continue;
                 }
                 let mut prerequisites = Vec::new();
-                if let Some(step) = library_checkout
-                    .get(library_id)
-                    .or_else(|| library_sync.get(library_id))
-                {
+                if let Some(step) = library_git.get(library_id) {
                     prerequisites.push(step.clone());
                 }
                 for dependency in &library.dependencies {
@@ -648,7 +668,7 @@ impl Application {
                     .service(id)
                     .expect("resolved services are configured");
                 let mut prerequisites = Vec::new();
-                if let Some(step) = service_checkout.get(id).or_else(|| service_sync.get(id)) {
+                if let Some(step) = service_git.get(id) {
                     prerequisites.push(step.clone());
                 }
                 for dependency in &service.dependencies {
@@ -687,7 +707,7 @@ impl Application {
                     continue;
                 }
                 let mut prerequisites = Vec::new();
-                if let Some(step) = service_checkout.get(id).or_else(|| service_sync.get(id)) {
+                if let Some(step) = service_git.get(id) {
                     prerequisites.push(step.clone());
                 }
                 if let Some(step) = migrate.get(id) {
@@ -779,6 +799,8 @@ impl Application {
         }
 
         // -- Startup and health ------------------------------------------------
+        let mut health_checked: BTreeSet<ServiceId> = BTreeSet::new();
+        let mut health_warned: BTreeSet<ServiceId> = BTreeSet::new();
         if request.start || request.restart {
             let restarting = request.restart;
             let mut start: BTreeMap<ServiceId, StepId> = BTreeMap::new();
@@ -847,7 +869,7 @@ impl Application {
                     }
                 }
             }
-            if request.wait_for_health {
+            if request.wait_for_health || request.health_checks {
                 for id in &resolved.resolved_services {
                     let Some(step) = start.get(id).cloned() else {
                         continue;
@@ -857,6 +879,12 @@ impl Application {
                         .service(id)
                         .expect("resolved services are configured");
                     if service.health_checks.is_empty() {
+                        if request.health_checks {
+                            warnings.push(format!(
+                                "service '{id}' has no configured health checks and was skipped"
+                            ));
+                            health_warned.insert(id.clone());
+                        }
                         continue;
                     }
                     // The health executor decodes its target from the step's
@@ -871,14 +899,47 @@ impl Application {
                         Some(id.clone()),
                         None,
                     );
+                    health_checked.insert(id.clone());
                 }
+            }
+        }
+
+        // Standalone health checks: requested independently of startup, for
+        // example the Control Center's "Health Check Only" action. Services
+        // already health-checked after startup are never checked twice.
+        if request.health_checks {
+            for id in &resolved.resolved_services {
+                if health_checked.contains(id) {
+                    continue;
+                }
+                let service = workspace
+                    .workspace
+                    .service(id)
+                    .expect("resolved services are configured");
+                if service.health_checks.is_empty() {
+                    if !health_warned.contains(id) {
+                        warnings.push(format!(
+                            "service '{id}' has no configured health checks and was skipped"
+                        ));
+                    }
+                    continue;
+                }
+                let target = self.service_runtime_target(workspace, service)?;
+                composer.add(
+                    TaskKind::HealthCheck,
+                    Vec::new(),
+                    Some(format!("health {id}")),
+                    target.to_parameters(),
+                    Some(id.clone()),
+                    None,
+                );
             }
         }
 
         Ok(EnvironmentComposition {
             composer,
             resolved,
-            target_branch: if request.sync {
+            target_branch: if request.sync && request.git_checkout {
                 request.branch.clone()
             } else {
                 None
@@ -886,6 +947,114 @@ impl Application {
             requires_destructive_authorization,
             warnings,
         })
+    }
+
+    /// Composes the granular Git steps for one service.
+    ///
+    /// Used only when the request disables at least one of fetch, checkout, or
+    /// pull; the all-enabled case keeps the established single `GitSync`
+    /// contract. The checkout target is the request branch, otherwise the
+    /// repository's configured default branch.
+    fn compose_git_steps(
+        &self,
+        composer: &mut EnvironmentComposer,
+        workspace: &ConfiguredWorkspace,
+        request: &PrepareEnvironmentRequest,
+        id: &ServiceId,
+    ) -> Result<Option<StepId>, ApplicationError> {
+        let Some(parameters) = self.service_repository_parameters(workspace, id)? else {
+            return Ok(None);
+        };
+        Ok(self.compose_repository_git_steps(
+            composer,
+            request,
+            parameters,
+            Some(id.clone()),
+            None,
+            id.as_str(),
+        ))
+    }
+
+    /// Composes the granular Git steps for one library.
+    fn compose_library_git_steps(
+        &self,
+        composer: &mut EnvironmentComposer,
+        workspace: &ConfiguredWorkspace,
+        request: &PrepareEnvironmentRequest,
+        id: &LibraryId,
+    ) -> Result<Option<StepId>, ApplicationError> {
+        let Some(parameters) = self.library_repository_parameters(workspace, id)? else {
+            return Ok(None);
+        };
+        Ok(self.compose_repository_git_steps(
+            composer,
+            request,
+            parameters,
+            None,
+            Some(id.clone()),
+            id.as_str(),
+        ))
+    }
+
+    /// Records the selected fetch/checkout/pull steps for one repository and
+    /// returns the last step, or `None` when no Git operation was selected.
+    fn compose_repository_git_steps(
+        &self,
+        composer: &mut EnvironmentComposer,
+        request: &PrepareEnvironmentRequest,
+        parameters: BTreeMap<String, String>,
+        service: Option<ServiceId>,
+        library: Option<LibraryId>,
+        name: &str,
+    ) -> Option<StepId> {
+        let mut last: Option<StepId> = None;
+
+        if request.git_fetch {
+            let step = composer.add(
+                TaskKind::GitFetch,
+                Vec::new(),
+                Some(format!("fetch {name}")),
+                parameters.clone(),
+                service.clone(),
+                library.clone(),
+            );
+            last = Some(step);
+        }
+
+        if request.git_checkout {
+            let branch = request
+                .branch
+                .as_ref()
+                .map(ToString::to_string)
+                .or_else(|| parameters.get(parameter::DEFAULT_BRANCH).cloned());
+            if let Some(branch) = branch {
+                let mut checkout_parameters = parameters.clone();
+                checkout_parameters.insert(parameter::BRANCH.to_owned(), branch.clone());
+                let step = composer.add(
+                    TaskKind::GitCheckout,
+                    last.iter().cloned().collect(),
+                    Some(format!("checkout {branch} for {name}")),
+                    checkout_parameters,
+                    service.clone(),
+                    library.clone(),
+                );
+                last = Some(step);
+            }
+        }
+
+        if request.git_pull {
+            let step = composer.add(
+                TaskKind::GitPull,
+                last.iter().cloned().collect(),
+                Some(format!("pull {name}")),
+                parameters,
+                service,
+                library,
+            );
+            last = Some(step);
+        }
+
+        last
     }
 
     /// Resolves the services selected by an environment request.
@@ -1102,6 +1271,11 @@ impl Application {
         if request.migration_preset.is_some() && !request.run_liquibase {
             return Err(ApplicationError::invalid_operation(
                 "a migration preset requires migration to be enabled",
+            ));
+        }
+        if request.health_checks && request.stop {
+            return Err(ApplicationError::invalid_operation(
+                "health checks cannot run in the same workflow as stopping services",
             ));
         }
         for id in &resolved.selected_services {

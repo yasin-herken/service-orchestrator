@@ -1,5 +1,6 @@
 /** Identifies a top-level screen in the application shell. */
 export type PageId =
+  | 'control-center'
   | 'dashboard'
   | 'services'
   | 'git'
@@ -52,6 +53,11 @@ export interface PageDefinition {
  * backed by the shared daemon (`tasks/018.md` §14, `tasks/021.md` §30).
  */
 export const PAGES: readonly PageDefinition[] = [
+  {
+    id: 'control-center',
+    label: 'Workspace Control Center',
+    title: 'Workspace Control Center',
+  },
   { id: 'dashboard', label: 'Dashboard', title: 'Dashboard' },
   { id: 'services', label: 'Services', title: 'Services' },
   { id: 'git', label: 'Git', title: 'Git' },

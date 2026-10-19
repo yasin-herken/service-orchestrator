@@ -79,13 +79,16 @@ describe('services list', () => {
   });
 
   it('shows an actionable error and retries on demand', async () => {
+    const user = userEvent.setup();
+    await renderApp();
+    const baselineCalls = mockDesktopApi.listServices.mock.calls.length;
+    // The default Control Center consumes the initial service listing; the
+    // Services screen's own request is the next one.
     mockDesktopApi.listServices.mockRejectedValueOnce({
       code: 'DAEMON_UNAVAILABLE',
       message: 'could not reach the daemon at /tmp/daemon.sock',
     });
 
-    const user = userEvent.setup();
-    await renderApp();
     await user.click(screen.getByRole('button', { name: 'Services' }));
 
     const alert = await screen.findByRole('alert');
@@ -94,7 +97,7 @@ describe('services list', () => {
 
     await user.click(within(alert).getByRole('button', { name: 'Retry' }));
     await screen.findByRole('table');
-    expect(mockDesktopApi.listServices).toHaveBeenCalledTimes(2);
+    expect(mockDesktopApi.listServices).toHaveBeenCalledTimes(baselineCalls + 2);
   });
 
   it('filters services by search text', async () => {

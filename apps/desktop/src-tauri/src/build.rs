@@ -151,6 +151,9 @@ fn build_environment_request(
         // The user selected exactly these services to build; do not fetch, do
         // not pull the dependency closure, do not migrate, do not start.
         sync: false,
+        git_fetch: false,
+        git_checkout: false,
+        git_pull: false,
         include_dependencies: false,
         build_libraries: false,
         run_liquibase: false,
@@ -161,6 +164,7 @@ fn build_environment_request(
         restart: false,
         stop: false,
         wait_for_health: true,
+        health_checks: false,
     }
 }
 
