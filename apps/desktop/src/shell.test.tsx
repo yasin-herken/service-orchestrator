@@ -26,6 +26,7 @@ describe('application shell', () => {
     await renderApp();
 
     for (const label of [
+      'Workspace Control Center',
       'Dashboard',
       'Services',
       'Git',
@@ -45,11 +46,16 @@ describe('application shell', () => {
       expect(screen.getByRole('button', { name: label })).toBeInTheDocument();
     }
 
-    expect(screen.getByRole('button', { name: 'Dashboard' })).toHaveAttribute(
-      'aria-current',
-      'page',
-    );
-    expect(screen.getByRole('heading', { name: 'Dashboard', level: 1 })).toBeInTheDocument();
+    expect(
+      screen.getByRole('button', { name: 'Workspace Control Center' }),
+    ).toHaveAttribute('aria-current', 'page');
+    expect(
+      screen.getByRole('heading', { name: 'Workspace Control Center', level: 1 }),
+    ).toBeInTheDocument();
+    // The Control Center is the default landing screen.
+    expect(
+      screen.getByRole('region', { name: 'Service selection' }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText('Active workspace')).toHaveValue('demo');
     expect(await screen.findByText('connected')).toBeInTheDocument();
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();

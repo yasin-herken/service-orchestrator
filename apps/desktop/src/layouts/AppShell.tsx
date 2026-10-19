@@ -6,6 +6,7 @@ import { BulkImportPage } from '../pages/BulkImportPage';
 import { BulkOperationsPage } from '../pages/BulkOperationsPage';
 import { BuildsPage } from '../pages/BuildsPage';
 import { ConfigurationPage } from '../pages/ConfigurationPage';
+import { ControlCenterPage } from '../pages/ControlCenterPage';
 import { DashboardPage } from '../pages/DashboardPage';
 import { GitPage } from '../pages/GitPage';
 import { HealthPage } from '../pages/HealthPage';
@@ -29,7 +30,7 @@ import type { NavIntent, PageId } from '../types/nav';
  * without parsing anything (`tasks/021.md` §30).
  */
 export function AppShell() {
-  const [page, setPage] = useState<PageId>('dashboard');
+  const [page, setPage] = useState<PageId>('control-center');
   const [intent, setIntent] = useState<NavIntent | null>(null);
 
   const navigate = (next: PageId, nextIntent?: NavIntent) => {
@@ -38,6 +39,7 @@ export function AppShell() {
   };
 
   const implemented: readonly PageId[] = [
+    'control-center',
     'dashboard',
     'services',
     'git',
@@ -60,6 +62,9 @@ export function AppShell() {
       <div className="app-shell__main">
         <Header page={page} />
         <main className="app-shell__content">
+          {page === 'control-center' ? (
+            <ControlCenterPage onNavigate={navigate} />
+          ) : null}
           {page === 'dashboard' ? <DashboardPage onNavigate={navigate} /> : null}
           {page === 'services' ? <ServicesPage onNavigate={navigate} /> : null}
           {page === 'git' ? <GitPage /> : null}
